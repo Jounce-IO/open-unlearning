@@ -140,6 +140,8 @@ def _compute_pre_compute_metrics_at_step(
         # We handle this recursively
         try:
             # Call the pre-compute metric at this step
+            # Remove tokenizer from kwargs if present to avoid duplicate argument
+            kwargs_clean = {k: v for k, v in kwargs.items() if k != "tokenizer"}
             pre_result = _call_metric_at_step(
                 metric=pre_metric,
                 logits=logits,
@@ -150,7 +152,7 @@ def _compute_pre_compute_metrics_at_step(
                 sample_prompt_len=sample_prompt_len,
                 metric_config=pre_metric_cfg,
                 sample_idx=sample_idx,
-                **kwargs
+                **kwargs_clean
             )
             
             # Structure result in the format expected by main metrics
@@ -777,6 +779,8 @@ def trajectory_metrics(model, **kwargs):
                             metric_cfg = metric_info["config"]
                             
                             # Call metric at this step
+                            # Remove tokenizer from kwargs if present to avoid duplicate argument
+                            kwargs_clean = {k: v for k, v in kwargs.items() if k != "tokenizer"}
                             result = _call_metric_at_step(
                                 metric=metric,
                                 logits=logits,
@@ -787,7 +791,7 @@ def trajectory_metrics(model, **kwargs):
                                 sample_prompt_len=sample_prompt_len,
                                 metric_config=metric_cfg,
                                 sample_idx=idx_str,
-                                **kwargs
+                                **kwargs_clean
                             )
                             
                             # Extract metric value from result
