@@ -95,8 +95,9 @@ def evaluate_probability(model, batch):
     avg_losses = losses / num_token_gt
     normalized_probs = torch.exp(-avg_losses)
 
-    avg_losses = avg_losses.cpu().numpy().tolist()
-    normalized_probs = normalized_probs.cpu().numpy().tolist()
+    # Convert to float32 before numpy conversion (BFloat16 not supported by numpy)
+    avg_losses = avg_losses.float().cpu().numpy().tolist()
+    normalized_probs = normalized_probs.float().cpu().numpy().tolist()
     return [
         {"prob": prob, "avg_loss": avg_loss}
         for prob, avg_loss in zip(normalized_probs, avg_losses)
