@@ -47,6 +47,8 @@ class TestGetSamplerFromModel:
         inner_model = Mock()
         inner_model.sampler = sampler
         model = Mock()
+        # Ensure model.sampler doesn't exist (Mock creates it by default)
+        delattr(model, 'sampler')
         model.model = inner_model
         
         result = _get_sampler_from_model(model)
@@ -56,7 +58,12 @@ class TestGetSamplerFromModel:
     def test_model_without_sampler_returns_none(self):
         """Test that model without sampler returns None."""
         model = Mock()
-        del model.sampler
+        # Remove sampler attribute if it exists
+        if hasattr(model, 'sampler'):
+            delattr(model, 'sampler')
+        # Remove model.model if it exists (Mock creates it by default)
+        if hasattr(model, 'model'):
+            delattr(model, 'model')
         
         result = _get_sampler_from_model(model)
         
@@ -186,8 +193,11 @@ class TestTrajectoryMetricsErrorHandling:
     def test_missing_sampler_raises_error(self):
         """Test that missing sampler raises ValueError."""
         model = Mock()
-        model.sampler = None
-        del model.model
+        # Remove sampler attribute
+        if hasattr(model, 'sampler'):
+            delattr(model, 'sampler')
+        if hasattr(model, 'model'):
+            delattr(model, 'model')
         
         kwargs = {
             "metrics": ["probability"],
@@ -196,8 +206,12 @@ class TestTrajectoryMetricsErrorHandling:
             "tokenizer": Mock(),
         }
         
-        with pytest.raises(ValueError):
-            trajectory_metrics(model, **kwargs)
+        # trajectory_metrics is wrapped in UnlearningMetric, access raw function
+        from evals.metrics.trajectory_metrics import trajectory_metrics
+        raw_fn = trajectory_metrics._metric_fn if hasattr(trajectory_metrics, '_metric_fn') else trajectory_metrics
+        
+        with pytest.raises(ValueError, match="Model does not have a sampler"):
+            raw_fn(model, **kwargs)
     
     def test_empty_metrics_list_raises_error(self):
         """Test that empty metrics list raises ValueError."""
@@ -211,8 +225,12 @@ class TestTrajectoryMetricsErrorHandling:
             "tokenizer": Mock(),
         }
         
+        # trajectory_metrics is wrapped in UnlearningMetric, access raw function
+        from evals.metrics.trajectory_metrics import trajectory_metrics
+        raw_fn = trajectory_metrics._metric_fn if hasattr(trajectory_metrics, '_metric_fn') else trajectory_metrics
+        
         with pytest.raises(ValueError, match="No metrics specified"):
-            trajectory_metrics(model, **kwargs)
+            raw_fn(model, **kwargs)
     
     def test_missing_tokenizer_raises_error(self):
         """Test that missing tokenizer raises ValueError."""
@@ -226,8 +244,12 @@ class TestTrajectoryMetricsErrorHandling:
             "tokenizer": None,
         }
         
+        # trajectory_metrics is wrapped in UnlearningMetric, access raw function
+        from evals.metrics.trajectory_metrics import trajectory_metrics
+        raw_fn = trajectory_metrics._metric_fn if hasattr(trajectory_metrics, '_metric_fn') else trajectory_metrics
+        
         with pytest.raises(ValueError, match="tokenizer is required"):
-            trajectory_metrics(model, **kwargs)
+            raw_fn(model, **kwargs)
 
 
 class TestTrajectoryMetricsIntegration:
@@ -250,8 +272,15 @@ class TestTrajectoryMetricsIntegration:
         fixation_steps = torch.randint(0, S, (1, full_len))
         
         # Mock sampler.sample to return SamplerOutput
-        from evals.metrics.base import SamplerOutput
-        sampler_output = SamplerOutput(
+        # SamplerOutput is from dllm, but we can create a simple mock
+        class MockSamplerOutput:
+            def __init__(self, sequences, histories, logits_history, fixation_steps):
+                self.sequences = sequences
+                self.histories = histories
+                self.logits_history = logits_history
+                self.fixation_steps = fixation_steps
+        
+        sampler_output = MockSamplerOutput(
             sequences=torch.randint(0, V, (1, full_len)),
             histories=None,
             logits_history=logits_history,

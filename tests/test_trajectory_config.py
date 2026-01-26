@@ -154,24 +154,24 @@ class TestConfigIntegration:
     
     def test_config_can_be_loaded_from_yaml(self):
         """Test that config can be loaded from YAML structure."""
-        # Simulate YAML structure
-        yaml_content = """
-handler: trajectory_metrics
-batch_size: 1
-metrics:
-  - probability
-  - exact_memorization
-trajectory_config:
-  logits_source: sampler
-  return_logits: true
-  return_fixation_steps: true
-  sampler_kwargs:
-    steps: 32
-    max_new_tokens: 64
-    temperature: 0.0
-"""
+        # Simulate YAML structure - use OmegaConf.create directly with dict
+        config_dict = {
+            "handler": "trajectory_metrics",
+            "batch_size": 1,
+            "metrics": ["probability", "exact_memorization"],
+            "trajectory_config": {
+                "logits_source": "sampler",
+                "return_logits": True,
+                "return_fixation_steps": True,
+                "sampler_kwargs": {
+                    "steps": 32,
+                    "max_new_tokens": 64,
+                    "temperature": 0.0,
+                },
+            },
+        }
         
-        config = OmegaConf.create(OmegaConf.load(yaml_content) if hasattr(OmegaConf, 'load') else OmegaConf.create(yaml_content))
+        config = OmegaConf.create(config_dict)
         
         assert config.handler == "trajectory_metrics"
         assert config.batch_size == 1
