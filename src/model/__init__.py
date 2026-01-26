@@ -124,6 +124,19 @@ def get_model(model_cfg: DictConfig):
     # Auto-wrap diffusion models to be compatible with AR-based metrics
     # (only if adapter is available from main dllm repo)
     if _DIFFUSION_ADAPTER_AVAILABLE:
+        # Add mask token for diffusion models (required by samplers)
+        from dllm.integrations.open_unlearning_adapter import is_diffusion_model
+        if is_diffusion_model(model):
+            if tokenizer.mask_token_id is None:
+                # Detect model type to use correct mask token
+                model_name = type(model).__name__.lower()
+                if 'llada' in model_name:
+                    tokenizer.add_special_tokens({"mask_token": "<|mdm_mask|>"})
+                    logger.info("Added mask_token '<|mdm_mask|>' for LLaDA model")
+                else:
+                    # Default mask token for other diffusion models
+                    tokenizer.add_special_tokens({"mask_token": "<|mask|>"})
+                    logger.info("Added default mask_token '<|mask|>' for diffusion model")
         diffusion_config = model_cfg.get("diffusion_adapter", None)
         model = wrap_model_if_diffusion(model, tokenizer, config=diffusion_config)
     
