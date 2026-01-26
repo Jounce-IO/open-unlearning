@@ -356,22 +356,19 @@ def _call_metric_at_step(
         em_score = (preds == labels).sum() / len(labels)
         return [{"score": em_score.item()}]
     
-    def _rouge_batch_fn(model, batch, tokenizer, sample_labels, sample_input_ids, sample_prompt_len, rouge_type="rougeL_f1", **kwargs):
-        """Compute ROUGE for a single batch by decoding logits to text."""
-        # Decode logits to text
-        # model is LogitModelWrapper, get logits from it
-        logits = model.logits  # [1, L, V]
-        
-        # Get predicted tokens via argmax
-        predicted_tokens = torch.argmax(logits, dim=-1)  # [1, L]
-        predicted_tokens = predicted_tokens[0]  # [L]
-        
-        # Decode generated text
+    def _handle_text_based_metric(logits, tokenizer, sample_labels, sample_input_ids, sample_prompt_len, metric_name, metric_config, **kwargs):
+        """
+        Generic handler for text-based metrics that require model.generate().
+        Decodes logits to text and computes text similarity metrics.
+        """
+        # Decode logits to text via argmax
+        if logits.dim() == 3:
+            logits = logits[0]  # [L, V]
+        predicted_tokens = torch.argmax(logits, dim=-1)  # [L]
         gen_text = tokenizer.decode(predicted_tokens.tolist(), skip_special_tokens=True)
         
         # Extract ground truth text from labels
         if sample_labels is not None:
-            # Extract only non-ignored tokens
             valid_labels = sample_labels[sample_labels != IGNORE_INDEX]
             if len(valid_labels) > 0:
                 ground_truth = tokenizer.decode(valid_labels.tolist(), skip_special_tokens=True)
@@ -380,46 +377,53 @@ def _call_metric_at_step(
         else:
             ground_truth = ""
         
-        # Compute ROUGE scores
-        scorer = rouge_scorer.RougeScorer(["rouge1", "rougeL"], use_stemmer=True)
-        rouge_scores = scorer.score(ground_truth, gen_text)
+        # Create a model that returns our decoded text when generate() is called
+        class TextFromLogitsModel:
+            def __init__(self, gen_text, tokenizer):
+                self.gen_text = gen_text
+                self.tokenizer = tokenizer
+                self.device = "cpu"
+            
+            def generate(self, input_ids, attention_mask=None, **kwargs):
+                # Return tokens that decode to our generated text
+                gen_tokens = self.tokenizer.encode(self.gen_text, return_tensors="pt", add_special_tokens=False)
+                # Concatenate with input_ids to match expected format
+                return torch.cat([input_ids, gen_tokens], dim=1)
         
-        # Return in format expected by trajectory metrics
-        result = {
-            "rouge1_recall": rouge_scores["rouge1"].recall,
-            "rougeL_f1": rouge_scores["rougeL"].fmeasure,
-            "rougeL_recall": rouge_scores["rougeL"].recall,
+        text_model = TextFromLogitsModel(gen_text, tokenizer)
+        
+        # Create batch in format expected by eval_text_similarity
+        text_batch = {
+            "input_ids": sample_input_ids.unsqueeze(0) if sample_input_ids is not None else torch.zeros(1, 1, dtype=torch.long, device=logits.device),
+            "labels": sample_labels.unsqueeze(0) if sample_labels is not None else None,
+            "attention_mask": torch.ones(1, sample_input_ids.shape[0] if sample_input_ids is not None else 1, dtype=torch.long, device=logits.device),
         }
         
-        # Extract the requested rouge_type
-        rouge_value = result.get(rouge_type, 0.0)
-        return [{"score": rouge_value}]
+        # Call eval_text_similarity which is used by most text-based metrics
+        from evals.metrics.utils import eval_text_similarity
+        generation_args = kwargs.get("generation_args", {})
+        result = eval_text_similarity(text_model, tokenizer, text_batch, generation_args)
+        
+        # Post-process result based on metric type
+        if metric_name == "rouge":
+            rouge_type = metric_config.get("rouge_type") or kwargs.get("rouge_type", "rougeL_f1")
+            if isinstance(result, list) and len(result) > 0:
+                result_dict = result[0]
+                if isinstance(result_dict, dict) and rouge_type in result_dict:
+                    return [{"score": result_dict[rouge_type]}]
+        
+        return result
     
     batch_function_map = {
         "probability": evaluate_probability,
         "exact_memorization": _exact_memorization_batch_fn,
-        "rouge": _rouge_batch_fn,
     }
     
-    # Try using batch function if available, otherwise use metric function
+    # Try using batch function if available
     if metric_name in batch_function_map:
         batch_fn = batch_function_map[metric_name]
         try:
-            # For rouge, pass additional args needed for text decoding
-            if metric_name == "rouge":
-                rouge_type = metric_config.get("rouge_type", "rougeL_f1")
-                result = batch_fn(
-                    model=model_wrapper,
-                    batch=batch,
-                    tokenizer=tokenizer,
-                    sample_labels=sample_labels,
-                    sample_input_ids=sample_input_ids,
-                    sample_prompt_len=sample_prompt_len,
-                    rouge_type=rouge_type,
-                    **{k: v for k, v in metric_kwargs.items() if k not in ["model", "batch"]}
-                )
-            else:
-                result = batch_fn(model=model_wrapper, batch=batch, **metric_kwargs)
+            result = batch_fn(model=model_wrapper, batch=batch, **metric_kwargs)
             return result
         except Exception as e:
             logger.warning(
@@ -432,17 +436,49 @@ def _call_metric_at_step(
     try:
         result = metric._metric_fn(**metric_kwargs)
         return result
-    except (KeyError, TypeError) as e:
-        # Metric expects data/collators (iterates over dataset)
-        # For now, log and return None - we can add support for these later
-        error_msg = str(e)
-        if "data" in error_msg or "collators" in error_msg or "dataloader" in error_msg.lower():
-            logger.warning(
-                f"Metric {metric_name} requires iterating over data, which is not supported "
-                f"for trajectory metrics at individual steps. Consider using the underlying "
-                f"batch function or add it to batch_function_map."
+    except (KeyError, TypeError, AttributeError) as e:
+        # Check if this is a text-based metric that needs generation
+        error_msg = str(e).lower()
+        needs_generation = (
+            "generate" in error_msg or
+            "data" in error_msg or 
+            "collators" in error_msg or
+            "dataloader" in error_msg or
+            "generation_args" in error_msg
+        )
+        
+        if needs_generation:
+            # This is likely a text-based metric that needs model.generate()
+            # Use generic text-based handler
+            logger.info(
+                f"Metric {metric_name} appears to be text-based (requires generation). "
+                f"Using generic text-based handler."
             )
-            return None
+            try:
+                # Get original logits (before reshaping)
+                original_logits = logits  # Already in [1, L, V] format
+                if original_logits.dim() == 3:
+                    original_logits = original_logits[0]  # [L, V]
+                original_logits = original_logits.transpose(0, 1)  # [V, L] for decode function
+                
+                result = _handle_text_based_metric(
+                    logits=original_logits,
+                    tokenizer=tokenizer,
+                    sample_labels=sample_labels,
+                    sample_input_ids=sample_input_ids,
+                    sample_prompt_len=sample_prompt_len,
+                    metric_name=metric_name,
+                    metric_config=metric_config,
+                    **kwargs
+                )
+                return result
+            except Exception as text_e:
+                logger.warning(
+                    f"Error in generic text-based handler for {metric_name}: {text_e}. "
+                    f"Original error: {e}",
+                    exc_info=True
+                )
+                return None
         else:
             logger.warning(
                 f"Error calling metric {metric_name} at step: {e}. "
@@ -450,11 +486,42 @@ def _call_metric_at_step(
             )
             raise
     except Exception as e:
-        logger.warning(
-            f"Error calling metric {metric_name} at step: {e}. "
-            f"This metric may require pre_compute metrics or other setup."
-        )
-        raise
+        # Check if it's a generation-related error
+        error_msg = str(e).lower()
+        if "generate" in error_msg or "generation" in error_msg:
+            logger.info(
+                f"Metric {metric_name} failed with generation error. "
+                f"Trying generic text-based handler."
+            )
+            try:
+                original_logits = logits
+                if original_logits.dim() == 3:
+                    original_logits = original_logits[0]  # [L, V]
+                original_logits = original_logits.transpose(0, 1)  # [V, L]
+                
+                result = _handle_text_based_metric(
+                    logits=original_logits,
+                    tokenizer=tokenizer,
+                    sample_labels=sample_labels,
+                    sample_input_ids=sample_input_ids,
+                    sample_prompt_len=sample_prompt_len,
+                    metric_name=metric_name,
+                    metric_config=metric_config,
+                    **kwargs
+                )
+                return result
+            except Exception as text_e:
+                logger.warning(
+                    f"Error in generic text-based handler for {metric_name}: {text_e}",
+                    exc_info=True
+                )
+                raise
+        else:
+            logger.warning(
+                f"Error calling metric {metric_name} at step: {e}. "
+                f"This metric may require pre_compute metrics or other setup."
+            )
+            raise
 
 
 @unlearning_metric(name="trajectory_metrics")
