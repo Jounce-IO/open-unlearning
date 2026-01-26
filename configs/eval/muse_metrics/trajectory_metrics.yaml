@@ -10,22 +10,21 @@ defaults:
 handler: trajectory_metrics
 batch_size: 1  # Start with 1 for testing (trajectory metrics can be memory-intensive)
 metrics:
-  - probability
-  - exact_memorization
-  # - rouge  # Uncomment to test text-based metrics
+  - rouge  # Only ROUGE for testing
 trajectory_config:
   logits_source: sampler  # Use sampler output
   return_logits: true  # Sampler config: store logits
   return_fixation_steps: true  # Sampler config: compute fixation steps
   sampler_kwargs:  # Additional sampler arguments
-    steps: 32  # Reduced for testing (use 128 for full evaluation)
+    steps: 16  # Reduced for testing
     temperature: 0.0
-    max_new_tokens: 64  # Reduced for testing
+    max_new_tokens: 32  # Reduced for testing
 datasets:
   MUSE_forget_knowmem:
     args:
       hf_args:
         path: muse-bench/MUSE-News  # Use News as default, can be overridden via CLI
+        split: "forget_qa[:5]"  # Limit to 5 samples for testing
       predict_with_generate: True
 collators:
   DataCollatorForSupervisedDataset:
