@@ -9,4 +9,5 @@ tokenizer_args:
   pretrained_model_name_or_path: "GSAI-ML/LLaDA-8B-Instruct"
   trust_remote_code: true
 
-template_args: {}
+template_args:
+  apply_chat_template: true
