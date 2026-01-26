@@ -251,15 +251,91 @@ def _compute_pre_compute_metrics_at_step(
     return pre_compute_results
 
 
+def _handle_text_based_metric(logits, tokenizer, sample_labels, sample_input_ids, sample_prompt_len, metric_name, metric_config, **kwargs):
+    """
+    Generic handler for text-based metrics that require model.generate().
+    Decodes logits to text and computes text similarity metrics.
+    
+    Args:
+        logits: [V, L] logits tensor
+        tokenizer: Tokenizer for decoding
+        sample_labels: Labels for ground truth extraction
+        sample_input_ids: Input IDs for the sample
+        sample_prompt_len: Length of prompt
+        metric_name: Name of the metric (e.g., "rouge")
+        metric_config: Config for this metric
+        **kwargs: Additional kwargs including generation_args
+    
+    Returns:
+        Metric result (list of dicts)
+    """
+    # Decode logits to text via argmax
+    if logits.dim() == 3:
+        logits = logits[0]  # [L, V]
+    predicted_tokens = torch.argmax(logits, dim=-1)  # [L]
+    gen_text = tokenizer.decode(predicted_tokens.tolist(), skip_special_tokens=True)
+    
+    # Extract ground truth text from labels
+    if sample_labels is not None:
+        valid_labels = sample_labels[sample_labels != IGNORE_INDEX]
+        if len(valid_labels) > 0:
+            ground_truth = tokenizer.decode(valid_labels.tolist(), skip_special_tokens=True)
+        else:
+            ground_truth = ""
+    else:
+        ground_truth = ""
+    
+    # Create a model that returns our decoded text when generate() is called
+    class TextFromLogitsModel:
+        def __init__(self, gen_text, tokenizer):
+            self.gen_text = gen_text
+            self.tokenizer = tokenizer
+            self.device = "cpu"
+        
+        def generate(self, input_ids, attention_mask=None, **kwargs):
+            # Return tokens that decode to our generated text
+            gen_tokens = self.tokenizer.encode(self.gen_text, return_tensors="pt", add_special_tokens=False)
+            # Concatenate with input_ids to match expected format
+            return torch.cat([input_ids, gen_tokens], dim=1)
+    
+    text_model = TextFromLogitsModel(gen_text, tokenizer)
+    
+    # Create batch in format expected by eval_text_similarity
+    text_batch = {
+        "input_ids": sample_input_ids.unsqueeze(0) if sample_input_ids is not None else torch.zeros(1, 1, dtype=torch.long, device=logits.device),
+        "labels": sample_labels.unsqueeze(0) if sample_labels is not None else None,
+        "attention_mask": torch.ones(1, sample_input_ids.shape[0] if sample_input_ids is not None else 1, dtype=torch.long, device=logits.device),
+    }
+    
+    # Call eval_text_similarity which is used by most text-based metrics
+    from evals.metrics.utils import eval_text_similarity
+    from omegaconf import OmegaConf
+    generation_args = kwargs.get("generation_args", {})
+    # Convert to OmegaConf if it's a dict (eval_text_similarity expects OmegaConf)
+    if isinstance(generation_args, dict) and not isinstance(generation_args, DictConfig):
+        generation_args = OmegaConf.create(generation_args)
+    result = eval_text_similarity(text_model, tokenizer, text_batch, generation_args)
+    
+    # Post-process result based on metric type
+    if metric_name == "rouge":
+        rouge_type = metric_config.get("rouge_type") or kwargs.get("rouge_type", "rougeL_f1")
+        if isinstance(result, list) and len(result) > 0:
+            result_dict = result[0]
+            if isinstance(result_dict, dict) and rouge_type in result_dict:
+                return [{"score": result_dict[rouge_type]}]
+    
+    return result
+
+
 def _call_metric_at_step(
     metric: Any,
     logits: torch.Tensor,
     batch_template: Dict[str, torch.Tensor],
-    tokenizer: Any,
-    sample_labels: Optional[torch.Tensor],
-    sample_input_ids: torch.Tensor,
-    sample_prompt_len: int,
-    metric_config: Dict[str, Any],
+    tokenizer: Any = None,
+    sample_labels: Optional[torch.Tensor] = None,
+    sample_input_ids: Optional[torch.Tensor] = None,
+    sample_prompt_len: int = 0,
+    metric_config: Optional[Dict[str, Any]] = None,
     sample_idx: Optional[str] = None,
     **kwargs
 ) -> Any:
@@ -270,17 +346,30 @@ def _call_metric_at_step(
         metric: UnlearningMetric object from registry
         logits: [V, L] logits at the step
         batch_template: Template batch dict
-        tokenizer: Tokenizer for text processing
+        tokenizer: Tokenizer for text processing (can also be in kwargs)
         sample_labels: Labels for the sample
         sample_input_ids: Input IDs for the sample
         sample_prompt_len: Length of prompt
         metric_config: Config for this specific metric (may include pre_compute, etc.)
         sample_idx: Index string for this sample (used for pre_compute value_by_index)
-        **kwargs: Additional kwargs to pass to metric
+        **kwargs: Additional kwargs to pass to metric (may contain tokenizer)
     
     Returns:
         Metric result (typically dict with metric values)
     """
+    # Extract tokenizer from kwargs if not provided explicitly (handle duplicate)
+    if tokenizer is None:
+        tokenizer = kwargs.pop("tokenizer", None)
+    else:
+        # Remove tokenizer from kwargs if present to avoid issues downstream
+        kwargs.pop("tokenizer", None)
+    
+    # Set defaults
+    if metric_config is None:
+        metric_config = {}
+    if sample_input_ids is None:
+        sample_input_ids = torch.zeros(1, dtype=torch.long)
+    
     # Ensure logits are in [B, L, V] format
     if logits.dim() == 2:
         # [V, L] -> transpose to [L, V] then add batch dim -> [1, L, V]
@@ -322,12 +411,14 @@ def _call_metric_at_step(
         )
     
     # Prepare kwargs for metric function
+    # Remove model and tokenizer from kwargs if present to avoid duplicates
+    kwargs_clean = {k: v for k, v in kwargs.items() if k not in ["model", "tokenizer"]}
     metric_kwargs = {
         "model": model_wrapper,
         "batch": batch,
         "tokenizer": tokenizer,
         **metric_config,  # Include metric-specific config (aggregator, etc., but not pre_compute)
-        **kwargs,  # Include any additional kwargs
+        **kwargs_clean,  # Include any additional kwargs (excluding model/tokenizer)
     }
     
     # Add pre_compute results if available
@@ -359,68 +450,6 @@ def _call_metric_at_step(
         em_score = (preds == labels).sum() / len(labels)
         return [{"score": em_score.item()}]
     
-    def _handle_text_based_metric(logits, tokenizer, sample_labels, sample_input_ids, sample_prompt_len, metric_name, metric_config, **kwargs):
-        """
-        Generic handler for text-based metrics that require model.generate().
-        Decodes logits to text and computes text similarity metrics.
-        """
-        # Decode logits to text via argmax
-        if logits.dim() == 3:
-            logits = logits[0]  # [L, V]
-        predicted_tokens = torch.argmax(logits, dim=-1)  # [L]
-        gen_text = tokenizer.decode(predicted_tokens.tolist(), skip_special_tokens=True)
-        
-        # Extract ground truth text from labels
-        if sample_labels is not None:
-            valid_labels = sample_labels[sample_labels != IGNORE_INDEX]
-            if len(valid_labels) > 0:
-                ground_truth = tokenizer.decode(valid_labels.tolist(), skip_special_tokens=True)
-            else:
-                ground_truth = ""
-        else:
-            ground_truth = ""
-        
-        # Create a model that returns our decoded text when generate() is called
-        class TextFromLogitsModel:
-            def __init__(self, gen_text, tokenizer):
-                self.gen_text = gen_text
-                self.tokenizer = tokenizer
-                self.device = "cpu"
-            
-            def generate(self, input_ids, attention_mask=None, **kwargs):
-                # Return tokens that decode to our generated text
-                gen_tokens = self.tokenizer.encode(self.gen_text, return_tensors="pt", add_special_tokens=False)
-                # Concatenate with input_ids to match expected format
-                return torch.cat([input_ids, gen_tokens], dim=1)
-        
-        text_model = TextFromLogitsModel(gen_text, tokenizer)
-        
-        # Create batch in format expected by eval_text_similarity
-        text_batch = {
-            "input_ids": sample_input_ids.unsqueeze(0) if sample_input_ids is not None else torch.zeros(1, 1, dtype=torch.long, device=logits.device),
-            "labels": sample_labels.unsqueeze(0) if sample_labels is not None else None,
-            "attention_mask": torch.ones(1, sample_input_ids.shape[0] if sample_input_ids is not None else 1, dtype=torch.long, device=logits.device),
-        }
-        
-        # Call eval_text_similarity which is used by most text-based metrics
-        from evals.metrics.utils import eval_text_similarity
-        from omegaconf import OmegaConf
-        generation_args = kwargs.get("generation_args", {})
-        # Convert to OmegaConf if it's a dict (eval_text_similarity expects OmegaConf)
-        if isinstance(generation_args, dict) and not isinstance(generation_args, DictConfig):
-            generation_args = OmegaConf.create(generation_args)
-        result = eval_text_similarity(text_model, tokenizer, text_batch, generation_args)
-        
-        # Post-process result based on metric type
-        if metric_name == "rouge":
-            rouge_type = metric_config.get("rouge_type") or kwargs.get("rouge_type", "rougeL_f1")
-            if isinstance(result, list) and len(result) > 0:
-                result_dict = result[0]
-                if isinstance(result_dict, dict) and rouge_type in result_dict:
-                    return [{"score": result_dict[rouge_type]}]
-        
-        return result
-    
     batch_function_map = {
         "probability": evaluate_probability,
         "exact_memorization": _exact_memorization_batch_fn,
@@ -430,7 +459,9 @@ def _call_metric_at_step(
     if metric_name in batch_function_map:
         batch_fn = batch_function_map[metric_name]
         try:
-            result = batch_fn(model=model_wrapper, batch=batch, **metric_kwargs)
+            # Batch functions like evaluate_probability only accept (model, batch)
+            # Don't pass any other kwargs
+            result = batch_fn(model=model_wrapper, batch=batch)
             return result
         except Exception as e:
             logger.warning(
@@ -765,6 +796,7 @@ def trajectory_metrics(model, **kwargs):
                 "input_ids": torch.zeros((1, L), dtype=torch.long, device=sample_input_ids.device),  # Dummy input_ids, not used by metrics
                 "labels": generated_labels.unsqueeze(0) if generated_labels is not None else None,
                 "attention_mask": torch.ones((1, L), dtype=torch.long, device=sample_input_ids.device),  # All positions valid
+                "index": torch.tensor([int(idx_str)], dtype=torch.long, device=sample_input_ids.device),  # Required by run_batchwise_evals
             }
             
             # Compute metrics for each trajectory type and step
