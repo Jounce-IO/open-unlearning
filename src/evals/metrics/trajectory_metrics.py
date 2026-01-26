@@ -404,7 +404,11 @@ def _call_metric_at_step(
         
         # Call eval_text_similarity which is used by most text-based metrics
         from evals.metrics.utils import eval_text_similarity
+        from omegaconf import OmegaConf
         generation_args = kwargs.get("generation_args", {})
+        # Convert to OmegaConf if it's a dict (eval_text_similarity expects OmegaConf)
+        if isinstance(generation_args, dict) and not isinstance(generation_args, DictConfig):
+            generation_args = OmegaConf.create(generation_args)
         result = eval_text_similarity(text_model, tokenizer, text_batch, generation_args)
         
         # Post-process result based on metric type
