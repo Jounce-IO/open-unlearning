@@ -228,11 +228,30 @@ def trajectory_metrics(model, **kwargs):
             sample_input_ids = input_ids[sample_idx]
             sample_prompt_len = prompt_lens[sample_idx]
             
+            # Extract only the generated portion of labels to match logits shape [V, L]
+            # Logits from trajectory only cover generated tokens (L), not the prompt
+            if sample_labels is not None:
+                # Extract generated region: from prompt_end to prompt_end + L
+                # evaluate_probability shifts labels by 1, so we need L+1 tokens
+                generated_labels = sample_labels[sample_prompt_len:sample_prompt_len + L + 1]
+                # Pad with IGNORE_INDEX if needed (shouldn't happen, but safety check)
+                if generated_labels.shape[0] < L + 1:
+                    padding = torch.full(
+                        (L + 1 - generated_labels.shape[0],),
+                        IGNORE_INDEX,
+                        dtype=generated_labels.dtype,
+                        device=generated_labels.device
+                    )
+                    generated_labels = torch.cat([generated_labels, padding])
+            else:
+                generated_labels = None
+            
             # Create batch template for logit metrics
+            # Use only generated portion to match logits shape
             batch_template = {
-                "input_ids": sample_input_ids.unsqueeze(0),
-                "labels": sample_labels.unsqueeze(0) if sample_labels is not None else None,
-                "attention_mask": attention_mask[sample_idx].unsqueeze(0) if attention_mask is not None else None,
+                "input_ids": torch.zeros((1, L), dtype=torch.long, device=sample_input_ids.device),  # Dummy input_ids, not used by metrics
+                "labels": generated_labels.unsqueeze(0) if generated_labels is not None else None,
+                "attention_mask": torch.ones((1, L), dtype=torch.long, device=sample_input_ids.device),  # All positions valid
             }
             
             # Compute metrics for each trajectory type and step
