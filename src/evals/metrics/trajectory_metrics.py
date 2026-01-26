@@ -10,6 +10,7 @@ import numpy as np
 import torch
 from typing import Dict, List, Any, Optional, Union
 from torch.utils.data import DataLoader
+from omegaconf import ListConfig, DictConfig
 
 from evals.metrics.base import unlearning_metric
 from evals.metrics.utils import (
@@ -572,12 +573,20 @@ def trajectory_metrics(model, **kwargs):
         raise ValueError("tokenizer is required for trajectory metrics")
     
     # Parse metrics config: support both list and dict formats
-    if isinstance(metrics_config, list):
+    # Handle OmegaConf ListConfig and DictConfig (from Hydra)
+    if isinstance(metrics_config, (list, ListConfig)):
         # Simple list of metric names: ["probability", "exact_memorization"]
+        # Convert ListConfig to list if needed
+        if isinstance(metrics_config, ListConfig):
+            metrics_config = list(metrics_config)
         metrics_to_compute = {name: {} for name in metrics_config}
-    elif isinstance(metrics_config, dict):
+    elif isinstance(metrics_config, (dict, DictConfig)):
         # Dict mapping metric names to configs: {"probability": {}, "truth_ratio": {"aggregator": "..."}}
-        metrics_to_compute = metrics_config
+        # Convert DictConfig to dict if needed
+        if isinstance(metrics_config, DictConfig):
+            metrics_to_compute = dict(metrics_config)
+        else:
+            metrics_to_compute = metrics_config
     else:
         raise ValueError(
             f"metrics must be a list or dict, got {type(metrics_config)}"
