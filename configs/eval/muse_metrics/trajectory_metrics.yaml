@@ -10,8 +10,10 @@ defaults:
 handler: trajectory_metrics
 batch_size: 1  # Start with 1 for testing (trajectory metrics can be memory-intensive)
 metrics:
-  rouge:  # Only ROUGE for testing
-    rouge_type: rougeL_f1  # Default ROUGE type
+  - probability  # Logit-based metric
+  - rouge  # Text-based metric
+  # Config for rouge (when using list format, set via metric_config in code)
+  # rouge_type defaults to rougeL_f1 if not specified
 trajectory_config:
   logits_source: sampler  # Use sampler output
   return_logits: true  # Sampler config: store logits
