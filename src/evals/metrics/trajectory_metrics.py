@@ -2,22 +2,22 @@
 Trajectory-based metrics for dLLM unlearning evaluation.
 
 This module computes metrics at each diffusion step across three trajectory types
-(steps, fixation, ratio), supporting both logit-based and text-based metrics.
+(steps, fixation, ratio), supporting any metric from the open-unlearning framework.
 """
 
 import logging
 import numpy as np
 import torch
-from typing import Dict, List, Any, Optional
+from typing import Dict, List, Any, Optional, Union
 from torch.utils.data import DataLoader
 
 from evals.metrics.base import unlearning_metric
 from evals.metrics.utils import (
-    aggregate_to_1D,
     evaluate_probability,
-    eval_text_similarity,
     tokenwise_vocab_logprobs,
+    IGNORE_INDEX,
 )
+from rouge_score import rouge_scorer
 from evals.metrics.trajectory_utils import (
     stack_logits_history,
     compute_trajectories,
@@ -25,6 +25,7 @@ from evals.metrics.trajectory_utils import (
     decode_logits_to_text,
 )
 from evals.metrics.trajectory_adapters import (
+    LogitModelWrapper,
     compute_logit_metric_at_step,
     compute_text_metric_at_step,
 )
@@ -52,23 +53,408 @@ def _get_sampler_from_model(model) -> Optional[Any]:
     return None
 
 
-def _is_logit_based_metric(metric_name: str) -> bool:
-    """Check if a metric is logit-based or text-based."""
-    logit_based_metrics = {
-        "probability",
-        "exact_memorization",
-        "extraction_strength",
-    }
-    return metric_name in logit_based_metrics
+def _get_metric_from_registry(metric_name: str):
+    """Get metric from registry by name."""
+    # Import here to avoid circular import
+    from evals.metrics import METRICS_REGISTRY
+    
+    metric = METRICS_REGISTRY.get(metric_name)
+    if metric is None:
+        raise ValueError(
+            f"Metric '{metric_name}' not found in registry. "
+            f"Available metrics: {list(METRICS_REGISTRY.keys())}"
+        )
+    return metric
 
 
-def _is_text_based_metric(metric_name: str) -> bool:
-    """Check if a metric is text-based."""
-    text_based_metrics = {
-        "rouge",
-        "classifier_prob",
+def _compute_pre_compute_metrics_at_step(
+    pre_compute_config: Dict[str, Any],
+    logits: torch.Tensor,
+    batch_template: Dict[str, torch.Tensor],
+    tokenizer: Any,
+    sample_labels: Optional[torch.Tensor],
+    sample_input_ids: torch.Tensor,
+    sample_prompt_len: int,
+    sample_idx: str,
+    **kwargs
+) -> Dict[str, Any]:
+    """
+    Compute pre-compute metrics at a specific trajectory step.
+    
+    Args:
+        pre_compute_config: Config dict mapping pre_compute metric names to their configs
+            Example: {"forget_Q_A_PARA_Prob": {"access_key": "correct", ...}}
+        logits: [V, L] logits at the step
+        batch_template: Template batch dict
+        tokenizer: Tokenizer for text processing
+        sample_labels: Labels for the sample
+        sample_input_ids: Input IDs for the sample
+        sample_prompt_len: Length of prompt
+        sample_idx: Index string for this sample
+        **kwargs: Additional kwargs to pass to pre_compute metrics
+    
+    Returns:
+        Dict mapping access_key (or metric name) to metric results:
+        {
+            "correct": {"agg_value": ..., "value_by_index": {sample_idx: {...}}},
+            "wrong": {"agg_value": ..., "value_by_index": {sample_idx: {...}}}
+        }
+    """
+    pre_compute_results = {}
+    
+    for pre_metric_name, pre_metric_cfg in pre_compute_config.items():
+        # Get access key (defaults to metric name)
+        access_key = pre_metric_cfg.get("access_key", pre_metric_name)
+        
+        # Load pre-compute metric from registry
+        # Import here to avoid circular import
+        from evals.metrics import METRICS_REGISTRY
+        
+        # Try multiple strategies:
+        # 1. pre_metric_name is the handler name
+        # 2. pre_metric_cfg has a "handler" field
+        # 3. pre_metric_name matches a registered metric
+        pre_metric = None
+        handler_name = None
+        
+        # Strategy 1: Check if pre_metric_name is a registered metric
+        if pre_metric_name in METRICS_REGISTRY:
+            pre_metric = METRICS_REGISTRY[pre_metric_name]
+            handler_name = pre_metric_name
+        # Strategy 2: Check if pre_metric_cfg has a handler field
+        elif isinstance(pre_metric_cfg, dict) and "handler" in pre_metric_cfg:
+            handler_name = pre_metric_cfg["handler"]
+            if handler_name in METRICS_REGISTRY:
+                pre_metric = METRICS_REGISTRY[handler_name]
+        
+        if pre_metric is None:
+            raise ValueError(
+                f"Pre-compute metric '{pre_metric_name}' not found in registry. "
+                f"Tried handler: {handler_name}. "
+                f"Available metrics: {list(METRICS_REGISTRY.keys())}"
+            )
+        
+        # Compute pre-compute metric at this step
+        # Note: Pre-compute metrics might have their own pre_compute requirements
+        # We handle this recursively
+        try:
+            # Call the pre-compute metric at this step
+            pre_result = _call_metric_at_step(
+                metric=pre_metric,
+                logits=logits,
+                batch_template=batch_template,
+                tokenizer=tokenizer,
+                sample_labels=sample_labels,
+                sample_input_ids=sample_input_ids,
+                sample_prompt_len=sample_prompt_len,
+                metric_config=pre_metric_cfg,
+                sample_idx=sample_idx,
+                **kwargs
+            )
+            
+            # Structure result in the format expected by main metrics
+            # Main metrics expect: {"agg_value": ..., "value_by_index": {idx: {...}}}
+            if isinstance(pre_result, dict):
+                if "value_by_index" in pre_result:
+                    # Already in correct format, but ensure sample_idx is present
+                    value_by_index = pre_result["value_by_index"]
+                    if sample_idx not in value_by_index:
+                        # Extract value from result and add to value_by_index
+                        if "agg_value" in pre_result:
+                            value_by_index[sample_idx] = {"prob": pre_result["agg_value"]}
+                        elif len(value_by_index) > 0:
+                            # Use first value as template
+                            first_idx = list(value_by_index.keys())[0]
+                            value_by_index[sample_idx] = value_by_index[first_idx].copy()
+                elif "agg_value" in pre_result:
+                    # Create value_by_index with single entry
+                    value_by_index = {sample_idx: {"prob": pre_result["agg_value"]}}
+                    pre_result["value_by_index"] = value_by_index
+                else:
+                    # Try to extract value from result
+                    value = None
+                    for key in ["prob", "score", "value"]:
+                        if key in pre_result:
+                            value = pre_result[key]
+                            break
+                    if value is None:
+                        # Use first numeric value
+                        for key, val in pre_result.items():
+                            if isinstance(val, (int, float, np.number)):
+                                value = float(val)
+                                break
+                    if value is not None:
+                        value_by_index = {sample_idx: {"prob": value}}
+                        pre_result = {
+                            "agg_value": value,
+                            "value_by_index": value_by_index,
+                        }
+                    else:
+                        logger.warning(
+                            f"Could not extract value from pre-compute metric {pre_metric_name} result: {pre_result}"
+                        )
+                        pre_result = {
+                            "agg_value": None,
+                            "value_by_index": {sample_idx: {"prob": None}},
+                        }
+            elif isinstance(pre_result, list) and len(pre_result) > 0:
+                # List format - extract first result (e.g., from evaluate_probability)
+                result_dict = pre_result[0] if isinstance(pre_result[0], dict) else {}
+                # Preserve all fields from result_dict (e.g., prob, avg_loss)
+                value = None
+                for key in ["prob", "score", "value"]:
+                    if key in result_dict:
+                        value = result_dict[key]
+                        break
+                if value is None:
+                    # Use first numeric value
+                    for key, val in result_dict.items():
+                        if isinstance(val, (int, float, np.number)):
+                            value = float(val)
+                            break
+                if value is not None:
+                    # Preserve all fields from result_dict in value_by_index
+                    pre_result = {
+                        "agg_value": value,
+                        "value_by_index": {sample_idx: result_dict.copy()},
+                    }
+                else:
+                    pre_result = {
+                        "agg_value": None,
+                        "value_by_index": {sample_idx: {"prob": None}},
+                    }
+            else:
+                logger.warning(
+                    f"Unexpected pre-compute result format for {pre_metric_name}: {type(pre_result)}"
+                )
+                pre_result = {
+                    "agg_value": None,
+                    "value_by_index": {sample_idx: {"prob": None}},
+                }
+            
+            pre_compute_results[access_key] = pre_result
+            
+        except Exception as e:
+            logger.warning(
+                f"Error computing pre-compute metric {pre_metric_name} at step: {e}",
+                exc_info=True
+            )
+            # Return None result so main metric can handle it
+            pre_compute_results[access_key] = {
+                "agg_value": None,
+                "value_by_index": {sample_idx: {"prob": None}},
+            }
+    
+    return pre_compute_results
+
+
+def _call_metric_at_step(
+    metric: Any,
+    logits: torch.Tensor,
+    batch_template: Dict[str, torch.Tensor],
+    tokenizer: Any,
+    sample_labels: Optional[torch.Tensor],
+    sample_input_ids: torch.Tensor,
+    sample_prompt_len: int,
+    metric_config: Dict[str, Any],
+    sample_idx: Optional[str] = None,
+    **kwargs
+) -> Any:
+    """
+    Call a metric function at a specific trajectory step.
+    
+    Args:
+        metric: UnlearningMetric object from registry
+        logits: [V, L] logits at the step
+        batch_template: Template batch dict
+        tokenizer: Tokenizer for text processing
+        sample_labels: Labels for the sample
+        sample_input_ids: Input IDs for the sample
+        sample_prompt_len: Length of prompt
+        metric_config: Config for this specific metric (may include pre_compute, etc.)
+        sample_idx: Index string for this sample (used for pre_compute value_by_index)
+        **kwargs: Additional kwargs to pass to metric
+    
+    Returns:
+        Metric result (typically dict with metric values)
+    """
+    # Ensure logits are in [B, L, V] format
+    if logits.dim() == 2:
+        # [V, L] -> transpose to [L, V] then add batch dim -> [1, L, V]
+        logits = logits.transpose(0, 1).unsqueeze(0)
+    elif logits.dim() == 3 and logits.shape[0] == 1:
+        # [1, L, V] - already correct
+        pass
+    else:
+        raise ValueError(f"Unexpected logits shape: {logits.shape}")
+    
+    # Create model wrapper
+    device = logits.device
+    model_wrapper = LogitModelWrapper(logits, device)
+    
+    # Prepare batch
+    batch = {}
+    for key, value in batch_template.items():
+        if isinstance(value, torch.Tensor):
+            batch[key] = value.to(device)
+        else:
+            batch[key] = value
+    
+    # Handle pre_compute metrics if present
+    pre_compute_config = metric_config.pop("pre_compute", {})
+    pre_compute_results = {}
+    if pre_compute_config:
+        if sample_idx is None:
+            sample_idx = "0"  # Default index
+        pre_compute_results = _compute_pre_compute_metrics_at_step(
+            pre_compute_config=pre_compute_config,
+            logits=logits,
+            batch_template=batch_template,
+            tokenizer=tokenizer,
+            sample_labels=sample_labels,
+            sample_input_ids=sample_input_ids,
+            sample_prompt_len=sample_prompt_len,
+            sample_idx=sample_idx,
+            **kwargs
+        )
+    
+    # Prepare kwargs for metric function
+    metric_kwargs = {
+        "model": model_wrapper,
+        "batch": batch,
+        "tokenizer": tokenizer,
+        **metric_config,  # Include metric-specific config (aggregator, etc., but not pre_compute)
+        **kwargs,  # Include any additional kwargs
     }
-    return metric_name in text_based_metrics
+    
+    # Add pre_compute results if available
+    if pre_compute_results:
+        metric_kwargs["pre_compute"] = pre_compute_results
+    
+    # Call the metric's underlying function
+    # Note: We call _metric_fn directly, not evaluate(), because:
+    # 1. We're computing at a single step, not iterating over data
+    # 2. We've already prepared the model wrapper and batch
+    # 3. Pre-compute metrics would need to be computed at each step separately
+    
+    # Some metrics iterate over data (like `probability`), so we need to use
+    # their underlying batch functions instead. Map known metrics to their batch functions.
+    metric_name = metric.name
+    
+    def _exact_memorization_batch_fn(model, batch, **kwargs):
+        """Compute exact memorization for a single batch."""
+        log_probs_batch, labels_batch = tokenwise_vocab_logprobs(
+            model, batch, grad=False, return_labels=True
+        )
+        if len(log_probs_batch) == 0 or len(labels_batch) == 0:
+            return [{"score": None}]
+        log_probs = log_probs_batch[0]
+        labels = labels_batch[0]
+        if len(labels) == 0:
+            return [{"score": None}]
+        preds = torch.argmax(log_probs, dim=-1)
+        em_score = (preds == labels).sum() / len(labels)
+        return [{"score": em_score.item()}]
+    
+    def _rouge_batch_fn(model, batch, tokenizer, sample_labels, sample_input_ids, sample_prompt_len, rouge_type="rougeL_f1", **kwargs):
+        """Compute ROUGE for a single batch by decoding logits to text."""
+        # Decode logits to text
+        # model is LogitModelWrapper, get logits from it
+        logits = model.logits  # [1, L, V]
+        
+        # Get predicted tokens via argmax
+        predicted_tokens = torch.argmax(logits, dim=-1)  # [1, L]
+        predicted_tokens = predicted_tokens[0]  # [L]
+        
+        # Decode generated text
+        gen_text = tokenizer.decode(predicted_tokens.tolist(), skip_special_tokens=True)
+        
+        # Extract ground truth text from labels
+        if sample_labels is not None:
+            # Extract only non-ignored tokens
+            valid_labels = sample_labels[sample_labels != IGNORE_INDEX]
+            if len(valid_labels) > 0:
+                ground_truth = tokenizer.decode(valid_labels.tolist(), skip_special_tokens=True)
+            else:
+                ground_truth = ""
+        else:
+            ground_truth = ""
+        
+        # Compute ROUGE scores
+        scorer = rouge_scorer.RougeScorer(["rouge1", "rougeL"], use_stemmer=True)
+        rouge_scores = scorer.score(ground_truth, gen_text)
+        
+        # Return in format expected by trajectory metrics
+        result = {
+            "rouge1_recall": rouge_scores["rouge1"].recall,
+            "rougeL_f1": rouge_scores["rougeL"].fmeasure,
+            "rougeL_recall": rouge_scores["rougeL"].recall,
+        }
+        
+        # Extract the requested rouge_type
+        rouge_value = result.get(rouge_type, 0.0)
+        return [{"score": rouge_value}]
+    
+    batch_function_map = {
+        "probability": evaluate_probability,
+        "exact_memorization": _exact_memorization_batch_fn,
+        "rouge": _rouge_batch_fn,
+    }
+    
+    # Try using batch function if available, otherwise use metric function
+    if metric_name in batch_function_map:
+        batch_fn = batch_function_map[metric_name]
+        try:
+            # For rouge, pass additional args needed for text decoding
+            if metric_name == "rouge":
+                rouge_type = metric_config.get("rouge_type", "rougeL_f1")
+                result = batch_fn(
+                    model=model_wrapper,
+                    batch=batch,
+                    tokenizer=tokenizer,
+                    sample_labels=sample_labels,
+                    sample_input_ids=sample_input_ids,
+                    sample_prompt_len=sample_prompt_len,
+                    rouge_type=rouge_type,
+                    **{k: v for k, v in metric_kwargs.items() if k not in ["model", "batch"]}
+                )
+            else:
+                result = batch_fn(model=model_wrapper, batch=batch, **metric_kwargs)
+            return result
+        except Exception as e:
+            logger.warning(
+                f"Error calling batch function for {metric_name}: {e}. "
+                f"Falling back to metric function.",
+                exc_info=True
+            )
+    
+    # Try calling the metric function directly
+    try:
+        result = metric._metric_fn(**metric_kwargs)
+        return result
+    except (KeyError, TypeError) as e:
+        # Metric expects data/collators (iterates over dataset)
+        # For now, log and return None - we can add support for these later
+        error_msg = str(e)
+        if "data" in error_msg or "collators" in error_msg or "dataloader" in error_msg.lower():
+            logger.warning(
+                f"Metric {metric_name} requires iterating over data, which is not supported "
+                f"for trajectory metrics at individual steps. Consider using the underlying "
+                f"batch function or add it to batch_function_map."
+            )
+            return None
+        else:
+            logger.warning(
+                f"Error calling metric {metric_name} at step: {e}. "
+                f"This metric may require pre_compute metrics or other setup."
+            )
+            raise
+    except Exception as e:
+        logger.warning(
+            f"Error calling metric {metric_name} at step: {e}. "
+            f"This metric may require pre_compute metrics or other setup."
+        )
+        raise
 
 
 @unlearning_metric(name="trajectory_metrics")
@@ -84,7 +470,10 @@ def trajectory_metrics(model, **kwargs):
     5. Returns results organized by trajectory, step, and metric
     
     Config structure:
-    - metrics: list of metric names from registry to compute
+    - metrics: list of metric names OR dict mapping metric names to configs
+      Examples:
+        - ["probability", "exact_memorization"]  # Simple list
+        - {"probability": {}, "truth_ratio": {"aggregator": "closer_to_1_better"}}  # With configs
     - trajectory_config: config for trajectory computation
       - logits_source: "sampler" (default) or "external"
       - return_logits: true  # Sampler config
@@ -94,9 +483,13 @@ def trajectory_metrics(model, **kwargs):
     - batch_size: batch size for evaluation
     - tokenizer: tokenizer for text processing
     - generation_args: args for text generation (for text-based metrics)
+    
+    Note: Metrics that require pre_compute (like truth_ratio) will need their
+    pre_compute metrics to be computed at each step. This is handled automatically
+    if pre_compute configs are provided in the metric configs.
     """
     # Extract config
-    metrics_to_compute = kwargs.get("metrics", [])
+    metrics_config = kwargs.get("metrics", [])
     trajectory_config = kwargs.get("trajectory_config", {})
     logits_source = trajectory_config.get("logits_source", "sampler")
     data = kwargs.get("data")
@@ -105,11 +498,36 @@ def trajectory_metrics(model, **kwargs):
     tokenizer = kwargs.get("tokenizer")
     generation_args = kwargs.get("generation_args", {})
     
-    if not metrics_to_compute:
+    if not metrics_config:
         raise ValueError("No metrics specified in config")
     
     if not tokenizer:
         raise ValueError("tokenizer is required for trajectory metrics")
+    
+    # Parse metrics config: support both list and dict formats
+    if isinstance(metrics_config, list):
+        # Simple list of metric names: ["probability", "exact_memorization"]
+        metrics_to_compute = {name: {} for name in metrics_config}
+    elif isinstance(metrics_config, dict):
+        # Dict mapping metric names to configs: {"probability": {}, "truth_ratio": {"aggregator": "..."}}
+        metrics_to_compute = metrics_config
+    else:
+        raise ValueError(
+            f"metrics must be a list or dict, got {type(metrics_config)}"
+        )
+    
+    # Load metrics from registry
+    loaded_metrics = {}
+    for metric_name, metric_cfg in metrics_to_compute.items():
+        try:
+            metric = _get_metric_from_registry(metric_name)
+            loaded_metrics[metric_name] = {
+                "metric": metric,
+                "config": metric_cfg,
+            }
+        except ValueError as e:
+            logger.error(f"Failed to load metric '{metric_name}': {e}")
+            raise
     
     # Create dataloader
     dataloader = DataLoader(data, batch_size=batch_size, collate_fn=collator)
@@ -277,40 +695,63 @@ def trajectory_metrics(model, **kwargs):
                     logits = extract_logits_at_step(trajectory, step)  # [V, L]
                     
                     # Compute each requested metric
-                    for metric_name in metrics_to_compute:
+                    for metric_name, metric_info in loaded_metrics.items():
                         try:
-                            if _is_logit_based_metric(metric_name):
-                                # Get metric function from registry or utils
-                                if metric_name == "probability":
-                                    metric_fn = evaluate_probability
-                                elif metric_name == "exact_memorization":
-                                    # Use tokenwise_vocab_logprobs helper
-                                    def _exact_mem_fn(model, batch, **kwargs):
-                                        log_probs_batch, labels_batch = tokenwise_vocab_logprobs(
-                                            model, batch, grad=False, return_labels=True
-                                        )
-                                        if len(log_probs_batch) == 0 or len(labels_batch) == 0:
-                                            return [{"score": None}]
-                                        log_probs = log_probs_batch[0]
-                                        labels = labels_batch[0]
-                                        if len(labels) == 0:
-                                            return [{"score": None}]
-                                        preds = torch.argmax(log_probs, dim=-1)
-                                        em_score = (preds == labels).sum() / len(labels)
-                                        return [{"score": em_score.item()}]
-                                    metric_fn = _exact_mem_fn
+                            metric = metric_info["metric"]
+                            metric_cfg = metric_info["config"]
+                            
+                            # Call metric at this step
+                            result = _call_metric_at_step(
+                                metric=metric,
+                                logits=logits,
+                                batch_template=batch_template,
+                                tokenizer=tokenizer,
+                                sample_labels=sample_labels,
+                                sample_input_ids=sample_input_ids,
+                                sample_prompt_len=sample_prompt_len,
+                                metric_config=metric_cfg,
+                                sample_idx=idx_str,
+                                **kwargs
+                            )
+                            
+                            # Extract metric value from result
+                            # Handle different result formats
+                            if isinstance(result, dict):
+                                # Try common keys
+                                if "agg_value" in result:
+                                    step_results[metric_name] = result["agg_value"]
+                                elif "value_by_index" in result:
+                                    # Extract value from first index
+                                    value_by_index = result["value_by_index"]
+                                    if value_by_index:
+                                        first_idx = list(value_by_index.keys())[0]
+                                        first_value = value_by_index[first_idx]
+                                        # Extract numeric value from first_value dict
+                                        if isinstance(first_value, dict):
+                                            for key in ["prob", "score", "value"]:
+                                                if key in first_value:
+                                                    step_results[metric_name] = first_value[key]
+                                                    break
+                                            else:
+                                                # Use first numeric value
+                                                for key, value in first_value.items():
+                                                    if isinstance(value, (int, float, np.number)):
+                                                        step_results[metric_name] = float(value)
+                                                        break
+                                elif "prob" in result:
+                                    step_results[metric_name] = result["prob"]
+                                elif "score" in result:
+                                    step_results[metric_name] = result["score"]
                                 else:
-                                    logger.warning(f"Unknown logit-based metric: {metric_name}")
-                                    continue
-                                
-                                result = compute_logit_metric_at_step(
-                                    metric_fn, logits, batch_template
-                                )
-                                
-                                # Extract metric value from result
-                                if isinstance(result, list) and len(result) > 0:
-                                    result_dict = result[0]
-                                    # Extract the main metric value
+                                    # Use first numeric value
+                                    for key, value in result.items():
+                                        if isinstance(value, (int, float, np.number)):
+                                            step_results[metric_name] = float(value)
+                                            break
+                            elif isinstance(result, list) and len(result) > 0:
+                                # List of dicts (common format)
+                                result_dict = result[0]
+                                if isinstance(result_dict, dict):
                                     if "prob" in result_dict:
                                         step_results[metric_name] = result_dict["prob"]
                                     elif "score" in result_dict:
@@ -318,67 +759,23 @@ def trajectory_metrics(model, **kwargs):
                                     else:
                                         # Use first numeric value
                                         for key, value in result_dict.items():
-                                            if isinstance(value, (int, float)):
-                                                step_results[metric_name] = value
+                                            if isinstance(value, (int, float, np.number)):
+                                                step_results[metric_name] = float(value)
                                                 break
-                            
-                            elif _is_text_based_metric(metric_name):
-                                # Decode logits to text
-                                texts = decode_logits_to_text(
-                                    logits, tokenizer, sample_input_ids, sample_prompt_len
-                                )
-                                
-                                # Get ground truth text
-                                if sample_labels is not None:
-                                    # Extract ground truth from labels
-                                    gt_tokens = sample_labels[sample_labels != IGNORE_INDEX]
-                                    gt_text = tokenizer.decode(gt_tokens.tolist(), skip_special_tokens=True)
-                                    ground_truths = [gt_text]
-                                else:
-                                    ground_truths = [""]  # No ground truth available
-                                
-                                if metric_name == "rouge":
-                                    # Compute ROUGE directly from decoded text
-                                    try:
-                                        from rouge_score import rouge_scorer
-                                    except ImportError:
-                                        logger.warning("rouge_score not available, skipping ROUGE metric")
-                                        continue
-                                    scorer = rouge_scorer.RougeScorer(["rouge1", "rougeL"], use_stemmer=True)
-                                    
-                                    gen_text = texts[0] if texts else ""
-                                    gt_text = ground_truths[0] if ground_truths else ""
-                                    
-                                    rouge_scores = scorer.score(gt_text, gen_text)
-                                    
-                                    # Extract ROUGE metric (default to rougeL_recall)
-                                    rouge_type = kwargs.get("rouge_type", "rougeL_recall")
-                                    if rouge_type == "rouge1_recall":
-                                        step_results[metric_name] = rouge_scores["rouge1"].recall
-                                    elif rouge_type == "rougeL_f1":
-                                        step_results[metric_name] = rouge_scores["rougeL"].fmeasure
-                                    elif rouge_type == "rougeL_recall":
-                                        step_results[metric_name] = rouge_scores["rougeL"].recall
-                                    else:
-                                        # Default to rougeL_recall
-                                        step_results[metric_name] = rouge_scores["rougeL"].recall
-                                
-                                elif metric_name == "classifier_prob":
-                                    # For classifier_prob, we need the text in the expected format
-                                    # This metric expects pre_compute with text, so we'll need to handle it differently
-                                    # For now, log a warning
-                                    logger.warning(
-                                        f"classifier_prob metric requires pre_compute setup. "
-                                        f"Skipping at step {step} for {traj_name}."
-                                    )
-                                else:
-                                    logger.warning(f"Text-based metric {metric_name} not yet fully implemented")
-                            
+                            elif isinstance(result, (int, float, np.number)):
+                                step_results[metric_name] = float(result)
                             else:
-                                logger.warning(f"Unknown metric type: {metric_name}")
+                                logger.warning(
+                                    f"Unexpected result format for {metric_name}: {type(result)}. "
+                                    f"Result: {result}"
+                                )
+                                step_results[metric_name] = None
                         
                         except Exception as e:
-                            logger.warning(f"Error computing {metric_name} at step {step} for {traj_name}: {e}")
+                            logger.warning(
+                                f"Error computing {metric_name} at step {step} for {traj_name}: {e}",
+                                exc_info=True
+                            )
                             step_results[metric_name] = None
                     
                     sample_results["trajectories"][traj_name][step_key] = step_results
@@ -389,7 +786,7 @@ def trajectory_metrics(model, **kwargs):
     agg_value = {}
     for traj_name in trajectory_names:
         agg_value[traj_name] = {}
-        for metric_name in metrics_to_compute:
+        for metric_name in loaded_metrics.keys():
             # Collect values per step across all samples
             step_values = {}  # {step: [values across samples]}
             
