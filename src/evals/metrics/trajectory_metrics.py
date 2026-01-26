@@ -230,14 +230,16 @@ def trajectory_metrics(model, **kwargs):
             
             # Extract only the generated portion of labels to match logits shape [V, L]
             # Logits from trajectory only cover generated tokens (L), not the prompt
+            # evaluate_probability does: logits[..., :-1, :] and labels[..., 1:]
+            # So if logits are [1, L, V], after processing: logits [1, L-1, V], labels [1, L-1]
+            # This means we need labels of length L to get L-1 after shift
             if sample_labels is not None:
                 # Extract generated region: from prompt_end to prompt_end + L
-                # evaluate_probability shifts labels by 1, so we need L+1 tokens
-                generated_labels = sample_labels[sample_prompt_len:sample_prompt_len + L + 1]
+                generated_labels = sample_labels[sample_prompt_len:sample_prompt_len + L]
                 # Pad with IGNORE_INDEX if needed (shouldn't happen, but safety check)
-                if generated_labels.shape[0] < L + 1:
+                if generated_labels.shape[0] < L:
                     padding = torch.full(
-                        (L + 1 - generated_labels.shape[0],),
+                        (L - generated_labels.shape[0],),
                         IGNORE_INDEX,
                         dtype=generated_labels.dtype,
                         device=generated_labels.device
