@@ -176,8 +176,19 @@ def trajectory_metrics(model, **kwargs):
             logger.warning(f"Batch {batch_idx}: No fixation_steps returned from sampler")
             continue
         
-        # Stack logits into tensor R [V, L, S]
-        R = stack_logits_history(logits_history)  # [V, L, S]
+        # Stack logits into tensor R [V, T, S] where T is full sequence length (prompt + generated)
+        R_full = stack_logits_history(logits_history)  # [V, T, S]
+        V, T_full, S = R_full.shape
+        
+        # Extract only the generated portion from R_full
+        # logits_history contains [B, T, V] where T includes prompt + generated
+        # We need to extract only the generated portion for trajectory computation
+        max_prompt_len = max(prompt_lens)
+        generated_len = T_full - max_prompt_len
+        
+        # Extract generated portion: R[:, max_prompt_len:max_prompt_len + generated_len, :]
+        # This gives us [V, L, S] where L = generated_len
+        R = R_full[:, max_prompt_len:max_prompt_len + generated_len, :]  # [V, L, S]
         V, L, S = R.shape
         
         # Extract fixation steps F [L] for each sample
@@ -187,7 +198,6 @@ def trajectory_metrics(model, **kwargs):
             # [B, T] -> take first sample and extract generated region
             F_full = fixation_steps[0]  # [T]
             # Extract only the generated portion (after max prompt length)
-            max_prompt_len = max(prompt_lens)
             if F_full.shape[0] > max_prompt_len:
                 F = F_full[max_prompt_len:max_prompt_len + L]  # [L]
             else:
@@ -235,6 +245,7 @@ def trajectory_metrics(model, **kwargs):
             # This means we need labels of length L to get L-1 after shift
             if sample_labels is not None:
                 # Extract generated region: from prompt_end to prompt_end + L
+                # L is now the generated length (not full sequence length)
                 generated_labels = sample_labels[sample_prompt_len:sample_prompt_len + L]
                 # Pad with IGNORE_INDEX if needed (shouldn't happen, but safety check)
                 if generated_labels.shape[0] < L:
