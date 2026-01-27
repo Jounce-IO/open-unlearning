@@ -95,6 +95,21 @@ class Evaluator:
 
         # Load existing results from file if any.
         logs = self.load_logs_from_file(logs_file_path) if not overwrite else {}
+        
+        # Save config information (only once, at the start)
+        if "config" not in logs or overwrite:
+            from omegaconf import OmegaConf
+            config_dict = {
+                "evaluator_name": self.name,
+                "eval_config": OmegaConf.to_container(self.eval_cfg, resolve=True),
+            }
+            # Add model info if available
+            if hasattr(model, "config") and hasattr(model.config, "_name_or_path"):
+                config_dict["model_name"] = model.config._name_or_path
+            elif hasattr(model, "model") and hasattr(model.model, "config") and hasattr(model.model.config, "_name_or_path"):
+                config_dict["model_name"] = model.model.config._name_or_path
+            logs["config"] = config_dict
+            self.save_logs(logs, logs_file_path)
 
         logger.info(f"***** Running {self.name} evaluation suite *****")
         logger.info(f"Fine-grained evaluations will be saved to: {logs_file_path}")
