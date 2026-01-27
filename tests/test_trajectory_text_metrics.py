@@ -34,7 +34,7 @@ class TestTextBasedMetricHandler:
     def test_rouge_metric_with_logits(self):
         """Test that ROUGE metric works with decoded logits."""
         # Create logits [V, L]
-        V, L = 1000, 10
+        V, L = 100, 5
         logits = torch.randn(V, L)
         
         # Create mock tokenizer
@@ -78,7 +78,7 @@ class TestTextBasedMetricHandler:
     
     def test_generation_args_as_dict_converted_to_omegaconf(self):
         """Test that generation_args dict is converted to OmegaConf."""
-        V, L = 1000, 10
+        V, L = 100, 5
         logits = torch.randn(V, L)
         
         tokenizer = Mock()
@@ -117,7 +117,7 @@ class TestTextBasedMetricHandler:
     
     def test_generation_args_as_omegaconf_preserved(self):
         """Test that generation_args as OmegaConf is preserved."""
-        V, L = 1000, 10
+        V, L = 100, 5
         logits = torch.randn(V, L)
         
         tokenizer = Mock()
@@ -161,7 +161,7 @@ class TestCallMetricAtStepTextBased:
         rouge_metric = METRICS_REGISTRY["rouge"]
         
         # Create logits [V, L]
-        V, L = 1000, 10
+        V, L = 100, 5
         logits = torch.randn(V, L)
         
         # Create batch template
@@ -217,7 +217,7 @@ class TestCallMetricAtStepTextBased:
         
         prob_metric = METRICS_REGISTRY["probability"]
         
-        V, L = 1000, 10
+        V, L = 100, 5
         logits = torch.randn(V, L)
         
         batch_template = {

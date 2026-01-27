@@ -9,7 +9,7 @@ Tests cover:
 """
 
 import pytest
-from omegaconf import OmegaConf, DictConfig
+from omegaconf import OmegaConf, DictConfig, ListConfig
 
 import sys
 from pathlib import Path
@@ -114,6 +114,81 @@ class TestTrajectoryMetricsConfig:
         
         assert len(valid_config.metrics) > 0
         assert all(isinstance(m, str) for m in valid_config.metrics)
+    
+    def test_config_metrics_dict_format(self):
+        """Test that metrics can be specified as dict with configs."""
+        config = OmegaConf.create({
+            "handler": "trajectory_metrics",
+            "metrics": {
+                "probability": {},
+                "truth_ratio": {
+                    "aggregator": "closer_to_1_better",
+                    "pre_compute": {
+                        "probability": {
+                            "access_key": "correct",
+                        },
+                        "probability": {
+                            "access_key": "wrong",
+                        },
+                    },
+                },
+            },
+            "trajectory_config": {
+                "return_logits": True,
+            },
+        })
+        
+        # OmegaConf creates DictConfig, not plain dict
+        assert isinstance(config.metrics, (dict, DictConfig))
+        assert "probability" in config.metrics
+        assert "truth_ratio" in config.metrics
+        assert config.metrics.truth_ratio.aggregator == "closer_to_1_better"
+        assert "pre_compute" in config.metrics.truth_ratio
+    
+    def test_config_pre_compute_structure(self):
+        """Test that pre_compute config has correct structure."""
+        config = OmegaConf.create({
+            "handler": "trajectory_metrics",
+            "metrics": {
+                "truth_ratio": {
+                    "aggregator": "closer_to_1_better",
+                    "pre_compute": {
+                        "probability": {
+                            "access_key": "correct",
+                        },
+                    },
+                },
+            },
+            "trajectory_config": {
+                "return_logits": True,
+            },
+        })
+        
+        pre_compute = config.metrics.truth_ratio.pre_compute
+        assert isinstance(pre_compute, (dict, DictConfig))
+        assert "probability" in pre_compute
+        assert pre_compute.probability.access_key == "correct"
+    
+    def test_config_metrics_list_and_dict_both_valid(self):
+        """Test that both list and dict formats are valid."""
+        # List format
+        list_config = OmegaConf.create({
+            "handler": "trajectory_metrics",
+            "metrics": ["probability", "exact_memorization"],
+            "trajectory_config": {"return_logits": True},
+        })
+        assert isinstance(list_config.metrics, (list, ListConfig))
+        
+        # Dict format
+        dict_config = OmegaConf.create({
+            "handler": "trajectory_metrics",
+            "metrics": {
+                "probability": {},
+                "exact_memorization": {},
+            },
+            "trajectory_config": {"return_logits": True},
+        })
+        assert isinstance(dict_config.metrics, (dict, DictConfig))
     
     def test_config_trajectory_config_required_fields(self):
         """Test that trajectory_config has required fields."""

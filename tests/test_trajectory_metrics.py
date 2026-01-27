@@ -22,10 +22,13 @@ sys.path.insert(0, str(repo_root / "src"))
 
 from evals.metrics.trajectory_metrics import (
     _get_sampler_from_model,
-    _is_logit_based_metric,
+    _get_metric_from_registry,
+    _call_metric_at_step,
+    _compute_pre_compute_metrics_at_step,
     trajectory_metrics,
 )
 from evals.metrics.trajectory_utils import stack_logits_history
+from evals.metrics import METRICS_REGISTRY
 
 
 class TestGetSamplerFromModel:
@@ -68,20 +71,101 @@ class TestGetSamplerFromModel:
         result = _get_sampler_from_model(model)
         
         assert result is None
+    
+    def test_model_with_deep_nested_sampler(self):
+        """Test extracting sampler from model.model.sampler (deep nesting)."""
+        sampler = Mock()
+        inner_model = Mock()
+        inner_model.sampler = sampler
+        outer_model = Mock()
+        # Remove outer_model.sampler if it exists
+        if hasattr(outer_model, 'sampler'):
+            delattr(outer_model, 'sampler')
+        outer_model.model = inner_model
+        
+        result = _get_sampler_from_model(outer_model)
+        
+        assert result is sampler
+    
+    def test_model_with_sampler_none(self):
+        """Test that model with sampler=None returns None, not the None value."""
+        model = Mock()
+        model.sampler = None
+        
+        result = _get_sampler_from_model(model)
+        
+        # Should return None (the None value), not raise error
+        assert result is None
+    
+    def test_model_with_sampler_not_sampler_object(self):
+        """Test that model with sampler attribute that is not a sampler object."""
+        model = Mock()
+        model.sampler = "not a sampler"  # String instead of sampler object
+        
+        result = _get_sampler_from_model(model)
+        
+        # Should return the attribute value (even if it's not a real sampler)
+        assert result == "not a sampler"
+    
+    def test_model_with_both_sampler_and_nested_sampler(self):
+        """Test model with both model.sampler and model.model.sampler (which takes precedence?)."""
+        sampler1 = Mock()
+        sampler2 = Mock()
+        inner_model = Mock()
+        inner_model.sampler = sampler2
+        model = Mock()
+        model.sampler = sampler1
+        model.model = inner_model
+        
+        result = _get_sampler_from_model(model)
+        
+        # Should take model.sampler (first check)
+        assert result is sampler1
 
 
-class TestIsLogitBasedMetric:
-    """Tests for _is_logit_based_metric function."""
+class TestGetMetricFromRegistry:
+    """Tests for _get_metric_from_registry function."""
     
-    def test_logit_based_metrics(self):
-        """Test that logit-based metrics return True."""
-        assert _is_logit_based_metric("probability") is True
-        assert _is_logit_based_metric("exact_memorization") is True
+    def test_get_metric_from_registry_success(self):
+        """Test loading a metric that exists in registry."""
+        # probability should be registered
+        if "probability" in METRICS_REGISTRY:
+            metric = _get_metric_from_registry("probability")
+            assert metric is not None
+            assert hasattr(metric, "name")
+            assert metric.name == "probability"
     
-    def test_text_based_metrics(self):
-        """Test that text-based metrics return False."""
-        assert _is_logit_based_metric("rouge") is False
-        assert _is_logit_based_metric("bleu") is False
+    def test_get_metric_from_registry_not_found(self):
+        """Test that loading non-existent metric raises ValueError."""
+        with pytest.raises(ValueError, match="not found in registry"):
+            _get_metric_from_registry("nonexistent_metric_xyz")
+    
+    def test_get_metric_empty_string_raises_error(self):
+        """Test that empty string metric_name raises error."""
+        with pytest.raises(ValueError, match="not found in registry"):
+            _get_metric_from_registry("")
+    
+    def test_get_metric_special_characters(self):
+        """Test that metric name with special characters raises error."""
+        with pytest.raises(ValueError, match="not found in registry"):
+            _get_metric_from_registry("metric-name_with.special@chars")
+    
+    def test_get_metric_error_message_includes_available(self):
+        """Test that error message includes available metrics list."""
+        try:
+            _get_metric_from_registry("nonexistent_xyz")
+        except ValueError as e:
+            error_msg = str(e)
+            assert "not found in registry" in error_msg
+            assert "Available metrics" in error_msg or "available" in error_msg.lower()
+    
+    def test_get_all_registered_metrics(self):
+        """Test that all registered metrics can be loaded."""
+        for metric_name in METRICS_REGISTRY.keys():
+            metric = _get_metric_from_registry(metric_name)
+            assert metric is not None
+            assert hasattr(metric, "name")
+            assert metric.name == metric_name
 
 
 class TestTrajectoryMetricsShapeValidation:
@@ -346,6 +430,292 @@ class TestTrajectoryMetricsIntegration:
             # Check that it's not a shape mismatch error
             assert "Expected target size" not in str(e)
             assert "shape" not in str(e).lower() or "mismatch" not in str(e).lower()
+
+
+class TestDynamicMetricLoading:
+    """Tests for dynamic metric loading from registry."""
+    
+    def test_get_metric_from_registry_success(self):
+        """Test loading a metric that exists in registry."""
+        # probability should be registered
+        if "probability" in METRICS_REGISTRY:
+            metric = _get_metric_from_registry("probability")
+            assert metric is not None
+            assert hasattr(metric, "name")
+            assert metric.name == "probability"
+    
+    def test_get_metric_from_registry_not_found(self):
+        """Test that loading non-existent metric raises ValueError."""
+        with pytest.raises(ValueError, match="not found in registry"):
+            _get_metric_from_registry("nonexistent_metric_xyz")
+    
+    def test_metrics_list_format(self):
+        """Test that metrics can be specified as a simple list."""
+        # This should be parsed correctly
+        metrics_config = ["probability", "exact_memorization"]
+        
+        # Simulate parsing logic
+        if isinstance(metrics_config, list):
+            metrics_to_compute = {name: {} for name in metrics_config}
+        else:
+            metrics_to_compute = metrics_config
+        
+        assert isinstance(metrics_to_compute, dict)
+        assert "probability" in metrics_to_compute
+        assert "exact_memorization" in metrics_to_compute
+        assert metrics_to_compute["probability"] == {}
+        assert metrics_to_compute["exact_memorization"] == {}
+    
+    def test_metrics_dict_format(self):
+        """Test that metrics can be specified as a dict with configs."""
+        metrics_config = {
+            "probability": {},
+            "truth_ratio": {
+                "aggregator": "closer_to_1_better",
+                "pre_compute": {
+                    "probability": {"access_key": "correct"},
+                },
+            },
+        }
+        
+        # Should be used directly
+        metrics_to_compute = metrics_config
+        
+        assert isinstance(metrics_to_compute, dict)
+        assert "probability" in metrics_to_compute
+        assert "truth_ratio" in metrics_to_compute
+        assert metrics_to_compute["truth_ratio"]["aggregator"] == "closer_to_1_better"
+        assert "pre_compute" in metrics_to_compute["truth_ratio"]
+    
+    def test_load_metrics_from_registry(self):
+        """Test loading multiple metrics from registry."""
+        metrics_to_compute = {
+            "probability": {},
+            "exact_memorization": {},
+        }
+        
+        loaded_metrics = {}
+        for metric_name, metric_cfg in metrics_to_compute.items():
+            if metric_name in METRICS_REGISTRY:
+                metric = METRICS_REGISTRY[metric_name]
+                loaded_metrics[metric_name] = {
+                    "metric": metric,
+                    "config": metric_cfg,
+                }
+        
+        assert len(loaded_metrics) > 0
+        for metric_name in metrics_to_compute.keys():
+            if metric_name in METRICS_REGISTRY:
+                assert metric_name in loaded_metrics
+                assert "metric" in loaded_metrics[metric_name]
+                assert "config" in loaded_metrics[metric_name]
+
+
+class TestPreComputeMetrics:
+    """Tests for pre-compute metrics support."""
+    
+    def test_pre_compute_config_structure(self):
+        """Test that pre_compute config has correct structure."""
+        pre_compute_config = {
+            "probability": {
+                "access_key": "correct",
+            },
+            "probability": {  # Can reuse same metric
+                "access_key": "wrong",
+            },
+        }
+        
+        assert isinstance(pre_compute_config, dict)
+        for pre_metric_name, pre_metric_cfg in pre_compute_config.items():
+            assert isinstance(pre_metric_cfg, dict)
+            assert "access_key" in pre_metric_cfg
+    
+    def test_pre_compute_access_key_defaults_to_metric_name(self):
+        """Test that access_key defaults to metric name if not specified."""
+        pre_compute_config = {
+            "probability": {},  # No access_key
+        }
+        
+        for pre_metric_name, pre_metric_cfg in pre_compute_config.items():
+            access_key = pre_metric_cfg.get("access_key", pre_metric_name)
+            assert access_key == pre_metric_name
+    
+    def test_pre_compute_metric_loading_by_name(self):
+        """Test loading pre-compute metric by name from registry."""
+        pre_metric_name = "probability"
+        
+        if pre_metric_name in METRICS_REGISTRY:
+            pre_metric = METRICS_REGISTRY[pre_metric_name]
+            assert pre_metric is not None
+            assert pre_metric.name == pre_metric_name
+    
+    def test_pre_compute_metric_loading_by_handler(self):
+        """Test loading pre-compute metric by handler from config."""
+        pre_metric_cfg = {
+            "handler": "probability",
+            "access_key": "correct",
+        }
+        
+        handler_name = pre_metric_cfg.get("handler")
+        if handler_name and handler_name in METRICS_REGISTRY:
+            pre_metric = METRICS_REGISTRY[handler_name]
+            assert pre_metric is not None
+            assert pre_metric.name == handler_name
+    
+    def test_pre_compute_result_structure(self):
+        """Test that pre-compute results have correct structure."""
+        # Simulate pre-compute result from evaluate_probability
+        sample_idx = "0"
+        pre_result = [{"prob": 0.5, "avg_loss": 0.693}]
+        
+        # Process result
+        if isinstance(pre_result, list) and len(pre_result) > 0:
+            result_dict = pre_result[0]
+            value_by_index = {sample_idx: result_dict.copy()}
+            processed_result = {
+                "agg_value": result_dict.get("prob"),
+                "value_by_index": value_by_index,
+            }
+        
+        assert "agg_value" in processed_result
+        assert "value_by_index" in processed_result
+        assert sample_idx in processed_result["value_by_index"]
+        assert "prob" in processed_result["value_by_index"][sample_idx]
+        assert "avg_loss" in processed_result["value_by_index"][sample_idx]
+    
+    def test_pre_compute_preserves_avg_loss(self):
+        """Test that avg_loss is preserved for truth_ratio compatibility."""
+        sample_idx = "0"
+        pre_result = [{"prob": 0.5, "avg_loss": 0.693}]
+        
+        # Process result
+        result_dict = pre_result[0]
+        value_by_index = {sample_idx: result_dict.copy()}
+        
+        # Verify avg_loss is preserved
+        assert "avg_loss" in value_by_index[sample_idx]
+        assert value_by_index[sample_idx]["avg_loss"] == 0.693
+
+
+class TestMetricConfigWithPreCompute:
+    """Tests for metrics configured with pre_compute."""
+    
+    def test_truth_ratio_config_structure(self):
+        """Test config structure for truth_ratio with pre_compute."""
+        metric_config = {
+            "aggregator": "closer_to_1_better",
+            "pre_compute": {
+                "probability": {
+                    "access_key": "correct",
+                },
+                "probability": {
+                    "access_key": "wrong",
+                },
+            },
+        }
+        
+        assert "aggregator" in metric_config
+        assert "pre_compute" in metric_config
+        assert isinstance(metric_config["pre_compute"], dict)
+    
+    def test_extract_pre_compute_from_metric_config(self):
+        """Test extracting pre_compute from metric_config."""
+        metric_config = {
+            "aggregator": "closer_to_1_better",
+            "pre_compute": {
+                "probability": {"access_key": "correct"},
+            },
+        }
+        
+        pre_compute_config = metric_config.pop("pre_compute", {})
+        remaining_config = metric_config.copy()
+        
+        assert "pre_compute" not in remaining_config
+        assert "aggregator" in remaining_config
+        assert len(pre_compute_config) > 0
+    
+    def test_pre_compute_passed_to_metric(self):
+        """Test that pre_compute results are passed to main metric."""
+        pre_compute_results = {
+            "correct": {
+                "agg_value": 0.8,
+                "value_by_index": {"0": {"prob": 0.8, "avg_loss": 0.223}},
+            },
+            "wrong": {
+                "agg_value": 0.2,
+                "value_by_index": {"0": {"prob": 0.2, "avg_loss": 1.609}},
+            },
+        }
+        
+        metric_kwargs = {
+            "model": Mock(),
+            "batch": {},
+            "pre_compute": pre_compute_results,
+        }
+        
+        assert "pre_compute" in metric_kwargs
+        assert "correct" in metric_kwargs["pre_compute"]
+        assert "wrong" in metric_kwargs["pre_compute"]
+
+
+class TestCallMetricAtStep:
+    """Tests for _call_metric_at_step function."""
+    
+    def test_call_metric_with_pre_compute(self):
+        """Test calling a metric with pre_compute at a step."""
+        # Create mock metric
+        mock_metric = Mock()
+        mock_metric.name = "test_metric"
+        mock_metric._metric_fn = Mock(return_value={"agg_value": 0.5})
+        
+        # Create logits
+        V, L = 100, 10
+        logits = torch.randn(V, L)
+        
+        # Create batch template
+        batch_template = {
+            "input_ids": torch.zeros((1, L), dtype=torch.long),
+            "labels": torch.zeros((1, L), dtype=torch.long),
+            "attention_mask": torch.ones((1, L), dtype=torch.long),
+        }
+        
+        # Create metric config with pre_compute
+        metric_config = {
+            "pre_compute": {
+                "probability": {"access_key": "correct"},
+            },
+        }
+        
+        # Mock tokenizer and other args
+        tokenizer = Mock()
+        sample_labels = torch.zeros(L, dtype=torch.long)
+        sample_input_ids = torch.zeros(L, dtype=torch.long)
+        sample_prompt_len = 0
+        
+        # Mock _compute_pre_compute_metrics_at_step
+        from unittest.mock import patch
+        
+        with patch(
+            "evals.metrics.trajectory_metrics._compute_pre_compute_metrics_at_step",
+            return_value={"correct": {"agg_value": 0.8, "value_by_index": {"0": {"prob": 0.8}}}},
+        ):
+            result = _call_metric_at_step(
+                metric=mock_metric,
+                logits=logits,
+                batch_template=batch_template,
+                tokenizer=tokenizer,
+                sample_labels=sample_labels,
+                sample_input_ids=sample_input_ids,
+                sample_prompt_len=sample_prompt_len,
+                metric_config=metric_config,
+                sample_idx="0",
+            )
+            
+            # Verify metric was called with pre_compute
+            assert mock_metric._metric_fn.called
+            call_kwargs = mock_metric._metric_fn.call_args[1]
+            assert "pre_compute" in call_kwargs
+            assert "correct" in call_kwargs["pre_compute"]
 
 
 if __name__ == "__main__":

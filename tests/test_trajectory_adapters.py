@@ -65,6 +65,101 @@ class TestLogitModelWrapper:
         
         assert torch.allclose(output1.logits, output2.logits)
         assert torch.allclose(output1.logits, logits)
+    
+    @pytest.mark.parametrize("B", [1, 2, 4])
+    def test_wrapper_different_batch_sizes(self, B):
+        """Test wrapper with different batch sizes."""
+        L, V = 10, 100
+        logits = torch.randn(B, L, V)
+        device = torch.device("cpu")
+        
+        wrapper = LogitModelWrapper(logits, device)
+        assert wrapper.logits.shape == (B, L, V)
+        assert torch.allclose(wrapper.logits, logits)
+    
+    @pytest.mark.parametrize("dtype", [torch.float32, torch.float16, torch.bfloat16])
+    def test_wrapper_different_dtypes(self, dtype):
+        """Test wrapper with different dtypes."""
+        B, L, V = 1, 10, 100
+        logits = torch.randn(B, L, V, dtype=dtype)
+        device = torch.device("cpu")
+        
+        wrapper = LogitModelWrapper(logits, device)
+        assert wrapper.logits.dtype == dtype
+        assert torch.allclose(wrapper.logits, logits)
+    
+    def test_wrapper_different_devices(self):
+        """Test wrapper with different devices."""
+        B, L, V = 1, 10, 100
+        logits = torch.randn(B, L, V)
+        
+        # CPU
+        device_cpu = torch.device("cpu")
+        wrapper_cpu = LogitModelWrapper(logits, device_cpu)
+        assert wrapper_cpu.device.type == "cpu"
+        
+        # CUDA if available
+        if torch.cuda.is_available():
+            device_cuda = torch.device("cuda")
+            logits_cuda = logits.cuda()
+            wrapper_cuda = LogitModelWrapper(logits_cuda, device_cuda)
+            assert wrapper_cuda.device.type == "cuda"
+    
+    def test_wrapper_output_same_tensor(self):
+        """Test that output.logits is same tensor (not copy)."""
+        B, L, V = 1, 10, 100
+        logits = torch.randn(B, L, V)
+        device = torch.device("cpu")
+        
+        wrapper = LogitModelWrapper(logits, device)
+        output = wrapper(input_ids=torch.zeros(1, 10))
+        
+        # output.logits should be the same tensor object
+        assert output.logits is wrapper.logits
+        assert output.logits is logits
+    
+    def test_wrapper_output_has_correct_attributes(self):
+        """Test that output object has correct attributes."""
+        B, L, V = 1, 10, 100
+        logits = torch.randn(B, L, V)
+        device = torch.device("cpu")
+        
+        wrapper = LogitModelWrapper(logits, device)
+        output = wrapper(input_ids=torch.zeros(1, 10))
+        
+        assert hasattr(output, "logits")
+        assert output.logits.shape == (B, L, V)
+    
+    def test_wrapper_with_empty_batch_kwargs(self):
+        """Test wrapper with empty batch kwargs."""
+        B, L, V = 1, 10, 100
+        logits = torch.randn(B, L, V)
+        device = torch.device("cpu")
+        
+        wrapper = LogitModelWrapper(logits, device)
+        output = wrapper()
+        
+        assert hasattr(output, "logits")
+        assert torch.allclose(output.logits, logits)
+    
+    def test_wrapper_with_many_batch_kwargs(self):
+        """Test wrapper with many batch kwargs (stress test)."""
+        B, L, V = 1, 10, 100
+        logits = torch.randn(B, L, V)
+        device = torch.device("cpu")
+        
+        wrapper = LogitModelWrapper(logits, device)
+        output = wrapper(
+            input_ids=torch.zeros(1, 10),
+            attention_mask=torch.ones(1, 10),
+            token_type_ids=torch.zeros(1, 10),
+            position_ids=torch.arange(10).unsqueeze(0),
+            labels=torch.zeros(1, 10),
+            custom_arg="value",
+        )
+        
+        assert hasattr(output, "logits")
+        assert torch.allclose(output.logits, logits)
 
 
 class TestComputeLogitMetricAtStep:
@@ -187,6 +282,198 @@ class TestComputeLogitMetricAtStep:
         assert "input_ids" in received_args["batch"]
         assert "labels" in received_args["batch"]
         assert received_args["kwargs"]["custom_arg"] == 42
+    
+    def test_logits_2d_conversion_exact_values(self):
+        """Test that [V, L] logits are correctly converted to [1, L, V] with exact values."""
+        V, L = 100, 10
+        logits_2d = torch.arange(V * L, dtype=torch.float32).reshape(V, L)
+        
+        def mock_metric_fn(model, batch, **kwargs):
+            # Verify shape and values
+            assert model.logits.shape == (1, L, V)
+            # Check that values are transposed correctly
+            # logits_2d[i, j] should become model.logits[0, j, i]
+            for j in range(L):
+                for i in range(V):
+                    assert torch.allclose(model.logits[0, j, i], logits_2d[i, j])
+            return [{"test": 1.0}]
+        
+        batch_template = {
+            "input_ids": torch.zeros(1, L),
+            "labels": torch.zeros(1, L),
+        }
+        
+        result = compute_logit_metric_at_step(mock_metric_fn, logits_2d, batch_template)
+        assert result == [{"test": 1.0}]
+    
+    def test_batch_template_with_non_tensor_values(self):
+        """Test that batch template with non-tensor values is preserved."""
+        V, L = 100, 10
+        logits = torch.randn(V, L)
+        
+        received_batch = {}
+        
+        def mock_metric_fn(model, batch, **kwargs):
+            received_batch.update(batch)
+            return [{"test": 1.0}]
+        
+        batch_template = {
+            "input_ids": torch.zeros(1, L),
+            "labels": torch.zeros(1, L),
+            "index": [0],  # Non-tensor value
+            "text": "sample text",  # Non-tensor value
+        }
+        
+        compute_logit_metric_at_step(mock_metric_fn, logits, batch_template)
+        
+        assert "input_ids" in received_batch
+        assert "labels" in received_batch
+        assert "index" in received_batch
+        assert received_batch["index"] == [0]
+        assert "text" in received_batch
+        assert received_batch["text"] == "sample text"
+    
+    def test_batch_template_missing_keys(self):
+        """Test that batch template with missing keys still works."""
+        V, L = 100, 10
+        logits = torch.randn(V, L)
+        
+        def mock_metric_fn(model, batch, **kwargs):
+            # Should work even if batch is minimal
+            return [{"test": 1.0}]
+        
+        batch_template = {
+            "input_ids": torch.zeros(1, L),
+            # Missing labels, attention_mask, etc.
+        }
+        
+        result = compute_logit_metric_at_step(mock_metric_fn, logits, batch_template)
+        assert result == [{"test": 1.0}]
+    
+    def test_batch_template_with_extra_keys(self):
+        """Test that batch template with extra keys is passed through."""
+        V, L = 100, 10
+        logits = torch.randn(V, L)
+        
+        received_batch = {}
+        
+        def mock_metric_fn(model, batch, **kwargs):
+            received_batch.update(batch)
+            return [{"test": 1.0}]
+        
+        batch_template = {
+            "input_ids": torch.zeros(1, L),
+            "labels": torch.zeros(1, L),
+            "extra_key": "extra_value",
+            "another_key": torch.ones(1, L),
+        }
+        
+        compute_logit_metric_at_step(mock_metric_fn, logits, batch_template)
+        
+        assert "extra_key" in received_batch
+        assert received_batch["extra_key"] == "extra_value"
+        assert "another_key" in received_batch
+    
+    def test_metric_function_raises_exception(self):
+        """Test that metric function exceptions are propagated."""
+        V, L = 100, 10
+        logits = torch.randn(V, L)
+        
+        def mock_metric_fn(model, batch, **kwargs):
+            raise ValueError("Test error")
+        
+        batch_template = {
+            "input_ids": torch.zeros(1, L),
+            "labels": torch.zeros(1, L),
+        }
+        
+        with pytest.raises(ValueError, match="Test error"):
+            compute_logit_metric_at_step(mock_metric_fn, logits, batch_template)
+    
+    def test_metric_function_returns_none(self):
+        """Test that metric function returning None is handled."""
+        V, L = 100, 10
+        logits = torch.randn(V, L)
+        
+        def mock_metric_fn(model, batch, **kwargs):
+            return None
+        
+        batch_template = {
+            "input_ids": torch.zeros(1, L),
+            "labels": torch.zeros(1, L),
+        }
+        
+        result = compute_logit_metric_at_step(mock_metric_fn, logits, batch_template)
+        assert result is None
+    
+    def test_metric_function_returns_empty_list(self):
+        """Test that metric function returning empty list is handled."""
+        V, L = 100, 10
+        logits = torch.randn(V, L)
+        
+        def mock_metric_fn(model, batch, **kwargs):
+            return []
+        
+        batch_template = {
+            "input_ids": torch.zeros(1, L),
+            "labels": torch.zeros(1, L),
+        }
+        
+        result = compute_logit_metric_at_step(mock_metric_fn, logits, batch_template)
+        assert result == []
+    
+    def test_kwargs_with_tensors(self):
+        """Test that kwargs containing tensors are passed through."""
+        V, L = 100, 10
+        logits = torch.randn(V, L)
+        
+        received_kwargs = {}
+        
+        def mock_metric_fn(model, batch, **kwargs):
+            received_kwargs.update(kwargs)
+            return [{"test": 1.0}]
+        
+        batch_template = {
+            "input_ids": torch.zeros(1, L),
+        }
+        
+        tensor_kwarg = torch.ones(1, L)
+        compute_logit_metric_at_step(
+            mock_metric_fn, logits, batch_template, tensor_arg=tensor_kwarg
+        )
+        
+        assert "tensor_arg" in received_kwargs
+        assert torch.allclose(received_kwargs["tensor_arg"], tensor_kwarg)
+    
+    def test_kwargs_with_non_tensor_values(self):
+        """Test that kwargs with non-tensor values are passed through."""
+        V, L = 100, 10
+        logits = torch.randn(V, L)
+        
+        received_kwargs = {}
+        
+        def mock_metric_fn(model, batch, **kwargs):
+            received_kwargs.update(kwargs)
+            return [{"test": 1.0}]
+        
+        batch_template = {
+            "input_ids": torch.zeros(1, L),
+        }
+        
+        compute_logit_metric_at_step(
+            mock_metric_fn,
+            logits,
+            batch_template,
+            string_arg="value",
+            int_arg=42,
+            list_arg=[1, 2, 3],
+            dict_arg={"key": "value"},
+        )
+        
+        assert received_kwargs["string_arg"] == "value"
+        assert received_kwargs["int_arg"] == 42
+        assert received_kwargs["list_arg"] == [1, 2, 3]
+        assert received_kwargs["dict_arg"] == {"key": "value"}
 
 
 class TestComputeTextMetricAtStep:
@@ -263,6 +550,186 @@ class TestComputeTextMetricAtStep:
         
         assert received_kwargs["custom_arg"] == 42
         assert received_kwargs["another_arg"] == "test"
+    
+    def test_text_metric_empty_texts_list(self):
+        """Test text metric with empty texts list."""
+        texts = []
+        ground_truths = []
+        
+        def mock_metric_fn(model, tokenizer, batch, **kwargs):
+            return [{"rouge": 0.0}]
+        
+        tokenizer = object()
+        
+        result = compute_text_metric_at_step(
+            mock_metric_fn, texts, ground_truths, tokenizer
+        )
+        
+        assert result == [{"rouge": 0.0}]
+    
+    def test_text_metric_empty_ground_truths_list(self):
+        """Test text metric with empty ground_truths list."""
+        texts = ["Text 1", "Text 2"]
+        ground_truths = []
+        
+        def mock_metric_fn(model, tokenizer, batch, **kwargs):
+            assert batch["generation"] == texts
+            assert batch["ground_truth"] == ground_truths
+            return [{"rouge": 0.0}]
+        
+        tokenizer = object()
+        
+        result = compute_text_metric_at_step(
+            mock_metric_fn, texts, ground_truths, tokenizer
+        )
+        
+        assert result == [{"rouge": 0.0}]
+    
+    def test_text_metric_mismatched_lengths(self):
+        """Test text metric with mismatched lengths (texts vs ground_truths)."""
+        texts = ["Text 1", "Text 2"]
+        ground_truths = ["Truth 1"]  # Different length
+        
+        def mock_metric_fn(model, tokenizer, batch, **kwargs):
+            # Function should receive what we pass, even if mismatched
+            return [{"rouge": 0.0}]
+        
+        tokenizer = object()
+        
+        result = compute_text_metric_at_step(
+            mock_metric_fn, texts, ground_truths, tokenizer
+        )
+        
+        assert result == [{"rouge": 0.0}]
+    
+    def test_text_metric_very_long_texts(self):
+        """Test text metric with very long texts (stress test)."""
+        long_text = "word " * 1000  # Very long text
+        texts = [long_text]
+        ground_truths = ["Ground truth"]
+        
+        def mock_metric_fn(model, tokenizer, batch, **kwargs):
+            assert len(batch["generation"][0]) > 1000
+            return [{"rouge": 0.5}]
+        
+        tokenizer = object()
+        
+        result = compute_text_metric_at_step(
+            mock_metric_fn, texts, ground_truths, tokenizer
+        )
+        
+        assert result == [{"rouge": 0.5}]
+    
+    def test_text_metric_empty_strings(self):
+        """Test text metric with empty strings."""
+        texts = ["", ""]
+        ground_truths = ["", ""]
+        
+        def mock_metric_fn(model, tokenizer, batch, **kwargs):
+            assert batch["generation"] == texts
+            assert batch["ground_truth"] == ground_truths
+            return [{"rouge": 0.0}]
+        
+        tokenizer = object()
+        
+        result = compute_text_metric_at_step(
+            mock_metric_fn, texts, ground_truths, tokenizer
+        )
+        
+        assert result == [{"rouge": 0.0}]
+    
+    def test_text_metric_special_characters(self):
+        """Test text metric with special characters."""
+        texts = ["Text with\nnewlines\tand\ttabs", "Text with \"quotes\" and 'apostrophes'"]
+        ground_truths = ["Truth with\nnewlines", "Truth with special chars: !@#$%"]
+        
+        def mock_metric_fn(model, tokenizer, batch, **kwargs):
+            assert batch["generation"] == texts
+            assert batch["ground_truth"] == ground_truths
+            return [{"rouge": 0.5}]
+        
+        tokenizer = object()
+        
+        result = compute_text_metric_at_step(
+            mock_metric_fn, texts, ground_truths, tokenizer
+        )
+        
+        assert result == [{"rouge": 0.5}]
+    
+    def test_text_metric_unicode_characters(self):
+        """Test text metric with unicode characters."""
+        texts = ["Text with unicode: 你好世界 🌍", "Text with émojis: 🎉🎊"]
+        ground_truths = ["Truth with unicode: مرحبا", "Truth with émojis: 🚀"]
+        
+        def mock_metric_fn(model, tokenizer, batch, **kwargs):
+            assert batch["generation"] == texts
+            assert batch["ground_truth"] == ground_truths
+            return [{"rouge": 0.5}]
+        
+        tokenizer = object()
+        
+        result = compute_text_metric_at_step(
+            mock_metric_fn, texts, ground_truths, tokenizer
+        )
+        
+        assert result == [{"rouge": 0.5}]
+    
+    def test_text_metric_function_raises_exception(self):
+        """Test that text metric function exceptions are propagated."""
+        texts = ["Text"]
+        ground_truths = ["Truth"]
+        
+        def mock_metric_fn(model, tokenizer, batch, **kwargs):
+            raise ValueError("Test error")
+        
+        tokenizer = object()
+        
+        with pytest.raises(ValueError, match="Test error"):
+            compute_text_metric_at_step(mock_metric_fn, texts, ground_truths, tokenizer)
+    
+    def test_text_metric_function_returns_none(self):
+        """Test that text metric function returning None is handled."""
+        texts = ["Text"]
+        ground_truths = ["Truth"]
+        
+        def mock_metric_fn(model, tokenizer, batch, **kwargs):
+            return None
+        
+        tokenizer = object()
+        
+        result = compute_text_metric_at_step(
+            mock_metric_fn, texts, ground_truths, tokenizer
+        )
+        
+        assert result is None
+    
+    def test_text_metric_kwargs_with_complex_objects(self):
+        """Test text metric with kwargs containing complex objects."""
+        texts = ["Text"]
+        ground_truths = ["Truth"]
+        
+        received_kwargs = {}
+        
+        def mock_metric_fn(model, tokenizer, batch, **kwargs):
+            received_kwargs.update(kwargs)
+            return [{"rouge": 0.5}]
+        
+        tokenizer = object()
+        
+        complex_obj = {"nested": {"deep": {"value": 42}}}
+        list_obj = [1, 2, {"key": "value"}]
+        
+        compute_text_metric_at_step(
+            mock_metric_fn,
+            texts,
+            ground_truths,
+            tokenizer,
+            complex_arg=complex_obj,
+            list_arg=list_obj,
+        )
+        
+        assert received_kwargs["complex_arg"] == complex_obj
+        assert received_kwargs["list_arg"] == list_obj
 
 
 if __name__ == "__main__":
