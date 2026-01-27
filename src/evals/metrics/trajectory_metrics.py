@@ -488,7 +488,7 @@ def _call_metric_at_step(
         if needs_generation:
             # This is likely a text-based metric that needs model.generate()
             # Use generic text-based handler
-            logger.info(
+            logger.debug(
                 f"Metric {metric_name} appears to be text-based (requires generation). "
                 f"Using generic text-based handler."
             )
