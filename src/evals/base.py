@@ -45,9 +45,28 @@ class Evaluator:
         else:
             return obj
 
+    def _remove_value_by_index(self, obj):
+        """Recursively remove value_by_index from dicts before saving to JSON"""
+        if isinstance(obj, dict):
+            # Create a new dict without value_by_index
+            cleaned = {}
+            for key, value in obj.items():
+                if key == "value_by_index":
+                    # Skip value_by_index - it's only for internal calculations
+                    continue
+                # Recursively clean nested dicts
+                cleaned[key] = self._remove_value_by_index(value)
+            return cleaned
+        elif isinstance(obj, (list, tuple)):
+            return [self._remove_value_by_index(item) for item in obj]
+        else:
+            return obj
+
     def save_logs(self, logs, file):
         """Save the logs in a json file"""
         logs = dict(sorted(logs.items()))
+        # Remove value_by_index (used for calculations but not needed in final JSON)
+        logs = self._remove_value_by_index(logs)
         # Convert numpy arrays to lists for JSON serialization
         logs = self._convert_numpy_to_list(logs)
         os.makedirs(os.path.dirname(file), exist_ok=True)

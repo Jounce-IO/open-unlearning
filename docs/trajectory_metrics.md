@@ -21,6 +21,8 @@ Trajectory metrics enable evaluation of unlearning methods for diffusion languag
 
 - **Step-by-step analysis**: Compute metrics at each diffusion step (0 to S-1)
 - **Three trajectory types**: Steps, fixation, and ratio trajectories
+- **Dynamic metric loading**: Supports any metric from the open-unlearning framework
+- **Pre-compute metrics support**: Automatically computes pre-compute metrics at each step
 - **Multiple metric support**: Works with both logit-based and text-based metrics
 - **Memory efficient**: Extracts only generated portion from full sequence
 - **Flexible configuration**: Easy to add to existing evaluations
@@ -212,13 +214,33 @@ uv run dllm job trajectory-eval \
 
 ## Configuration
 
-### Minimal Configuration
+### Minimal Configuration (List Format)
 
 ```yaml
 trajectory_metrics:
   handler: trajectory_metrics
   metrics:
-    - probability
+    - probability  # Simple list of metric names
+  trajectory_config:
+    return_logits: true
+    return_fixation_steps: true
+```
+
+### Configuration with Metric Configs (Dict Format)
+
+```yaml
+trajectory_metrics:
+  handler: trajectory_metrics
+  metrics:
+    probability: {}  # Simple metric, no config needed
+    exact_memorization: {}  # Another simple metric
+    truth_ratio:  # Metric with pre_compute
+      aggregator: closer_to_1_better
+      pre_compute:
+        probability:  # Pre-compute metric
+          access_key: correct
+        probability:  # Can reuse same metric
+          access_key: wrong
   trajectory_config:
     return_logits: true
     return_fixation_steps: true
@@ -236,6 +258,9 @@ defaults:
 handler: trajectory_metrics
 batch_size: 1  # Start with 1 for memory efficiency
 
+# Metrics can be specified as:
+# 1. Simple list: ["probability", "exact_memorization"]
+# 2. Dict with configs: {"probability": {}, "truth_ratio": {"aggregator": "..."}}
 metrics:
   - probability
   - exact_memorization
@@ -263,17 +288,77 @@ collators:
       padding_side: left  # For generation
 ```
 
+### Dynamic Metric Loading
+
+Trajectory metrics support **any metric** from the open-unlearning framework. Metrics are loaded dynamically from `METRICS_REGISTRY` at runtime.
+
+**Available Metrics:**
+- `probability` - Token-level probability (lowest memory)
+- `exact_memorization` - Exact match rate
+- `truth_ratio` - Requires pre_compute metrics
+- `rouge` - Text-based similarity
+- `extraction_strength` - Extraction strength metric
+- And all other registered metrics
+
+**Pre-compute Metrics:**
+Metrics that require pre-compute (like `truth_ratio`) automatically compute their dependencies at each trajectory step:
+
+```yaml
+metrics:
+  truth_ratio:
+    aggregator: closer_to_1_better
+    pre_compute:
+      probability:  # Computed at each step
+        access_key: correct
+      probability:  # Can reuse same metric with different access_key
+        access_key: wrong
+```
+
+The system will:
+1. Compute each pre-compute metric at each step
+2. Structure results with `access_key` names
+3. Pass them to the main metric
+4. Return trajectory results organized by step
+
 ### Configuration Parameters
 
 | Parameter | Type | Default | Description |
 |-----------|------|---------|-------------|
 | `handler` | str | required | Must be `"trajectory_metrics"` |
-| `metrics` | list[str] | required | List of metric names to compute |
+| `metrics` | list[str] or dict | required | List of metric names OR dict mapping names to configs |
 | `batch_size` | int | 1 | Batch size for evaluation |
 | `trajectory_config.return_logits` | bool | true | Enable logits tracking in sampler |
 | `trajectory_config.return_fixation_steps` | bool | true | Enable fixation step tracking |
 | `trajectory_config.sampler_kwargs.steps` | int | 32 | Number of diffusion steps |
 | `trajectory_config.sampler_kwargs.max_new_tokens` | int | 64 | Max tokens to generate |
+
+### Metric Configuration
+
+**List Format (Simple):**
+```yaml
+metrics:
+  - probability
+  - exact_memorization
+```
+
+**Dict Format (With Configs):**
+```yaml
+metrics:
+  probability: {}  # No config needed
+  truth_ratio:
+    aggregator: closer_to_1_better
+    pre_compute:
+      probability:
+        access_key: correct
+      probability:
+        access_key: wrong
+```
+
+**Pre-compute Metrics:**
+- Pre-compute metrics are automatically computed at each trajectory step
+- Results are structured with `access_key` names
+- Supports nested pre-compute (pre-compute metrics can have their own pre-compute)
+- Preserves all fields (e.g., `avg_loss` for `truth_ratio` compatibility)
 
 ## Implementation Details
 
