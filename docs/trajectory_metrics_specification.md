@@ -2,7 +2,104 @@
 
 ## Overview
 
-This document specifies the trajectory-based metrics evaluation system for diffusion language models (dLLMs). The system computes metrics at each diffusion step across three trajectory types, enabling analysis of how metrics evolve during the denoising process.
+This document specifies the trajectory-based metrics evaluation system for diffusion language models (dLLMs). The system computes metrics at each diffusion step across four trajectory types, enabling analysis of how metrics evolve during the denoising process.
+
+## Trajectory Examples
+
+The following example illustrates how different trajectory types map diffusion steps to R steps. In this example:
+- 5 token positions (rows)
+- Fixation steps: F[0]=6, F[1]=3, F[2]=3, F[3]=9, F[4]=11
+- `=` represents a diffusion step, `F` marks the fixation step, `[=]` marks the current trajectory step
+
+### Steps Trajectory
+```
+Step 0:  [=]=====F-----
+         [=]==F--------
+         [=]==F--------
+         [=]========F--
+         [=]===========F
+
+Step K:  =====[=]F-----
+         ===F-[-]------
+         ===F-[-]------
+         =====[=]===F--
+         =====[=]=====F
+
+Step S-1: ======F-----
+          ===F--------
+          ===F--------
+          =========F--
+          ===========F
+```
+
+### Fixation Start Trajectory
+```
+Step 0:  [=]=====F-----
+         [=]==F--------
+         [=]==F--------
+         [=]========F--
+         [=]===========F
+
+Step K:  =====[=]F-----
+         ===[F]--------
+         ===[F]--------
+         =====[=]===F--
+         =====[=]=====F
+
+Step S-1: ======[F]-----
+          ===[F]--------
+          ===[F]--------
+          =========[F]--
+          ============[F]
+```
+
+### Fixation End Trajectory
+```
+Step 0:  [=]=====F-----
+         [=]==F--------
+         [=]==F--------
+         [=]========F--
+         [=]==========F
+
+Step K:  =[=]====F-----
+         [=]==F--------
+         [=]==F--------
+         ====[=]====F--
+         ======[=]====F
+
+Step S-1: ======[F]-----
+          ===[F]--------
+          ===[F]--------
+          =========[F]--
+          ============[F]
+
+Step S-2: =====[=]F-----
+          ==[=]F--------
+          ==[=]F--------
+          ========[=]F--
+          ===========[=]F
+```
+
+### Fixation Ratio Trajectory
+```
+Step 0:  [=]=====F-----
+         [=]==F--------
+         [=]==F--------
+         [=]========F--
+         [=]===========F
+
+Step K:  ==[=]==F-----
+         =[=]=F--------
+         =[=]=F--------
+         ====[=]====F--
+         =====[=]=====F
+
+Step S-1: ======[F]-----
+          ===[F]--------
+          ===[F]--------
+          =========[F]--
+          ============[F]
+```
 
 ## Definitions
 
@@ -43,7 +140,9 @@ This document specifies the trajectory-based metrics evaluation system for diffu
 
 ### 3. Trajectory Tensors
 
-Three trajectory tensors, each of shape `[V, L, S]`:
+Four trajectory tensors, each of shape `[V, L, S]`:
+
+All fixation trajectories satisfy: **first (s=0) = R step 0**, **last (s=S-1) = R step F[l]**.
 
 #### 3.1 Steps Trajectory
 
@@ -55,56 +154,82 @@ T_steps[v, l, s] = R[v, l, s]
 **Semantics:**
 - Direct copy of the logits tensor R
 - Shows raw logits at each step without transformation
-
-#### 3.2 Fixation Trajectory
-
-**Definition:**
-```
-T_fixation[v, l, s] = R[v, l, max(0, F[l] - s)]
-```
-
-**Semantics:**
-- For each token position `l` and step `s`, looks back `s` steps from the fixation step `F[l]`
-- At `s=0`: Uses logits at fixation step `F[l]`
-- At `s>0`: Uses logits from step `F[l] - s` (clamped to step 0)
-- Creates a trajectory centered around when each token was fixed
-
-**Example:**
-- If token at position 5 was fixed at step 10 (`F[5] = 10`):
-  - `s=0`: Uses logits from step 10
-  - `s=1`: Uses logits from step 9
-  - `s=2`: Uses logits from step 8
-  - etc.
-
-#### 3.3 Ratio Trajectory
-
-**Definition:**
-```
-T_ratio[v, l, s] = R[v, l, floor(F[l] * (s / S))]
-```
-
-**Semantics:**
-- Interpolates from step 0 to the fixation step `F[l]` proportionally
 - At `s=0`: Uses logits from step 0
-- At `s=S-1`: Uses logits from step `F[l]` (fixation step)
-- Creates a smooth interpolation trajectory
+- At `s=S-1`: Uses logits from step S-1
+
+#### 3.2 Fixation Start Trajectory
+
+**Definition:**
+```
+T_fixation_start[v, l, s] = R[v, l, min(s, F[l])]
+```
+
+**Semantics:**
+- Trajectory from step 0 to fixation step F[l]
+- At `s=0`: Uses logits from step 0
+- At `s≤F[l]`: Uses logits from step s (increases linearly)
+- At `s>F[l]`: Uses logits from step F[l] (clamped to fixation step)
+- At `s=S-1`: Uses logits from step F[l] (fixation step)
 
 **Example:**
-- If token at position 5 was fixed at step 10 (`F[5] = 10`) and `S=20`:
-  - `s=0`: Uses logits from step `floor(10 * 0/20) = 0`
-  - `s=10`: Uses logits from step `floor(10 * 10/20) = 5`
-  - `s=19`: Uses logits from step `floor(10 * 19/20) = 9` (clamped to valid range)
+- If token at position 5 was fixed at step 7 (`F[5] = 7`) and `S=10`:
+  - `s=0`: Uses logits from step 0
+  - `s=3`: Uses logits from step 3
+  - `s=7`: Uses logits from step 7 (fixation)
+  - `s=9`: Uses logits from step 7 (clamped to fixation)
+
+#### 3.3 Fixation End Trajectory
+
+**Definition:**
+```
+T_fixation_end[v, l, s] = R[v, l, max(0, F[l] - (S-1) + s)]
+```
+
+**Semantics:**
+- Trajectory from step 0 to fixation step F[l]
+- At `s=0`: Uses logits from step 0 (since F[l] - (S-1) + 0 ≤ 0 when F[l] < S)
+- As `s` increases: Uses logits from step `F[l] - (S-1) + s` (increases toward fixation)
+- At `s=S-1`: Uses logits from step F[l] (fixation step)
+- Source step is clamped to valid range [0, S-1]
+
+**Example:**
+- If token at position 5 was fixed at step 7 (`F[5] = 7`) and `S=10`:
+  - `s=0`: Uses logits from step `max(0, 7-9+0) = 0`
+  - `s=3`: Uses logits from step `max(0, 7-9+3) = 1`
+  - `s=7`: Uses logits from step `max(0, 7-9+7) = 5`
+  - `s=9`: Uses logits from step `max(0, 7-9+9) = 7` (fixation)
+
+#### 3.4 Fixation Ratio Trajectory
+
+**Definition:**
+```
+T_fixation_ratio[v, l, s] = R[v, l, floor(F[l] * s / (S-1))]
+```
+
+**Semantics:**
+- Linear interpolation from step 0 to fixation step F[l]
+- At `s=0`: Uses logits from step 0
+- At `s=S-1`: Uses logits from step F[l] (fixation step)
+- Creates a smooth linear interpolation trajectory
+- Assumes S > 1
+
+**Example:**
+- If token at position 5 was fixed at step 7 (`F[5] = 7`) and `S=10`:
+  - `s=0`: Uses logits from step `floor(7 * 0/9) = 0`
+  - `s=3`: Uses logits from step `floor(7 * 3/9) = 2`
+  - `s=6`: Uses logits from step `floor(7 * 6/9) = 4`
+  - `s=9`: Uses logits from step `floor(7 * 9/9) = 7` (fixation)
 
 ### 4. Metrics Tensor M
 
-**Shape:** `[3, S, M]`
+**Shape:** `[4, S, M]`
 
-- **First dimension**: Trajectory type (0=steps, 1=fixation, 2=ratio)
+- **First dimension**: Trajectory type (0=steps, 1=fixation_start, 2=fixation_end, 3=fixation_ratio)
 - **Second dimension**: Diffusion step `s` (0 to S-1)
 - **Third dimension**: Metric index (one per requested metric)
 
 **Computation:**
-For each trajectory type `t ∈ {0, 1, 2}` and step `s ∈ [0, S-1]`:
+For each trajectory type `t ∈ {0, 1, 2, 3}` and step `s ∈ [0, S-1]`:
 
 1. Extract logits `[V, L]` at step `s` from trajectory `t`
 2. For logit-based metrics:
@@ -130,37 +255,11 @@ The `trajectory_metrics` function returns a dictionary following the standard me
             "rouge": np.array([...]),        # [S] - mean across samples at each step
             ...
         },
-        "fixation": {...},  # Same structure
-        "ratio": {...}      # Same structure
+        "fixation_start": {...},    # Same structure
+        "fixation_end": {...},      # Same structure
+        "fixation_ratio": {...}     # Same structure
     },
-    "value_by_index": {
-        # Per-sample values organized by trajectory, step, and metric
-        "0": {  # Sample index
-            "trajectories": {
-                "steps": {
-                    "step_0": {
-                        "probability": 0.5,
-                        "exact_memorization": 0.8,
-                        "rouge": 0.75,
-                        ...
-                    },
-                    "step_1": {...},
-                    ...
-                    "step_S-1": {...}
-                },
-                "fixation": {
-                    "step_0": {...},
-                    ...
-                },
-                "ratio": {
-                    "step_0": {...},
-                    ...
-                }
-            }
-        },
-        "1": {...},  # Next sample
-        ...
-    }
+    "value_by_index": {}  # Empty - per-sample trajectories not stored (memory optimization)
 }
 ```
 
@@ -194,7 +293,7 @@ Samplers (MDLMSampler, BD3LMSampler) are modified to:
 
 1. **Stack logits**: Convert `logits_history` list to `R [V, L, S]` tensor
 2. **Extract F**: Extract fixation steps `F [L]` from `fixation_steps [B, T]`
-3. **Compute trajectories**: Use `compute_trajectories(R, F, S)` to get three trajectory tensors
+3. **Compute trajectories**: Use `compute_trajectories(R, F, S)` to get four trajectory tensors (steps, fixation_start, fixation_end, fixation_ratio)
 
 ### Metric Computation
 
@@ -244,10 +343,12 @@ Results will include trajectory metrics with values at each step for each trajec
 
 ## Notes
 
-- **Memory considerations**: Storing logits for all steps can be memory-intensive. Consider:
-  - Computing metrics only at selected steps
-  - Using smaller batch sizes
-  - Optional quantization of logits
+- **Memory considerations**: 
+  - Per-sample trajectory data is not stored (only aggregated values are returned)
+  - Storing logits for all steps can be memory-intensive. Consider:
+    - Computing metrics only at selected steps
+    - Using smaller batch sizes
+    - Optional quantization of logits
   
 - **Performance**: Computing metrics at every step for every trajectory can be slow. Consider:
   - Computing metrics only at selected steps

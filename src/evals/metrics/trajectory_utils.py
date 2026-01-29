@@ -3,7 +3,7 @@ Utilities for computing trajectory tensors from logits and fixation steps.
 
 This module provides functions to:
 - Stack logits history into a tensor
-- Compute three trajectory types (steps, fixation, ratio)
+- Compute four trajectory types (steps, fixation_start, fixation_end, fixation_ratio)
 - Extract logits at specific steps
 - Decode logits to text
 """
@@ -50,23 +50,27 @@ def stack_logits_history(logits_history: List[torch.Tensor]) -> torch.Tensor:
 
 def compute_trajectories(
     R: torch.Tensor, F: torch.Tensor, S: int
-) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
     """
-    Compute three trajectory tensors from logits R and fixation steps F.
+    Compute four trajectory tensors from logits R and fixation steps F.
+    
+    All fixation trajectories satisfy: first (s=0) = R step 0, last (s=S-1) = R step F[l].
     
     Args:
         R: [V, L, S] logits tensor
         F: [L] fixation steps tensor (step index where each position was fixed)
-        S: Number of diffusion steps
+        S: Number of diffusion steps (must be > 1)
     
     Returns:
         T_steps: [V, L, S] steps trajectory (direct copy of R)
-        T_fixation: [V, L, S] fixation trajectory (look back from fixation step)
-        T_ratio: [V, L, S] ratio trajectory (interpolate from step 0 to fixation)
+        T_fixation_start: [V, L, S] fixation start trajectory (from step 0 to fixation)
+        T_fixation_end: [V, L, S] fixation end trajectory (from step 0 to fixation)
+        T_fixation_ratio: [V, L, S] fixation ratio trajectory (linear interpolation from 0 to F[l])
     """
     V, L, S_actual = R.shape
     assert S == S_actual, f"S mismatch: {S} != {S_actual}"
     assert F.shape[0] == L, f"F length mismatch: {F.shape[0]} != {L}"
+    assert S > 1, f"S must be > 1, got {S}"
     
     device = R.device
     dtype = R.dtype
@@ -74,28 +78,38 @@ def compute_trajectories(
     # Steps trajectory: Direct copy of R
     T_steps = R.clone()  # [V, L, S]
     
-    # Fixation trajectory: Look back from fixation step
-    # T_fixation[v, l, s] = R[v, l, max(0, F[l] - s)]
-    T_fixation = torch.zeros_like(R)
-    for l in range(L):
-        for s in range(S):
-            source_step = max(0, int(F[l].item()) - s)
-            T_fixation[:, l, s] = R[:, l, source_step]
-    
-    # Ratio trajectory: Interpolate from step 0 to fixation
-    # T_ratio[v, l, s] = R[v, l, floor(F[l] * (s / S))]
-    T_ratio = torch.zeros_like(R)
+    # Fixation start trajectory: From step 0 to fixation
+    # T_fixation_start[v, l, s] = R[v, l, min(s, F[l])]
+    T_fixation_start = torch.zeros_like(R)
     for l in range(L):
         fix_step = int(F[l].item())
         for s in range(S):
-            if S > 0:
-                ratio_step = int(fix_step * (s / S))
-                ratio_step = min(ratio_step, S - 1)  # Clamp to valid range
-            else:
-                ratio_step = 0
-            T_ratio[:, l, s] = R[:, l, ratio_step]
+            source_step = min(s, fix_step)
+            source_step = max(0, min(source_step, S - 1))  # Clamp to [0, S-1]
+            T_fixation_start[:, l, s] = R[:, l, source_step]
     
-    return T_steps, T_fixation, T_ratio
+    # Fixation end trajectory: From step 0 to fixation
+    # T_fixation_end[v, l, s] = R[v, l, max(0, F[l]-(S-1)+s)]
+    T_fixation_end = torch.zeros_like(R)
+    for l in range(L):
+        fix_step = int(F[l].item())
+        for s in range(S):
+            source_step = max(0, fix_step - (S - 1) + s)
+            source_step = max(0, min(source_step, S - 1))  # Clamp to [0, S-1]
+            T_fixation_end[:, l, s] = R[:, l, source_step]
+    
+    # Fixation ratio trajectory: Linear interpolation from step 0 to fixation
+    # T_fixation_ratio[v, l, s] = R[v, l, floor(F[l]*s/(S-1))]
+    # Assumes S > 1 (asserted above)
+    T_fixation_ratio = torch.zeros_like(R)
+    for l in range(L):
+        fix_step = int(F[l].item())
+        for s in range(S):
+            ratio_step = int(fix_step * s / (S - 1))
+            ratio_step = max(0, min(ratio_step, S - 1))  # Clamp to [0, S-1]
+            T_fixation_ratio[:, l, s] = R[:, l, ratio_step]
+    
+    return T_steps, T_fixation_start, T_fixation_end, T_fixation_ratio
 
 
 def extract_logits_at_step(trajectory: torch.Tensor, step: int) -> torch.Tensor:

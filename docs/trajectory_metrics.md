@@ -202,14 +202,8 @@ python src/eval.py \
 cd /workspaces/dllm
 
 uv run dllm job trajectory-eval \
-  --gpu-type A100-40 \
-  -- open-unlearning/src/eval.py \
-  --config-name=eval.yaml \
-  eval=tofu \
-  model=LLaDA-8B-Instruct \
-  +eval.tofu.metrics.trajectory_metrics=_global_.eval.metrics.trajectory_metrics \
-  +eval.tofu.metrics.trajectory_metrics.handler=trajectory_metrics \
-  task_name=trajectory_eval
+  --set gpu.type=A100-40 \
+  -- dllm eval trajectory-eval --model GSAI-ML/LLaDA-8B-Instruct --benchmark tofu
 ```
 
 ## Configuration

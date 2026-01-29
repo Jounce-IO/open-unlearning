@@ -645,9 +645,11 @@ def trajectory_metrics(model, **kwargs):
     # Create dataloader
     dataloader = DataLoader(data, batch_size=batch_size, collate_fn=collator)
     
-    # Storage for results
-    all_results = {}  # {sample_idx: {trajectories: {...}}}
-    trajectory_names = ["steps", "fixation", "ratio"]
+    # Trajectory names
+    trajectory_names = ["steps", "fixation_start", "fixation_end", "fixation_ratio"]
+    
+    # Storage for aggregation: collect values across samples per step
+    step_values = {traj_name: {} for traj_name in trajectory_names}
     
     # Get sampler from model
     sampler = _get_sampler_from_model(model)
@@ -740,12 +742,13 @@ def trajectory_metrics(model, **kwargs):
         else:
             raise ValueError(f"Unexpected fixation_steps shape: {fixation_steps.shape}")
         
-        # Compute three trajectory tensors
-        T_steps, T_fixation, T_ratio = compute_trajectories(R, F, S)
+        # Compute four trajectory tensors
+        T_steps, T_fixation_start, T_fixation_end, T_fixation_ratio = compute_trajectories(R, F, S)
         trajectories = {
             "steps": T_steps,
-            "fixation": T_fixation,
-            "ratio": T_ratio,
+            "fixation_start": T_fixation_start,
+            "fixation_end": T_fixation_end,
+            "fixation_ratio": T_fixation_ratio,
         }
         
         # Process each sample in batch
@@ -756,23 +759,15 @@ def trajectory_metrics(model, **kwargs):
             # For now, use shared trajectories (assuming single sample or first sample)
             sample_trajectories = trajectories if sample_idx == 0 else trajectories
             
-            sample_results = {
-                "trajectories": {
-                    "steps": {},
-                    "fixation": {},
-                    "ratio": {},
-                }
-            }
-            
             # Get ground truth for this sample
             sample_labels = labels[sample_idx] if labels is not None else None
             sample_input_ids = input_ids[sample_idx]
             sample_prompt_len = prompt_lens[sample_idx]
-            
-            # Extract only the generated portion of labels to match logits shape [V, L]
-            # Logits from trajectory only cover generated tokens (L), not the prompt
-            # evaluate_probability does: logits[..., :-1, :] and labels[..., 1:]
-            # So if logits are [1, L, V], after processing: logits [1, L-1, V], labels [1, L-1]
+        
+        # Extract only the generated portion of labels to match logits shape [V, L]
+        # Logits from trajectory only cover generated tokens (L), not the prompt
+        # evaluate_probability does: logits[..., :-1, :] and labels[..., 1:]
+        # So if logits are [1, L, V], after processing: logits [1, L-1, V], labels [1, L-1]
             # This means we need labels of length L to get L-1 after shift
             if sample_labels is not None:
                 # Extract generated region: from prompt_end to prompt_end + L
@@ -799,11 +794,12 @@ def trajectory_metrics(model, **kwargs):
                 "index": torch.tensor([int(idx_str)], dtype=torch.long, device=sample_input_ids.device),  # Required by run_batchwise_evals
             }
             
-            # Compute metrics for each trajectory type and step
+            # Compute metrics for each trajectory type and step, aggregate directly
             for traj_name, trajectory in sample_trajectories.items():
                 for step in range(S):
-                    step_key = f"step_{step}"
-                    step_results = {}
+                    # Initialize step_values[traj_name][step] if not exists
+                    if step not in step_values[traj_name]:
+                        step_values[traj_name][step] = {metric_name: [] for metric_name in loaded_metrics.keys()}
                     
                     # Extract logits at this step
                     logits = extract_logits_at_step(trajectory, step)  # [V, L]
@@ -830,12 +826,12 @@ def trajectory_metrics(model, **kwargs):
                                 **kwargs_clean
                             )
                             
-                            # Extract metric value from result
-                            # Handle different result formats
+                            # Extract metric value from result and append directly to step_values
+                            metric_value = None
                             if isinstance(result, dict):
                                 # Try common keys
                                 if "agg_value" in result:
-                                    step_results[metric_name] = result["agg_value"]
+                                    metric_value = result["agg_value"]
                                 elif "value_by_index" in result:
                                     # Extract value from first index
                                     value_by_index = result["value_by_index"]
@@ -846,83 +842,70 @@ def trajectory_metrics(model, **kwargs):
                                         if isinstance(first_value, dict):
                                             for key in ["prob", "score", "value"]:
                                                 if key in first_value:
-                                                    step_results[metric_name] = first_value[key]
+                                                    metric_value = first_value[key]
                                                     break
-                                            else:
+                                            if metric_value is None:
                                                 # Use first numeric value
                                                 for key, value in first_value.items():
                                                     if isinstance(value, (int, float, np.number)):
-                                                        step_results[metric_name] = float(value)
+                                                        metric_value = float(value)
                                                         break
                                 elif "prob" in result:
-                                    step_results[metric_name] = result["prob"]
+                                    metric_value = result["prob"]
                                 elif "score" in result:
-                                    step_results[metric_name] = result["score"]
+                                    metric_value = result["score"]
                                 else:
                                     # Use first numeric value
                                     for key, value in result.items():
                                         if isinstance(value, (int, float, np.number)):
-                                            step_results[metric_name] = float(value)
+                                            metric_value = float(value)
                                             break
                             elif isinstance(result, list) and len(result) > 0:
                                 # List of dicts (common format)
                                 result_dict = result[0]
                                 if isinstance(result_dict, dict):
                                     if "prob" in result_dict:
-                                        step_results[metric_name] = result_dict["prob"]
+                                        metric_value = result_dict["prob"]
                                     elif "score" in result_dict:
-                                        step_results[metric_name] = result_dict["score"]
+                                        metric_value = result_dict["score"]
                                     else:
                                         # Use first numeric value
                                         for key, value in result_dict.items():
                                             if isinstance(value, (int, float, np.number)):
-                                                step_results[metric_name] = float(value)
+                                                metric_value = float(value)
                                                 break
                             elif isinstance(result, (int, float, np.number)):
-                                step_results[metric_name] = float(result)
-                            else:
-                                logger.warning(
-                                    f"Unexpected result format for {metric_name}: {type(result)}. "
-                                    f"Result: {result}"
-                                )
-                                step_results[metric_name] = None
+                                metric_value = float(result)
+                            
+                            # Append to step_values for aggregation
+                            if metric_value is not None:
+                                step_values[traj_name][step][metric_name].append(metric_value)
                         
                         except Exception as e:
                             logger.warning(
                                 f"Error computing {metric_name} at step {step} for {traj_name}: {e}",
                                 exc_info=True
                             )
-                            step_results[metric_name] = None
-                    
-                    sample_results["trajectories"][traj_name][step_key] = step_results
-            
-            all_results[idx_str] = sample_results
     
-    # Aggregate results
+    # Aggregate results: compute mean across samples for each step (after all batches)
     agg_value = {}
     for traj_name in trajectory_names:
         agg_value[traj_name] = {}
         for metric_name in loaded_metrics.keys():
-            # Collect values per step across all samples
-            step_values = {}  # {step: [values across samples]}
-            
-            for sample_idx, sample_results in all_results.items():
-                traj_results = sample_results["trajectories"][traj_name]
-                for step_key, step_results in traj_results.items():
-                    if metric_name in step_results and step_results[metric_name] is not None:
-                        # Extract step number from step_key (e.g., "step_5" -> 5)
-                        step_num = int(step_key.split("_")[1])
-                        if step_num not in step_values:
-                            step_values[step_num] = []
-                        step_values[step_num].append(step_results[metric_name])
+            # Collect values per step
+            step_metric_values = {}  # {step: [values across samples]}
+            if traj_name in step_values:
+                for step, metrics_dict in step_values[traj_name].items():
+                    if metric_name in metrics_dict and len(metrics_dict[metric_name]) > 0:
+                        step_metric_values[step] = metrics_dict[metric_name]
             
             # Aggregate: mean across samples for each step
-            if step_values:
-                max_step = max(step_values.keys())
+            if step_metric_values:
+                max_step = max(step_metric_values.keys())
                 aggregated = []
                 for step in range(max_step + 1):
-                    if step in step_values:
-                        aggregated.append(np.mean(step_values[step]))
+                    if step in step_metric_values:
+                        aggregated.append(np.mean(step_metric_values[step]))
                     else:
                         aggregated.append(np.nan)
                 agg_value[traj_name][metric_name] = np.array(aggregated)
@@ -931,5 +914,5 @@ def trajectory_metrics(model, **kwargs):
     
     return {
         "agg_value": agg_value,
-        "value_by_index": all_results,
+        "value_by_index": {},  # Empty since we don't store per-sample trajectories
     }

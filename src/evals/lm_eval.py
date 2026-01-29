@@ -108,8 +108,11 @@ class LMEvalEvaluator(Evaluator):
                 task_manager=self.task_manager,
                 **self.simple_evaluate_args,
             )
-            logs.update({task_name: results["samples"]})
-            summary.update(self.summarize(results, task_name))
+            # Store only aggregated metrics, not sample-wise data
+            task_summary = self.summarize(results, task_name)
+            summary.update(task_summary)
+            # Store aggregated metrics for this task (no sample-wise data)
+            logs[task_name] = task_summary
             self.save_logs(logs, logs_file_path)
             self.save_logs(summary, summary_file_path)
         return summary

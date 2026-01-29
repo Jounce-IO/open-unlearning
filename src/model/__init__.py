@@ -21,6 +21,7 @@ try:
     _DIFFUSION_ADAPTER_AVAILABLE = True
 except ImportError:
     _DIFFUSION_ADAPTER_AVAILABLE = False
+
     def wrap_model_if_diffusion(model, tokenizer, config=None):
         """Fallback if adapter not available."""
         return model
@@ -139,7 +140,15 @@ def get_model(model_cfg: DictConfig):
                     logger.info("Added default mask_token '<|mask|>' for diffusion model")
         diffusion_config = model_cfg.get("diffusion_adapter", None)
         model = wrap_model_if_diffusion(model, tokenizer, config=diffusion_config)
-    
+    else:
+        # Adapter not available - check if this looks like a diffusion model (will fail trajectory metrics)
+        model_type = type(model).__name__.lower()
+        if any(x in model_type for x in ("llada", "dream", "diffusion", "mdlm", "bd3lm")):
+            logger.warning(
+                "DiffusionModelAdapter not available (dllm.integrations import failed). "
+                "Trajectory metrics will fail. Ensure PYTHONPATH includes the repo root (e.g. export PYTHONPATH=/app)."
+            )
+
     return model, tokenizer
 
 

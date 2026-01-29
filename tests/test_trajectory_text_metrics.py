@@ -345,8 +345,9 @@ class TestTrajectoryMetricsWithTwoMetrics:
             if "agg_value" in result:
                 agg = result["agg_value"]
                 assert "steps" in agg
-                assert "fixation" in agg
-                assert "ratio" in agg
+                assert "fixation_start" in agg
+                assert "fixation_end" in agg
+                assert "fixation_ratio" in agg
                 
                 # Check that both metrics are present
                 if "probability" in agg["steps"]:

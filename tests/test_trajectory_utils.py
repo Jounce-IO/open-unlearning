@@ -141,45 +141,64 @@ class TestComputeTrajectories:
         R = torch.randn(V, L, S)
         F = torch.randint(0, S, (L,))
         
-        T_steps, T_fixation, T_ratio = compute_trajectories(R, F, S)
+        T_steps, T_fixation_start, T_fixation_end, T_fixation_ratio = compute_trajectories(R, F, S)
         
         assert torch.allclose(T_steps, R)
         assert T_steps.shape == (V, L, S)
     
-    def test_fixation_trajectory_lookback(self):
-        """Test fixation trajectory looks back from fixation step."""
+    def test_fixation_start_trajectory_formula(self):
+        """Test fixation start trajectory: T_fixation_start[v,l,s] = R[v,l, min(s, F[l])]."""
         V, L, S = 10, 5, 8
         R = torch.arange(V * L * S, dtype=torch.float32).reshape(V, L, S)
-        # Set fixation steps: each position fixed at different steps
         F = torch.tensor([0, 2, 4, 6, 7])  # [L]
         
-        T_steps, T_fixation, T_ratio = compute_trajectories(R, F, S)
+        T_steps, T_fixation_start, T_fixation_end, T_fixation_ratio = compute_trajectories(R, F, S)
         
         # For position l=1, fixed at step 2
-        # At trajectory step s=0, should look back 0 steps: R[:, 1, 2]
-        # At trajectory step s=1, should look back 1 step: R[:, 1, max(0, 2-1)] = R[:, 1, 1]
-        # At trajectory step s=2, should look back 2 steps: R[:, 1, max(0, 2-2)] = R[:, 1, 0]
-        assert torch.allclose(T_fixation[:, 1, 0], R[:, 1, 2])  # s=0: look back 0
-        assert torch.allclose(T_fixation[:, 1, 1], R[:, 1, 1])  # s=1: look back 1
-        assert torch.allclose(T_fixation[:, 1, 2], R[:, 1, 0])  # s=2: look back 2
-        assert torch.allclose(T_fixation[:, 1, 3], R[:, 1, 0])  # s=3: look back 3, clamped to 0
+        # At trajectory step s=0: min(0, 2) = 0 → R[:, 1, 0]
+        # At trajectory step s=1: min(1, 2) = 1 → R[:, 1, 1]
+        # At trajectory step s=2: min(2, 2) = 2 → R[:, 1, 2]
+        # At trajectory step s=3: min(3, 2) = 2 → R[:, 1, 2] (clamped)
+        assert torch.allclose(T_fixation_start[:, 1, 0], R[:, 1, 0])
+        assert torch.allclose(T_fixation_start[:, 1, 1], R[:, 1, 1])
+        assert torch.allclose(T_fixation_start[:, 1, 2], R[:, 1, 2])
+        assert torch.allclose(T_fixation_start[:, 1, 3], R[:, 1, 2])  # Clamped to fixation
+        assert torch.allclose(T_fixation_start[:, 1, 7], R[:, 1, 2])  # Last step = fixation
     
-    def test_ratio_trajectory_interpolation(self):
-        """Test ratio trajectory interpolates from step 0 to fixation."""
+    def test_fixation_end_trajectory_formula(self):
+        """Test fixation end trajectory: T_fixation_end[v,l,s] = R[v,l, max(0, F[l]-(S-1)+s)]."""
+        V, L, S = 10, 5, 8
+        R = torch.arange(V * L * S, dtype=torch.float32).reshape(V, L, S)
+        F = torch.tensor([0, 2, 4, 6, 7])  # [L]
+        
+        T_steps, T_fixation_start, T_fixation_end, T_fixation_ratio = compute_trajectories(R, F, S)
+        
+        # For position l=1, fixed at step 2, S=8
+        # At trajectory step s=0: max(0, 2-7+0) = max(0, -5) = 0 → R[:, 1, 0]
+        # At trajectory step s=1: max(0, 2-7+1) = max(0, -4) = 0 → R[:, 1, 0]
+        # At trajectory step s=5: max(0, 2-7+5) = max(0, 0) = 0 → R[:, 1, 0]
+        # At trajectory step s=6: max(0, 2-7+6) = max(0, 1) = 1 → R[:, 1, 1]
+        # At trajectory step s=7: max(0, 2-7+7) = max(0, 2) = 2 → R[:, 1, 2] (fixation)
+        assert torch.allclose(T_fixation_end[:, 1, 0], R[:, 1, 0])
+        assert torch.allclose(T_fixation_end[:, 1, 1], R[:, 1, 0])
+        assert torch.allclose(T_fixation_end[:, 1, 6], R[:, 1, 1])
+        assert torch.allclose(T_fixation_end[:, 1, 7], R[:, 1, 2])  # Last step = fixation
+    
+    def test_fixation_ratio_trajectory_formula(self):
+        """Test fixation ratio trajectory: T_fixation_ratio[v,l,s] = R[v,l, floor(F[l]*s/(S-1))]."""
         V, L, S = 10, 3, 8
         R = torch.arange(V * L * S, dtype=torch.float32).reshape(V, L, S)
         F = torch.tensor([4, 6, 7])  # Fixation steps
         
-        T_steps, T_fixation, T_ratio = compute_trajectories(R, F, S)
+        T_steps, T_fixation_start, T_fixation_end, T_fixation_ratio = compute_trajectories(R, F, S)
         
-        # For position l=0, fixed at step 4
-        # At trajectory step s=0: ratio_step = floor(4 * 0/8) = 0
-        # At trajectory step s=4: ratio_step = floor(4 * 4/8) = 2
-        # At trajectory step s=7: ratio_step = floor(4 * 7/8) = 3
-        # At trajectory step s=8: ratio_step = floor(4 * 8/8) = 4, clamped to S-1=7
-        assert torch.allclose(T_ratio[:, 0, 0], R[:, 0, 0])
-        assert torch.allclose(T_ratio[:, 0, 4], R[:, 0, 2])
-        assert torch.allclose(T_ratio[:, 0, 7], R[:, 0, 3])
+        # For position l=0, fixed at step 4, S=8
+        # At trajectory step s=0: floor(4 * 0/7) = 0 → R[:, 0, 0]
+        # At trajectory step s=3: floor(4 * 3/7) = floor(12/7) = 1 → R[:, 0, 1]
+        # At trajectory step s=7: floor(4 * 7/7) = 4 → R[:, 0, 4] (fixation)
+        assert torch.allclose(T_fixation_ratio[:, 0, 0], R[:, 0, 0])
+        assert torch.allclose(T_fixation_ratio[:, 0, 3], R[:, 0, 1])
+        assert torch.allclose(T_fixation_ratio[:, 0, 7], R[:, 0, 4])  # Last step = fixation
     
     def test_shape_mismatch_raises_error(self):
         """Test that shape mismatches raise assertions."""
@@ -202,11 +221,12 @@ class TestComputeTrajectories:
         R = torch.randn(V, L, S)
         F = torch.randint(0, S, (L,))
         
-        T_steps, T_fixation, T_ratio = compute_trajectories(R, F, S)
+        T_steps, T_fixation_start, T_fixation_end, T_fixation_ratio = compute_trajectories(R, F, S)
         
         assert T_steps.shape == (V, L, S)
-        assert T_fixation.shape == (V, L, S)
-        assert T_ratio.shape == (V, L, S)
+        assert T_fixation_start.shape == (V, L, S)
+        assert T_fixation_end.shape == (V, L, S)
+        assert T_fixation_ratio.shape == (V, L, S)
     
     def test_fixation_at_boundary(self):
         """Test fixation trajectory at boundary cases (fixation at step 0 or S-1)."""
@@ -215,16 +235,17 @@ class TestComputeTrajectories:
         
         # All fixed at step 0
         F = torch.zeros(L, dtype=torch.long)
-        T_steps, T_fixation, T_ratio = compute_trajectories(R, F, S)
-        # Should all look back to step 0
+        T_steps, T_fixation_start, T_fixation_end, T_fixation_ratio = compute_trajectories(R, F, S)
+        # Should all use step 0 (min(s, 0) = 0)
         for s in range(S):
-            assert torch.allclose(T_fixation[:, 0, s], R[:, 0, 0])
+            assert torch.allclose(T_fixation_start[:, 0, s], R[:, 0, 0])
         
         # All fixed at last step
         F = torch.full((L,), S - 1, dtype=torch.long)
-        T_steps, T_fixation, T_ratio = compute_trajectories(R, F, S)
-        # At s=0, should be R[:, :, S-1], at s=1, should be R[:, :, S-2], etc.
-        assert torch.allclose(T_fixation[:, 0, 0], R[:, 0, S - 1])
+        T_steps, T_fixation_start, T_fixation_end, T_fixation_ratio = compute_trajectories(R, F, S)
+        # At s=0: min(0, S-1) = 0, at s=S-1: min(S-1, S-1) = S-1
+        assert torch.allclose(T_fixation_start[:, 0, 0], R[:, 0, 0])
+        assert torch.allclose(T_fixation_start[:, 0, S - 1], R[:, 0, S - 1])
     
     def test_fixation_steps_ascending_order(self):
         """Test fixation steps in ascending order [0, 1, 2, ..., S-1]."""
@@ -232,13 +253,12 @@ class TestComputeTrajectories:
         R = torch.arange(V * L * S, dtype=torch.float32).reshape(V, L, S)
         F = torch.arange(L, dtype=torch.long)  # [0, 1, 2, ..., 7]
         
-        T_steps, T_fixation, T_ratio = compute_trajectories(R, F, S)
+        T_steps, T_fixation_start, T_fixation_end, T_fixation_ratio = compute_trajectories(R, F, S)
         
         # For position l=1, fixed at step 1
-        # At s=0: look back 0 → R[:, 1, 1]
-        # At s=1: look back 1 → R[:, 1, max(0, 1-1)] = R[:, 1, 0]
-        assert torch.allclose(T_fixation[:, 1, 0], R[:, 1, 1])
-        assert torch.allclose(T_fixation[:, 1, 1], R[:, 1, 0])
+        # Fixation start: At s=0: min(0, 1) = 0 → R[:, 1, 0], at s=1: min(1, 1) = 1 → R[:, 1, 1]
+        assert torch.allclose(T_fixation_start[:, 1, 0], R[:, 1, 0])
+        assert torch.allclose(T_fixation_start[:, 1, 1], R[:, 1, 1])
     
     def test_fixation_steps_descending_order(self):
         """Test fixation steps in descending order [S-1, S-2, ..., 0]."""
@@ -246,13 +266,12 @@ class TestComputeTrajectories:
         R = torch.arange(V * L * S, dtype=torch.float32).reshape(V, L, S)
         F = torch.arange(S - 1, -1, -1, dtype=torch.long)  # [7, 6, 5, ..., 0]
         
-        T_steps, T_fixation, T_ratio = compute_trajectories(R, F, S)
+        T_steps, T_fixation_start, T_fixation_end, T_fixation_ratio = compute_trajectories(R, F, S)
         
         # For position l=0, fixed at step 7
-        # At s=0: look back 0 → R[:, 0, 7]
-        # At s=1: look back 1 → R[:, 0, 6]
-        assert torch.allclose(T_fixation[:, 0, 0], R[:, 0, 7])
-        assert torch.allclose(T_fixation[:, 0, 1], R[:, 0, 6])
+        # Fixation start: At s=0: min(0, 7) = 0 → R[:, 0, 0], at s=7: min(7, 7) = 7 → R[:, 0, 7]
+        assert torch.allclose(T_fixation_start[:, 0, 0], R[:, 0, 0])
+        assert torch.allclose(T_fixation_start[:, 0, 7], R[:, 0, 7])
     
     def test_fixation_steps_all_same_value(self):
         """Test fixation steps all same value (e.g., all 5)."""
@@ -261,14 +280,14 @@ class TestComputeTrajectories:
         fix_step = 5
         F = torch.full((L,), fix_step, dtype=torch.long)
         
-        T_steps, T_fixation, T_ratio = compute_trajectories(R, F, S)
+        T_steps, T_fixation_start, T_fixation_end, T_fixation_ratio = compute_trajectories(R, F, S)
         
-        # All positions should have same fixation trajectory
+        # All positions should have same fixation start trajectory
         for l in range(L):
-            # At s=0: R[:, l, 5]
-            assert torch.allclose(T_fixation[:, l, 0], R[:, l, fix_step])
-            # At s=1: R[:, l, 4]
-            assert torch.allclose(T_fixation[:, l, 1], R[:, l, fix_step - 1])
+            # At s=0: min(0, 5) = 0 → R[:, l, 0]
+            assert torch.allclose(T_fixation_start[:, l, 0], R[:, l, 0])
+            # At s=5: min(5, 5) = 5 → R[:, l, 5]
+            assert torch.allclose(T_fixation_start[:, l, 5], R[:, l, fix_step])
     
     def test_fixation_steps_with_duplicates(self):
         """Test fixation steps with duplicate values."""
@@ -276,34 +295,34 @@ class TestComputeTrajectories:
         R = torch.arange(V * L * S, dtype=torch.float32).reshape(V, L, S)
         F = torch.tensor([3, 3, 5, 5, 7], dtype=torch.long)  # Duplicates
         
-        T_steps, T_fixation, T_ratio = compute_trajectories(R, F, S)
+        T_steps, T_fixation_start, T_fixation_end, T_fixation_ratio = compute_trajectories(R, F, S)
         
         # Positions with same fixation should use same source step calculation
-        # At step s=0, both positions with F=3 should look at step 3
-        # T_fixation[:, l, s] = R[:, l, max(0, F[l] - s)]
-        # For l=0,1 with F=3, at s=0: source_step = max(0, 3-0) = 3
-        assert torch.allclose(T_fixation[:, 0, 0], R[:, 0, 3])  # Position 0 at step 0 = R[:, 0, 3]
-        assert torch.allclose(T_fixation[:, 1, 0], R[:, 1, 3])  # Position 1 at step 0 = R[:, 1, 3]
-        # For l=2,3 with F=5, at s=0: source_step = max(0, 5-0) = 5
-        assert torch.allclose(T_fixation[:, 2, 0], R[:, 2, 5])  # Position 2 at step 0 = R[:, 2, 5]
-        assert torch.allclose(T_fixation[:, 3, 0], R[:, 3, 5])  # Position 3 at step 0 = R[:, 3, 5]
+        # Fixation start: T_fixation_start[:, l, s] = R[:, l, min(s, F[l])]
+        # For l=0,1 with F=3, at s=0: source_step = min(0, 3) = 0
+        assert torch.allclose(T_fixation_start[:, 0, 0], R[:, 0, 0])
+        assert torch.allclose(T_fixation_start[:, 1, 0], R[:, 1, 0])
+        # For l=2,3 with F=5, at s=0: source_step = min(0, 5) = 0
+        assert torch.allclose(T_fixation_start[:, 2, 0], R[:, 2, 0])
+        assert torch.allclose(T_fixation_start[:, 3, 0], R[:, 3, 0])
         
-        # At step s=1, positions with F=3 should look at step 2
-        assert torch.allclose(T_fixation[:, 0, 1], R[:, 0, 2])  # Position 0 at step 1 = R[:, 0, 2]
-        assert torch.allclose(T_fixation[:, 1, 1], R[:, 1, 2])  # Position 1 at step 1 = R[:, 1, 2]
+        # At step s=3, positions with F=3 should use step 3 (fixation)
+        assert torch.allclose(T_fixation_start[:, 0, 3], R[:, 0, 3])
+        assert torch.allclose(T_fixation_start[:, 1, 3], R[:, 1, 3])
     
-    @pytest.mark.parametrize("S", [1, 16, 128, 256])
+    @pytest.mark.parametrize("S", [2, 16, 128, 256])  # S must be > 1
     def test_very_large_steps(self, S):
         """Test with very large number of steps."""
         V, L = 50, 10
         R = torch.randn(V, L, S)
         F = torch.randint(0, S, (L,))
         
-        T_steps, T_fixation, T_ratio = compute_trajectories(R, F, S)
+        T_steps, T_fixation_start, T_fixation_end, T_fixation_ratio = compute_trajectories(R, F, S)
         
         assert T_steps.shape == (V, L, S)
-        assert T_fixation.shape == (V, L, S)
-        assert T_ratio.shape == (V, L, S)
+        assert T_fixation_start.shape == (V, L, S)
+        assert T_fixation_end.shape == (V, L, S)
+        assert T_fixation_ratio.shape == (V, L, S)
     
     @pytest.mark.parametrize("L", [1, 16, 128, 512, 1024])
     def test_very_large_sequence_length(self, L):
@@ -312,11 +331,12 @@ class TestComputeTrajectories:
         R = torch.randn(V, L, S)
         F = torch.randint(0, S, (L,))
         
-        T_steps, T_fixation, T_ratio = compute_trajectories(R, F, S)
+        T_steps, T_fixation_start, T_fixation_end, T_fixation_ratio = compute_trajectories(R, F, S)
         
         assert T_steps.shape == (V, L, S)
-        assert T_fixation.shape == (V, L, S)
-        assert T_ratio.shape == (V, L, S)
+        assert T_fixation_start.shape == (V, L, S)
+        assert T_fixation_end.shape == (V, L, S)
+        assert T_fixation_ratio.shape == (V, L, S)
     
     @pytest.mark.parametrize("V", [100, 1000, 10000, 50000])
     def test_very_large_vocab_size(self, V):
@@ -325,49 +345,124 @@ class TestComputeTrajectories:
         R = torch.randn(V, L, S)
         F = torch.randint(0, S, (L,))
         
-        T_steps, T_fixation, T_ratio = compute_trajectories(R, F, S)
+        T_steps, T_fixation_start, T_fixation_end, T_fixation_ratio = compute_trajectories(R, F, S)
         
         assert T_steps.shape == (V, L, S)
-        assert T_fixation.shape == (V, L, S)
-        assert T_ratio.shape == (V, L, S)
+        assert T_fixation_start.shape == (V, L, S)
+        assert T_fixation_end.shape == (V, L, S)
+        assert T_fixation_ratio.shape == (V, L, S)
     
-    def test_fixation_trajectory_formula_verification(self):
-        """Verify T_fixation[:, l, s] = R[:, l, max(0, F[l] - s)] for all l, s."""
+    def test_fixation_start_formula_verification(self):
+        """Verify T_fixation_start[:, l, s] = R[:, l, min(s, F[l])] for all l, s."""
         V, L, S = 10, 5, 8
         R = torch.arange(V * L * S, dtype=torch.float32).reshape(V, L, S)
         F = torch.tensor([0, 2, 4, 6, 7], dtype=torch.long)
         
-        T_steps, T_fixation, T_ratio = compute_trajectories(R, F, S)
+        T_steps, T_fixation_start, T_fixation_end, T_fixation_ratio = compute_trajectories(R, F, S)
         
         # Verify formula for all positions and steps
         for l in range(L):
             fix_step = F[l].item()
             for s in range(S):
-                source_step = max(0, fix_step - s)
+                source_step = min(s, fix_step)
+                source_step = max(0, min(source_step, S - 1))  # Clamp
                 expected = R[:, l, source_step]
-                actual = T_fixation[:, l, s]
+                actual = T_fixation_start[:, l, s]
                 assert torch.allclose(actual, expected), f"Failed at l={l}, s={s}"
     
-    def test_ratio_trajectory_formula_verification(self):
-        """Verify T_ratio[:, l, s] = R[:, l, floor(F[l] * s/S)] for all l, s."""
+    def test_fixation_end_formula_verification(self):
+        """Verify T_fixation_end[:, l, s] = R[:, l, max(0, F[l]-(S-1)+s)] for all l, s."""
         V, L, S = 10, 5, 8
         R = torch.arange(V * L * S, dtype=torch.float32).reshape(V, L, S)
         F = torch.tensor([0, 2, 4, 6, 7], dtype=torch.long)
         
-        T_steps, T_fixation, T_ratio = compute_trajectories(R, F, S)
+        T_steps, T_fixation_start, T_fixation_end, T_fixation_ratio = compute_trajectories(R, F, S)
         
         # Verify formula for all positions and steps
         for l in range(L):
             fix_step = F[l].item()
             for s in range(S):
-                if S > 0:
-                    ratio_step = int(fix_step * (s / S))
-                    ratio_step = min(ratio_step, S - 1)
+                source_step = max(0, fix_step - (S - 1) + s)
+                source_step = max(0, min(source_step, S - 1))  # Clamp
+                expected = R[:, l, source_step]
+                actual = T_fixation_end[:, l, s]
+                assert torch.allclose(actual, expected), f"Failed at l={l}, s={s}"
+    
+    def test_fixation_ratio_formula_verification(self):
+        """Verify T_fixation_ratio[:, l, s] = R[:, l, floor(F[l]*s/(S-1))] for all l, s."""
+        V, L, S = 10, 5, 8
+        R = torch.arange(V * L * S, dtype=torch.float32).reshape(V, L, S)
+        F = torch.tensor([0, 2, 4, 6, 7], dtype=torch.long)
+        
+        T_steps, T_fixation_start, T_fixation_end, T_fixation_ratio = compute_trajectories(R, F, S)
+        
+        # Verify formula for all positions and steps
+        for l in range(L):
+            fix_step = F[l].item()
+            for s in range(S):
+                if S > 1:
+                    ratio_step = int(fix_step * s / (S - 1))
+                    ratio_step = max(0, min(ratio_step, S - 1))  # Clamp
                 else:
                     ratio_step = 0
                 expected = R[:, l, ratio_step]
-                actual = T_ratio[:, l, s]
+                actual = T_fixation_ratio[:, l, s]
                 assert torch.allclose(actual, expected), f"Failed at l={l}, s={s}"
+    
+    def test_first_last_validation_all_trajectories(self):
+        """Test that all trajectories have correct first (s=0) and last (s=S-1) values."""
+        V, L, S = 10, 5, 8
+        R = torch.arange(V * L * S, dtype=torch.float32).reshape(V, L, S)
+        F = torch.tensor([0, 2, 4, 6, 7], dtype=torch.long)
+        
+        T_steps, T_fixation_start, T_fixation_end, T_fixation_ratio = compute_trajectories(R, F, S)
+        
+        # Steps: first = R[:,:,0], last = R[:,:,S-1]
+        for l in range(L):
+            assert torch.allclose(T_steps[:, l, 0], R[:, l, 0])
+            assert torch.allclose(T_steps[:, l, S - 1], R[:, l, S - 1])
+        
+        # Fixation start: first = R[:,:,0], last = R[:,:,F[l]]
+        for l in range(L):
+            fix_step = F[l].item()
+            assert torch.allclose(T_fixation_start[:, l, 0], R[:, l, 0])
+            assert torch.allclose(T_fixation_start[:, l, S - 1], R[:, l, min(S - 1, fix_step)])
+        
+        # Fixation end: first = R[:,:,0], last = R[:,:,F[l]]
+        for l in range(L):
+            fix_step = F[l].item()
+            assert torch.allclose(T_fixation_end[:, l, 0], R[:, l, 0])
+            # At s=S-1: max(0, F[l]-(S-1)+(S-1)) = F[l]
+            assert torch.allclose(T_fixation_end[:, l, S - 1], R[:, l, fix_step])
+        
+        # Fixation ratio: first = R[:,:,0], last = R[:,:,F[l]]
+        for l in range(L):
+            fix_step = F[l].item()
+            assert torch.allclose(T_fixation_ratio[:, l, 0], R[:, l, 0])
+            # At s=S-1: floor(F[l]*(S-1)/(S-1)) = F[l]
+            assert torch.allclose(T_fixation_ratio[:, l, S - 1], R[:, l, fix_step])
+    
+    def test_fixation_start_and_end_differ(self):
+        """Test that fixation_start and fixation_end produce different trajectories."""
+        V, L, S = 10, 5, 8
+        R = torch.arange(V * L * S, dtype=torch.float32).reshape(V, L, S)
+        F = torch.tensor([3, 4, 5, 6, 7], dtype=torch.long)
+        
+        T_steps, T_fixation_start, T_fixation_end, T_fixation_ratio = compute_trajectories(R, F, S)
+        
+        # At s=0, both should be R[:,:,0] (same)
+        for l in range(L):
+            assert torch.allclose(T_fixation_start[:, l, 0], T_fixation_end[:, l, 0])
+        
+        # At s=S-1, both should be R[:,:,F[l]] (same)
+        for l in range(L):
+            assert torch.allclose(T_fixation_start[:, l, S - 1], T_fixation_end[:, l, S - 1])
+        
+        # At intermediate steps, they should differ (unless F[l] is at boundary)
+        # For l=1, F=4, at s=2:
+        # Fixation start: min(2, 4) = 2 → R[:,1,2]
+        # Fixation end: max(0, 4-7+2) = max(0, -1) = 0 → R[:,1,0]
+        assert not torch.allclose(T_fixation_start[:, 1, 2], T_fixation_end[:, 1, 2])
     
     @pytest.mark.parametrize("dtype", [torch.float32, torch.float16, torch.bfloat16])
     def test_trajectories_different_dtypes(self, dtype):
@@ -376,11 +471,12 @@ class TestComputeTrajectories:
         R = torch.randn(V, L, S, dtype=dtype)
         F = torch.randint(0, S, (L,), dtype=torch.long)
         
-        T_steps, T_fixation, T_ratio = compute_trajectories(R, F, S)
+        T_steps, T_fixation_start, T_fixation_end, T_fixation_ratio = compute_trajectories(R, F, S)
         
         assert T_steps.dtype == dtype
-        assert T_fixation.dtype == dtype
-        assert T_ratio.dtype == dtype
+        assert T_fixation_start.dtype == dtype
+        assert T_fixation_end.dtype == dtype
+        assert T_fixation_ratio.dtype == dtype
     
     def test_trajectories_different_devices(self):
         """Test trajectory computation with different devices."""
@@ -389,17 +485,18 @@ class TestComputeTrajectories:
         F = torch.randint(0, S, (L,))
         
         # CPU
-        T_steps_cpu, T_fixation_cpu, T_ratio_cpu = compute_trajectories(R, F, S)
+        T_steps_cpu, T_fixation_start_cpu, T_fixation_end_cpu, T_fixation_ratio_cpu = compute_trajectories(R, F, S)
         assert T_steps_cpu.device.type == "cpu"
         
         # CUDA if available
         if torch.cuda.is_available():
             R_cuda = R.cuda()
             F_cuda = F.cuda()
-            T_steps_cuda, T_fixation_cuda, T_ratio_cuda = compute_trajectories(R_cuda, F_cuda, S)
+            T_steps_cuda, T_fixation_start_cuda, T_fixation_end_cuda, T_fixation_ratio_cuda = compute_trajectories(R_cuda, F_cuda, S)
             assert T_steps_cuda.device.type == "cuda"
-            assert T_fixation_cuda.device.type == "cuda"
-            assert T_ratio_cuda.device.type == "cuda"
+            assert T_fixation_start_cuda.device.type == "cuda"
+            assert T_fixation_end_cuda.device.type == "cuda"
+            assert T_fixation_ratio_cuda.device.type == "cuda"
     
     def test_trajectories_are_new_tensors_not_views(self):
         """Test that T_fixation and T_ratio are new tensors, not views of R."""
@@ -407,7 +504,7 @@ class TestComputeTrajectories:
         R = torch.randn(V, L, S)
         F = torch.randint(0, S, (L,))
         
-        T_steps, T_fixation, T_ratio = compute_trajectories(R, F, S)
+        T_steps, T_fixation_start, T_fixation_end, T_fixation_ratio = compute_trajectories(R, F, S)
         
         # T_steps is a clone, so modifying R shouldn't affect it
         R_original = R.clone()
@@ -415,10 +512,11 @@ class TestComputeTrajectories:
         # T_steps should be unchanged (it's a clone)
         assert torch.allclose(T_steps, R_original)
         
-        # T_fixation and T_ratio are new tensors
+        # T_fixation_start, T_fixation_end, and T_fixation_ratio are new tensors
         # They should be independent of R after computation
-        assert not torch.equal(T_fixation, R)
-        assert not torch.equal(T_ratio, R)
+        assert not torch.equal(T_fixation_start, R)
+        assert not torch.equal(T_fixation_end, R)
+        assert not torch.equal(T_fixation_ratio, R)
     
     def test_trajectories_same_device_as_input(self):
         """Test that output tensors are on same device as input."""
@@ -426,11 +524,12 @@ class TestComputeTrajectories:
         R = torch.randn(V, L, S)
         F = torch.randint(0, S, (L,))
         
-        T_steps, T_fixation, T_ratio = compute_trajectories(R, F, S)
+        T_steps, T_fixation_start, T_fixation_end, T_fixation_ratio = compute_trajectories(R, F, S)
         
         assert T_steps.device == R.device
-        assert T_fixation.device == R.device
-        assert T_ratio.device == R.device
+        assert T_fixation_start.device == R.device
+        assert T_fixation_end.device == R.device
+        assert T_fixation_ratio.device == R.device
 
 
 class TestExtractLogitsAtStep:

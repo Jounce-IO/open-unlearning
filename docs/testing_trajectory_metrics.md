@@ -50,13 +50,8 @@ Deploy as a Kubernetes job:
 cd /workspaces/dllm
 
 uv run dllm job trajectory-test \
-  --gpu-type A100-40 \
-  -- open-unlearning/src/eval.py \
-  --config-name=eval.yaml \
-  eval=trajectory_test \
-  model=<YOUR_MODEL_CONFIG> \
-  model.model_args.pretrained_model_name_or_path=<MODEL_PATH> \
-  task_name=trajectory_test
+  --set gpu.type=A100-40 \
+  -- dllm eval trajectory-test --model GSAI-ML/LLaDA-8B-Instruct --benchmark muse
 ```
 
 ## Configuration
