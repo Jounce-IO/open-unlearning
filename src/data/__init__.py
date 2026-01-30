@@ -30,7 +30,12 @@ def _load_single_dataset(dataset_name, dataset_cfg: DictConfig, **kwargs):
         raise NotImplementedError(
             f"{dataset_handler_name} not implemented or not registered"
         )
-    dataset_args = dataset_cfg.args
+    dataset_args = dict(dataset_cfg.args)
+    # QADataset expects split in hf_args (for load_hf_dataset); move top-level split if present
+    split_val = dataset_args.pop("split", None) or kwargs.pop("split", None)
+    if split_val is not None and "hf_args" in dataset_args:
+        dataset_args["hf_args"] = dict(dataset_args["hf_args"])
+        dataset_args["hf_args"]["split"] = split_val
     return dataset_handler(**dataset_args, **kwargs)
 
 
