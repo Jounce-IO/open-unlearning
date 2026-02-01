@@ -1,0 +1,23 @@
+# @package eval.tofu_trajectory
+# TOFU trajectory mode - all 7 metrics computed at each diffusion step
+# Note: eval.tofu.forget_split etc come from experiment eval/tofu/default
+
+defaults:
+  - tofu_metrics:
+    - trajectory_forget_Q_A_Prob
+    - trajectory_forget_Q_A_ROUGE
+    - trajectory_extraction_strength
+    - trajectory_forget_Truth_Ratio
+    - trajectory_forget_quality
+    - trajectory_model_utility
+    - trajectory_privleak
+
+handler: TOFUEvaluator
+output_dir: ${paths.output_dir}
+metrics: {}
+overwrite: false
+forget_split: forget10
+holdout_split: holdout10
+retain_logs_path: null
+question_key: "question"
+batch_size: 32

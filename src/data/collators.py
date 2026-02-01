@@ -53,6 +53,13 @@ class DataCollatorForSupervisedDataset(object):
                 labels = [instance["labels"] for instance in instances]
                 labels = self._pad_tokens(labels, IGNORE_INDEX)
                 return_dct.update({"labels": labels})
+            for extra_label_key in ("labels_correct", "labels_wrong"):
+                if extra_label_key in instances[0]:
+                    extra_labels = [
+                        instance[extra_label_key] for instance in instances
+                    ]
+                    extra_labels = self._pad_tokens(extra_labels, IGNORE_INDEX)
+                    return_dct.update({extra_label_key: extra_labels})
             if self.index:
                 if self.index in instances[0]:
                     return_dct.update(

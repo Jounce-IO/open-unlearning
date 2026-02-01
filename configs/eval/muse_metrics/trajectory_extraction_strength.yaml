@@ -1,0 +1,36 @@
+# @package _global_.eval.metrics.trajectory_extraction_strength
+# Trajectory-wrapped extraction_strength - same metric/dataset as regular, computed at each diffusion step
+
+defaults:
+  - ../../data/datasets@datasets: MUSE_forget_verbmem
+  - ../../collator@collators: DataCollatorForSupervisedDatasetwithIndex
+
+handler: trajectory_metrics
+batch_size: 1
+metrics:
+  - extraction_strength
+trajectory_config:
+  logits_source: sampler
+  return_logits: true
+  return_fixation_steps: true
+  sampler_kwargs:
+    steps: 16
+    temperature: 0.0
+    max_new_tokens: 128
+
+datasets:
+  MUSE_forget_verbmem:
+    args:
+      hf_args:
+        path: muse-bench/MUSE-${data_split}
+        name: verbmem
+        split: "forget[:5]"
+      prefix_key: "prompt"
+      text_key: "gt"
+      max_length: 2048
+      insert_space: True
+
+collators:
+  DataCollatorForSupervisedDataset:
+    args:
+      padding_side: left

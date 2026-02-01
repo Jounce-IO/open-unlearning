@@ -1,0 +1,17 @@
+# @package eval.muse_trajectory
+# MUSE trajectory mode - all 5 metrics computed at each diffusion step
+
+defaults:
+  - muse_metrics:
+    - trajectory_forget_knowmem_ROUGE
+    - trajectory_retain_knowmem_ROUGE
+    - trajectory_forget_verbmem_ROUGE
+    - trajectory_extraction_strength
+    - trajectory_privleak
+
+handler: MUSEEvaluator
+output_dir: ${paths.output_dir}
+metrics: {}
+overwrite: false
+data_split: News
+retain_logs_path: null

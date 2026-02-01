@@ -1,0 +1,62 @@
+# @package eval.muse.metrics.trajectory_privleak
+# Trajectory-wrapped privleak - mia_min_k at each step, compared to retain reference
+# Requires secondary dataset (holdout) support in trajectory_metrics
+
+defaults:
+  - .@pre_compute.mia_min_k: mia_min_k
+  - ../../data/datasets@datasets: MUSE_MIA
+  - ../../collator@collators: DataCollatorForSupervisedDatasetwithIndex
+
+reference_logs:
+  retain_model_logs:
+    path: ${eval.muse.retain_logs_path}
+    include:
+      mia_min_k:
+        access_key: retain
+
+pre_compute:
+  mia_min_k:
+    access_key: forget
+
+handler: trajectory_metrics
+batch_size: 1
+metrics:
+  - privleak
+
+trajectory_config:
+  logits_source: sampler
+  return_logits: true
+  return_fixation_steps: true
+  sampler_kwargs:
+    steps: 16
+    temperature: 0.0
+    max_new_tokens: 32
+
+ref_value: 0.5
+
+datasets:
+  MUSE_MIA_forget:
+    access_key: forget
+    args:
+      hf_args:
+        path: muse-bench/MUSE-${eval.muse.data_split}
+        name: privleak
+        split: forget
+      prefix_key: prompt
+      text_key: text
+      max_length: 2048
+  MUSE_MIA_holdout:
+    access_key: holdout
+    args:
+      hf_args:
+        path: muse-bench/MUSE-${eval.muse.data_split}
+        name: privleak
+        split: holdout
+      prefix_key: prompt
+      text_key: text
+      max_length: 2048
+
+collators:
+  DataCollatorForSupervisedDataset:
+    args:
+      padding_side: left

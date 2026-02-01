@@ -1,0 +1,62 @@
+# @package eval.tofu.metrics.trajectory_privleak
+# Trajectory-wrapped privleak - mia_min_k at each step, compared to retain reference
+# Requires secondary dataset (holdout) support in trajectory_metrics
+
+defaults:
+  - .@pre_compute.mia_min_k: mia_min_k
+  - ../../data/datasets@datasets: TOFU_MIA
+  - ../../collator@collators: DataCollatorForSupervisedDatasetwithIndex
+
+reference_logs:
+  retain_model_logs:
+    path: ${eval.tofu.retain_logs_path}
+    include:
+      mia_min_k:
+        access_key: retain
+
+pre_compute:
+  mia_min_k:
+    access_key: forget
+
+handler: trajectory_metrics
+batch_size: 1
+metrics:
+  - privleak
+
+trajectory_config:
+  logits_source: sampler
+  return_logits: true
+  return_fixation_steps: true
+  sampler_kwargs:
+    steps: 16
+    temperature: 0.0
+    max_new_tokens: 32
+
+ref_value: 0.5
+
+datasets:
+  TOFU_QA_forget:
+    access_key: forget
+    args:
+      hf_args:
+        name: ${eval.tofu.forget_split}
+        split: train
+        path: locuslab/TOFU
+      question_key: ${eval.tofu.question_key}
+      answer_key: answer
+      max_length: 512
+  TOFU_QA_holdout:
+    access_key: holdout
+    args:
+      hf_args:
+        name: ${eval.tofu.holdout_split}
+        split: train
+        path: locuslab/TOFU
+      question_key: ${eval.tofu.question_key}
+      answer_key: answer
+      max_length: 512
+
+collators:
+  DataCollatorForSupervisedDataset:
+    args:
+      padding_side: left

@@ -1,0 +1,41 @@
+# @package _global_.eval.metrics.trajectory_retain_knowmem_ROUGE
+# Trajectory-wrapped retain_knowmem_ROUGE - same metric/dataset as regular, computed at each diffusion step
+
+defaults:
+  - ../../data/datasets@datasets: MUSE_retain_knowmem
+  - ../../collator@collators: DataCollatorForSupervisedDatasetwithIndex
+
+handler: trajectory_metrics
+batch_size: 1
+metrics:
+  - rouge
+rouge_type: rougeL_f1
+trajectory_config:
+  logits_source: sampler
+  return_logits: true
+  return_fixation_steps: true
+  sampler_kwargs:
+    steps: 16
+    temperature: 0.0
+    max_new_tokens: 32
+
+datasets:
+  MUSE_retain_knowmem:
+    args:
+      hf_args:
+        path: muse-bench/MUSE-${data_split}
+        name: knowmem
+        split: "retain_qa[:5]"
+      few_shot_dataset_hf_args:
+        path: muse-bench/MUSE-${data_split}
+        name: knowmem
+        split: "retain_qa_icl"
+      predict_with_generate: True
+
+collators:
+  DataCollatorForSupervisedDataset:
+    args:
+      padding_side: left
+generation_args:
+  max_new_tokens: 32
+  stopwords: ["\n\n", "\nQuestion", "Question:"]

@@ -106,6 +106,8 @@ def _compute_pre_compute_metrics_at_step(
     for pre_metric_name, pre_metric_cfg in pre_compute_config.items():
         # Get access key (defaults to metric name)
         access_key = pre_metric_cfg.get("access_key", pre_metric_name)
+        # labels_field: use this batch key instead of "labels" for probability (e.g. labels_correct, labels_wrong)
+        labels_field = pre_metric_cfg.get("labels_field")
         
         # Load pre-compute metric from registry
         # Import here to avoid circular import
@@ -139,13 +141,20 @@ def _compute_pre_compute_metrics_at_step(
         # Note: Pre-compute metrics might have their own pre_compute requirements
         # We handle this recursively
         try:
+            # Substitute labels with labels_field if specified (for truth_ratio dual-answer)
+            pre_batch_template = batch_template
+            if labels_field and labels_field in batch_template:
+                pre_batch_template = {
+                    **batch_template,
+                    "labels": batch_template[labels_field],
+                }
             # Call the pre-compute metric at this step
             # Remove tokenizer from kwargs if present to avoid duplicate argument
             kwargs_clean = {k: v for k, v in kwargs.items() if k != "tokenizer"}
             pre_result = _call_metric_at_step(
                 metric=pre_metric,
                 logits=logits,
-                batch_template=batch_template,
+                batch_template=pre_batch_template,
                 tokenizer=tokenizer,
                 sample_labels=sample_labels,
                 sample_input_ids=sample_input_ids,
@@ -449,10 +458,32 @@ def _call_metric_at_step(
         preds = torch.argmax(log_probs, dim=-1)
         em_score = (preds == labels).sum() / len(labels)
         return [{"score": em_score.item()}]
-    
+
+    def _extraction_strength_batch_fn(model, batch, **kwargs):
+        """Compute extraction strength for a single batch."""
+        log_probs_batch, labels_batch = tokenwise_vocab_logprobs(
+            model, batch, grad=False, return_labels=True
+        )
+        es_batch = []
+        for log_probs, labels in zip(log_probs_batch, labels_batch):
+            valid_len = len(labels)
+            preds = torch.argmax(log_probs, dim=-1)
+            for k in range(valid_len):
+                suff_preds = preds[k:]
+                suff_labels = labels[k:]
+                if torch.equal(suff_preds, suff_labels):
+                    break
+            if valid_len == 0:
+                es_batch.append({"score": 0})
+            else:
+                es_score = 1 - (k / valid_len)
+                es_batch.append({"score": es_score})
+        return es_batch if es_batch else [{"score": None}]
+
     batch_function_map = {
         "probability": evaluate_probability,
         "exact_memorization": _exact_memorization_batch_fn,
+        "extraction_strength": _extraction_strength_batch_fn,
     }
     
     # Try using batch function if available
@@ -642,8 +673,16 @@ def trajectory_metrics(model, **kwargs):
             logger.error(f"Failed to load metric '{metric_name}': {e}")
             raise
     
+    # Handle multi-dataset (e.g. TOFU_MIA: forget + holdout for privleak)
+    if isinstance(data, dict) and "forget" in data and "holdout" in data:
+        primary_data = data["forget"]
+        secondary_data = data["holdout"]
+    else:
+        primary_data = data
+        secondary_data = None
+
     # Create dataloader
-    dataloader = DataLoader(data, batch_size=batch_size, collate_fn=collator)
+    dataloader = DataLoader(primary_data, batch_size=batch_size, collate_fn=collator)
     
     # Trajectory names
     trajectory_names = ["steps", "fixation_start", "fixation_end", "fixation_ratio"]
@@ -763,8 +802,8 @@ def trajectory_metrics(model, **kwargs):
             sample_labels = labels[sample_idx] if labels is not None else None
             sample_input_ids = input_ids[sample_idx]
             sample_prompt_len = prompt_lens[sample_idx]
-        
-        # Extract only the generated portion of labels to match logits shape [V, L]
+
+            # Extract only the generated portion of labels to match logits shape [V, L]
         # Logits from trajectory only cover generated tokens (L), not the prompt
         # evaluate_probability does: logits[..., :-1, :] and labels[..., 1:]
         # So if logits are [1, L, V], after processing: logits [1, L-1, V], labels [1, L-1]
@@ -793,6 +832,20 @@ def trajectory_metrics(model, **kwargs):
                 "attention_mask": torch.ones((1, L), dtype=torch.long, device=sample_input_ids.device),  # All positions valid
                 "index": torch.tensor([int(idx_str)], dtype=torch.long, device=sample_input_ids.device),  # Required by run_batchwise_evals
             }
+            # Add labels_correct/labels_wrong for truth_ratio pre_compute (dual-answer dataset)
+            for key in ("labels_correct", "labels_wrong"):
+                if key in batch:
+                    sample_labels_alt = batch[key][sample_idx]
+                    gen_alt = sample_labels_alt[sample_prompt_len:sample_prompt_len + L]
+                    if gen_alt.shape[0] < L:
+                        padding = torch.full(
+                            (L - gen_alt.shape[0],),
+                            IGNORE_INDEX,
+                            dtype=gen_alt.dtype,
+                            device=gen_alt.device,
+                        )
+                        gen_alt = torch.cat([gen_alt, padding])
+                    batch_template[key] = gen_alt.unsqueeze(0)
             
             # Compute metrics for each trajectory type and step, aggregate directly
             for traj_name, trajectory in sample_trajectories.items():
