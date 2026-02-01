@@ -12,22 +12,27 @@ batch_size: 1  # Start with 1 for testing (trajectory metrics can be memory-inte
 metrics:
   - probability  # Logit-based metric
   - rouge  # Text-based metric
-  # Config for rouge (when using list format, set via metric_config in code)
-  # rouge_type defaults to rougeL_f1 if not specified
 trajectory_config:
-  logits_source: sampler  # Use sampler output
-  return_logits: true  # Sampler config: store logits
-  return_fixation_steps: true  # Sampler config: compute fixation steps
-  sampler_kwargs:  # Additional sampler arguments
-    steps: 16  # Reduced for testing
+  logits_source: sampler
+  return_logits: true
+  return_fixation_steps: true
+  sampler_kwargs:
+    steps: 16
     temperature: 0.0
-    max_new_tokens: 32  # Reduced for testing
+    max_new_tokens: 32
+# path uses ${data_split}; data_split set at root by experiment/CLI
+# split override via eval.metrics.trajectory_metrics.datasets.MUSE_forget_knowmem.args.hf_args.split
 datasets:
   MUSE_forget_knowmem:
     args:
       hf_args:
-        path: muse-bench/MUSE-News  # Use News as default, can be overridden via CLI
-        split: "forget_qa[:5]"  # Limit to 5 samples for testing
+        path: muse-bench/MUSE-${data_split}
+        name: knowmem
+        split: "forget_qa[:5]"  # Override via CLI/config
+      few_shot_dataset_hf_args:
+        path: muse-bench/MUSE-${data_split}
+        name: knowmem
+        split: "forget_qa_icl"
       predict_with_generate: True
 collators:
   DataCollatorForSupervisedDataset:

@@ -11,7 +11,7 @@ defaults:
 
 handler: MUSEEvaluator
 output_dir: ${paths.output_dir}
-metrics: {}
+metrics: ${eval.metrics}
 overwrite: false
 data_split: News
 retain_logs_path: null

@@ -1,4 +1,4 @@
-# @package eval.muse.metrics.trajectory_privleak
+# @package _global_.eval.metrics.trajectory_privleak
 # Trajectory-wrapped privleak - mia_min_k at each step, compared to retain reference
 # Requires secondary dataset (holdout) support in trajectory_metrics
 

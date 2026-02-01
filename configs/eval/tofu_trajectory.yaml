@@ -14,7 +14,7 @@ defaults:
 
 handler: TOFUEvaluator
 output_dir: ${paths.output_dir}
-metrics: {}
+metrics: ${eval.tofu.metrics}
 overwrite: false
 forget_split: forget10
 holdout_split: holdout10

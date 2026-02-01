@@ -24,6 +24,13 @@ class LMEvalEvaluator(Evaluator):
     def prepare_model(self, model, **kwargs):
         """Prepare model for evaluation"""
         model.eval()
+        # lm_eval expects standard forward(input_ids); DiffusionModelAdapter has __call__(**batch)
+        try:
+            from dllm.integrations.open_unlearning_adapter import DiffusionModelAdapter
+            if isinstance(model, DiffusionModelAdapter):
+                model = model.model
+        except ImportError:
+            pass
         return HFLM(model)
 
     def summarize(self, eval_results: dict, task_name: str) -> dict:
