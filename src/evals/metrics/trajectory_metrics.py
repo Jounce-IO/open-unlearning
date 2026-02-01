@@ -401,8 +401,8 @@ def _call_metric_at_step(
         else:
             batch[key] = value
     
-    # Handle pre_compute metrics if present
-    pre_compute_config = metric_config.pop("pre_compute", {})
+    # Handle pre_compute metrics if present (use get: DictConfig in struct mode does not support pop)
+    pre_compute_config = metric_config.get("pre_compute", {})
     pre_compute_results = {}
     if pre_compute_config:
         if sample_idx is None:
@@ -421,12 +421,14 @@ def _call_metric_at_step(
     
     # Prepare kwargs for metric function
     # Remove model and tokenizer from kwargs if present to avoid duplicates
+    # Exclude pre_compute from metric_config (we handle it separately)
     kwargs_clean = {k: v for k, v in kwargs.items() if k not in ["model", "tokenizer"]}
+    metric_config_no_precompute = {k: v for k, v in metric_config.items() if k != "pre_compute"}
     metric_kwargs = {
         "model": model_wrapper,
         "batch": batch,
         "tokenizer": tokenizer,
-        **metric_config,  # Include metric-specific config (aggregator, etc., but not pre_compute)
+        **metric_config_no_precompute,  # Include metric-specific config (aggregator, etc.)
         **kwargs_clean,  # Include any additional kwargs (excluding model/tokenizer)
     }
     
