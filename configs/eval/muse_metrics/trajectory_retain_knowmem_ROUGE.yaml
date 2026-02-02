@@ -1,4 +1,4 @@
-# @package _global_.eval.metrics.trajectory_retain_knowmem_ROUGE
+# @package eval.muse_trajectory.metrics.trajectory_retain_knowmem_ROUGE
 # Trajectory-wrapped retain_knowmem_ROUGE - same metric/dataset as regular, computed at each diffusion step
 
 defaults:

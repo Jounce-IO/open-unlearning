@@ -1,4 +1,4 @@
-# @package eval.tofu.metrics.trajectory_forget_Q_A_Prob
+# @package eval.tofu_trajectory.metrics.trajectory_forget_Q_A_Prob
 # Trajectory-wrapped forget_Q_A_Prob - same metric/dataset as regular, computed at each diffusion step
 
 defaults:
@@ -22,10 +22,10 @@ datasets:
   TOFU_QA_forget:
     args:
       hf_args:
-        name: ${eval.tofu.forget_split}_perturbed
+        name: ${eval.tofu_trajectory.forget_split}_perturbed
         split: train
         path: locuslab/TOFU
-      question_key: ${eval.tofu.question_key}
+      question_key: ${eval.tofu_trajectory.question_key}
       answer_key: answer
       max_length: 512
       predict_with_generate: true

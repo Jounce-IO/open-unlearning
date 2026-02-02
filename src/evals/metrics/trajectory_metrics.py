@@ -125,8 +125,8 @@ def _compute_pre_compute_metrics_at_step(
             pre_metric = METRICS_REGISTRY[pre_metric_name]
             handler_name = pre_metric_name
         # Strategy 2: Check if pre_metric_cfg has a handler field
-        elif isinstance(pre_metric_cfg, dict) and "handler" in pre_metric_cfg:
-            handler_name = pre_metric_cfg["handler"]
+        elif isinstance(pre_metric_cfg, (dict, DictConfig)) and "handler" in pre_metric_cfg:
+            handler_name = pre_metric_cfg.get("handler")
             if handler_name in METRICS_REGISTRY:
                 pre_metric = METRICS_REGISTRY[handler_name]
         

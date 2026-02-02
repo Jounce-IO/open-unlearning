@@ -38,10 +38,17 @@ def _load_single_dataset(dataset_name, dataset_cfg: DictConfig, **kwargs):
     dataset_args = dict(dataset_cfg.args)
     # QADataset expects split in hf_args (for load_hf_dataset); move top-level split if present
     split_val = dataset_args.pop("split", None) or kwargs.pop("split", None)
+    # Apply samples limit: slice base split (e.g. train -> train[:2], forget_qa -> forget_qa[:2])
+    samples = kwargs.get("samples")
+    if samples is not None and "hf_args" in dataset_args:
+        base_split = dataset_args.get("hf_args", {}).get("split", "train")
+        split_val = f"{base_split}[:{samples}]"
     if split_val is not None and "hf_args" in dataset_args:
         dataset_args["hf_args"] = dict(dataset_args["hf_args"])
         dataset_args["hf_args"]["split"] = split_val
-    return dataset_handler(**dataset_args, **kwargs)
+    # Don't pass samples to handler (not a valid arg)
+    handler_kwargs = {k: v for k, v in kwargs.items() if k != "samples"}
+    return dataset_handler(**dataset_args, **handler_kwargs)
 
 
 def get_datasets(dataset_cfgs: Union[Dict, DictConfig], **kwargs):

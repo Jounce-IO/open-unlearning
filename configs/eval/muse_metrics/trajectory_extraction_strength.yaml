@@ -1,4 +1,4 @@
-# @package _global_.eval.metrics.trajectory_extraction_strength
+# @package eval.muse_trajectory.metrics.trajectory_extraction_strength
 # Trajectory-wrapped extraction_strength - same metric/dataset as regular, computed at each diffusion step
 
 defaults:

@@ -1,4 +1,4 @@
-# @package _global_.eval.metrics.trajectory_metrics_minimal
+# @package eval.muse_trajectory.metrics.trajectory_metrics_minimal
 # Minimal trajectory metrics config - only ROUGE, 5 samples
 
 defaults:

@@ -150,6 +150,8 @@ class Evaluator:
                 "tokenizer": kwargs.get("tokenizer", None),
                 "template_args": kwargs.get("template_args", None),
             }
+            if self.eval_cfg.get("samples") is not None:
+                kwargs["samples"] = self.eval_cfg.samples
             metrics_args = self.eval_cfg.metrics[metric_name]
             _
             result = metric_fn(

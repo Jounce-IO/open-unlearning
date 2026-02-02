@@ -34,6 +34,9 @@ class UnlearningMetric:
         """Load the collators from config"""
         if self.collators:
             return self.collators
+        # If collator_cfgs is already an instance (passed from parent), use it
+        if collator_cfgs is not None and not isinstance(collator_cfgs, dict):
+            return collator_cfgs
         collators = get_collators(
             tokenizer=kwargs.get("tokenizer", None), collator_cfgs=collator_cfgs
         )
