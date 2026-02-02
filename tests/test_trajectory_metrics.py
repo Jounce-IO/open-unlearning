@@ -11,7 +11,7 @@ Tests cover:
 
 import pytest
 import torch
-from unittest.mock import Mock, MagicMock
+from unittest.mock import Mock, MagicMock, patch
 
 import sys
 from pathlib import Path
@@ -716,6 +716,138 @@ class TestCallMetricAtStep:
             call_kwargs = mock_metric._metric_fn.call_args[1]
             assert "pre_compute" in call_kwargs
             assert "correct" in call_kwargs["pre_compute"]
+
+
+class TestReproductionBugs:
+    """Reproduction tests for trajectory metric bugs."""
+
+    def test_extract_logits_at_step_differs_by_step(self):
+        """extract_logits_at_step produces different tensors for step 0 vs S-1."""
+        from evals.metrics.trajectory_utils import compute_trajectories, extract_logits_at_step
+
+        V, L, S = 100, 10, 16
+        R = torch.randn(V, L, S)
+        F = torch.randint(0, S, (L,))
+        T_steps, T_fix_start, T_fix_end, T_fix_ratio = compute_trajectories(R, F, S)
+        trajectories = {
+            "steps": T_steps,
+            "fixation_start": T_fix_start,
+            "fixation_end": T_fix_end,
+            "fixation_ratio": T_fix_ratio,
+        }
+
+        logits_0 = extract_logits_at_step(trajectories["steps"], 0)
+        logits_last = extract_logits_at_step(trajectories["steps"], S - 1)
+        assert not torch.allclose(logits_0, logits_last)
+        assert logits_0.shape == logits_last.shape == (V, L)
+
+    def test_extraction_strength_reproduces_with_logits(self):
+        """extraction_strength runs with trajectory logits; documents constant 0.05 bug."""
+        if "extraction_strength" not in METRICS_REGISTRY:
+            pytest.skip("extraction_strength metric not registered")
+
+        es_metric = METRICS_REGISTRY["extraction_strength"]
+        V, L = 100, 20
+        labels = torch.randint(0, V, (L,))
+        logits = torch.randn(V, L)
+
+        batch_template = {
+            "input_ids": torch.zeros((1, L), dtype=torch.long),
+            "labels": labels.unsqueeze(0),
+            "attention_mask": torch.ones((1, L), dtype=torch.long),
+        }
+
+        tokenizer = Mock()
+        sample_labels = labels
+        sample_input_ids = torch.zeros(L, dtype=torch.long)
+        sample_prompt_len = 0
+
+        result = _call_metric_at_step(
+            metric=es_metric,
+            logits=logits,
+            batch_template=batch_template,
+            tokenizer=tokenizer,
+            sample_labels=sample_labels,
+            sample_input_ids=sample_input_ids,
+            sample_prompt_len=sample_prompt_len,
+            metric_config={},
+            sample_idx="0",
+        )
+
+        score = result[0]["score"] if isinstance(result, list) else result.get("agg_value")
+        assert score is not None
+        assert 0 <= score <= 1
+
+    def test_model_utility_pre_compute_uses_same_batch_for_all_metrics(self):
+        """trajectory_model_utility: _compute_pre_compute_metrics_at_step uses same batch_template for all metrics."""
+        pre_compute_config = {
+            "probability": {"access_key": "retain_Q_A_Prob"},
+            "exact_memorization": {"access_key": "ra_Q_A_Prob"},
+            "extraction_strength": {"access_key": "wf_Q_A_Prob"},
+        }
+        V, L = 100, 10
+        logits = torch.randn(V, L)
+        batch_template = {
+            "input_ids": torch.zeros((1, L), dtype=torch.long),
+            "labels": torch.randint(0, V, (1, L)),
+            "attention_mask": torch.ones((1, L), dtype=torch.long),
+        }
+        tokenizer = Mock()
+        sample_labels = torch.randint(0, V, (L,))
+        sample_input_ids = torch.zeros(L, dtype=torch.long)
+        sample_prompt_len = 0
+        sample_idx = "0"
+
+        batch_templates_seen = []
+
+        def capture_call_metric(*args, **kwargs):
+            batch_template_arg = args[2] if len(args) > 2 else kwargs.get("batch_template")
+            batch_templates_seen.append(batch_template_arg)
+            return [{"score": 0.5, "prob": 0.5}]
+
+        with patch(
+            "evals.metrics.trajectory_metrics._call_metric_at_step",
+            side_effect=capture_call_metric,
+        ):
+            _compute_pre_compute_metrics_at_step(
+                pre_compute_config=pre_compute_config,
+                logits=logits,
+                batch_template=batch_template,
+                tokenizer=tokenizer,
+                sample_labels=sample_labels,
+                sample_input_ids=sample_input_ids,
+                sample_prompt_len=sample_prompt_len,
+                sample_idx=sample_idx,
+            )
+
+        assert len(batch_templates_seen) == 3
+        for bt in batch_templates_seen:
+            assert bt is batch_template, "All pre_compute metrics receive same batch_template"
+
+    def test_logit_model_wrapper_returns_same_logits_for_different_batches(self):
+        """LogitModelWrapper returns same logits for forget and holdout batches (reproduces privleak bug)."""
+        from evals.metrics.trajectory_adapters import LogitModelWrapper
+
+        B, L, V = 1, 10, 100
+        logits = torch.randn(B, L, V)
+        wrapper = LogitModelWrapper(logits, torch.device("cpu"))
+
+        batch_forget = {
+            "input_ids": torch.zeros(1, L),
+            "labels": torch.randint(0, V, (1, L)),
+            "index": torch.tensor([0]),
+        }
+        batch_holdout = {
+            "input_ids": torch.zeros(1, L),
+            "labels": torch.randint(0, V, (1, L)),
+            "index": torch.tensor([1]),
+        }
+
+        out_forget = wrapper(**batch_forget)
+        out_holdout = wrapper(**batch_holdout)
+
+        assert torch.allclose(out_forget.logits, out_holdout.logits)
+        assert torch.allclose(out_forget.logits, logits)
 
 
 if __name__ == "__main__":

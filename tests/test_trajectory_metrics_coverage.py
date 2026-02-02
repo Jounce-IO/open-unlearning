@@ -402,37 +402,41 @@ class TestTrajectoryMetricsMainCoverage:
         
         assert "agg_value" in result
     
-    @pytest.mark.skip("Complex edge case - requires careful tensor shape setup")
     def test_fixation_steps_padding(self):
-        """Test lines 736-741: fixation_steps padding when shorter than expected."""
+        """Test lines 946-950: fixation_steps padding when shorter than L.
+
+        Padding path: F_full.shape[0] <= max_prompt_len and F_full.shape[0] < L.
+        Use fixation_steps (1, 2) so F_full has 2 elements; max_prompt_len=3, L=5.
+        """
         V, L, S = 50, 5, 4
         model = Mock()
         sampler = Mock()
-        
+
         prompt_len = 3
         T = prompt_len + L
         logits_history = [torch.randn(1, T, V) for _ in range(S)]
-        # Fixation steps shorter than generated length L
-        # After extracting generated portion starting at max_prompt_len, we need L values
-        # But F_full only has prompt_len + 2 = 5 total, so after max_prompt_len (3), we have 2 values
-        # This will trigger the padding path (line 736-739)
-        fixation_steps = torch.randint(0, S, (1, prompt_len + 2), dtype=torch.long)  # Total 5, generated portion will be 2 < L=5
-        
+        # F_full has 2 elements; 2 <= max_prompt_len (3) triggers else branch
+        # 2 < L (5) triggers padding with S-1
+        fixation_steps = torch.randint(0, S, (1, 2), dtype=torch.long)
+
         class SamplerOutput:
             def __init__(self):
                 self.logits_history = logits_history
                 self.fixation_steps = fixation_steps
-        
+
         sampler.sample = Mock(return_value=SamplerOutput())
         model.sampler = sampler
-        
+
         data = [{
             "input_ids": torch.zeros(1, T, dtype=torch.long),
-            "labels": torch.cat([torch.full((prompt_len,), -100, dtype=torch.long), torch.zeros(L, dtype=torch.long)]).unsqueeze(0),
+            "labels": torch.cat([
+                torch.full((prompt_len,), -100, dtype=torch.long),
+                torch.zeros(L, dtype=torch.long),
+            ]).unsqueeze(0),
         }]
         collator = lambda x: x[0]
         tokenizer = Mock()
-        
+
         if "probability" in METRICS_REGISTRY:
             with patch.object(METRICS_REGISTRY["probability"], "_metric_fn", return_value=[{"prob": 0.5}]):
                 trajectory_metrics_fn = METRICS_REGISTRY["trajectory_metrics"]._metric_fn
@@ -444,40 +448,41 @@ class TestTrajectoryMetricsMainCoverage:
                     tokenizer=tokenizer,
                     batch_size=1,
                 )
-                
                 assert "agg_value" in result
     
-    @pytest.mark.skip("Complex edge case - requires careful tensor shape setup")
     def test_generated_labels_padding(self):
-        """Test lines 783-791: generated labels padding."""
+        """Test lines 986-993: generated labels padding when shorter than L.
+
+        Labels have prompt_len + (L-1) tokens; generated region has L-1 < L, triggers pad.
+        """
         V, L, S = 50, 5, 4
         model = Mock()
         sampler = Mock()
-        
+
         prompt_len = 3
         T = prompt_len + L
         logits_history = [torch.randn(1, T, V) for _ in range(S)]
         fixation_steps = torch.randint(0, S, (1, T), dtype=torch.long)
-        
+
         class SamplerOutput:
             def __init__(self):
                 self.logits_history = logits_history
                 self.fixation_steps = fixation_steps
-        
+
         sampler.sample = Mock(return_value=SamplerOutput())
         model.sampler = sampler
-        
-        # Labels shorter than expected (will trigger padding)
+
+        # Labels: prompt_len + (L-1) = 3+4=7 tokens; generated region has 4 < L=5
         data = [{
-            "input_ids": torch.zeros(1, T),
+            "input_ids": torch.zeros(1, T, dtype=torch.long),
             "labels": torch.cat([
-                torch.full((prompt_len,), -100),
-                torch.zeros(L - 1)  # One less than L
-            ]),
+                torch.full((prompt_len,), -100, dtype=torch.long),
+                torch.zeros(L - 1, dtype=torch.long),
+            ]).unsqueeze(0),
         }]
         collator = lambda x: x[0]
         tokenizer = Mock()
-        
+
         if "probability" in METRICS_REGISTRY:
             with patch.object(METRICS_REGISTRY["probability"], "_metric_fn", return_value=[{"prob": 0.5}]):
                 trajectory_metrics_fn = METRICS_REGISTRY["trajectory_metrics"]._metric_fn
@@ -489,7 +494,6 @@ class TestTrajectoryMetricsMainCoverage:
                     tokenizer=tokenizer,
                     batch_size=1,
                 )
-                
                 assert "agg_value" in result
     
     def test_result_dict_value_by_index_extraction(self):

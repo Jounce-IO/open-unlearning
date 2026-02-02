@@ -3,11 +3,12 @@ Adapters for computing metrics on trajectory logits.
 
 This module provides:
 - LogitModelWrapper: Wraps pre-computed logits to make them callable as model(**batch)
+- DualLogitModelWrapper: Returns per-sample logits by (dataset_key, index) for MIA metrics
 - Adapter functions for computing logit-based and text-based metrics at trajectory steps
 """
 
 import torch
-from typing import Callable, Any, Dict, List
+from typing import Callable, Any, Dict, List, Optional
 
 
 class LogitModelWrapper:
@@ -33,6 +34,70 @@ class LogitModelWrapper:
             logits = self.logits
         
         return Output
+
+
+class DualLogitModelWrapper:
+    """Returns per-sample logits by (dataset_key, index) for MIA metrics (forget + holdout)."""
+
+    def __init__(
+        self,
+        logits_by_key: Dict[str, Dict[str, torch.Tensor]],
+        device: torch.device,
+    ):
+        """
+        Args:
+            logits_by_key: {"forget": {"0": [V,L], "1": [V,L], ...}, "holdout": {"0": [V,L], ...}}
+            device: Device where logits are located
+        """
+        self.logits_by_key = logits_by_key
+        self.device = device
+        self._current_key: Optional[str] = None
+
+    def set_dataset_key(self, key: str) -> None:
+        """Set which dataset (forget/holdout) the next batches belong to."""
+        self._current_key = key
+
+    def __call__(self, **batch):
+        """
+        Return logits for the sample(s) in batch, using current dataset key.
+        batch["index"] contains sample index (tensor [B] or int).
+        """
+        if self._current_key is None:
+            raise RuntimeError(
+                "DualLogitModelWrapper: set_dataset_key() must be called before __call__"
+            )
+        key = self._current_key
+        if key not in self.logits_by_key:
+            raise KeyError(f"DualLogitModelWrapper: no logits for key={key}")
+        idx = batch.get("index")
+        if idx is None:
+            raise KeyError("DualLogitModelWrapper: batch must contain 'index'")
+        if isinstance(idx, torch.Tensor):
+            indices = idx.cpu().tolist()
+            indices = [indices] if isinstance(indices, int) else indices
+        else:
+            indices = [idx] if not isinstance(idx, (list, tuple)) else list(idx)
+        logits_dict = self.logits_by_key[key]
+        logits_list = []
+        for idx_val in indices:
+            idx_str = str(idx_val)
+            if idx_str not in logits_dict:
+                raise KeyError(
+                    f"DualLogitModelWrapper: no logits for key={key} index={idx_str}, "
+                    f"available: {list(logits_dict.keys())}"
+                )
+            lg = logits_dict[idx_str]
+            if lg.dim() == 2:
+                lg = lg.transpose(0, 1).unsqueeze(0)
+            logits_list.append(lg)
+        logits = torch.cat(logits_list, dim=0).to(self.device)
+
+        class Output:
+            pass
+
+        out = Output()
+        out.logits = logits
+        return out
 
 
 def compute_logit_metric_at_step(

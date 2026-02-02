@@ -52,7 +52,7 @@ class TestTensorValueVerification:
         R = torch.arange(V * L * S, dtype=torch.float32).reshape(V, L, S)
         F = torch.randint(0, S, (L,))
         
-        T_steps, T_fixation, T_ratio = compute_trajectories(R, F, S)
+        T_steps, T_fixation_start, T_fixation_end, T_fixation_ratio = compute_trajectories(R, F, S)
         
         # T_steps should be exact copy
         assert torch.equal(T_steps, R)
@@ -62,41 +62,39 @@ class TestTensorValueVerification:
         assert torch.allclose(T_steps, R)
     
     def test_compute_trajectories_fixation_exact_formula(self):
-        """Test that T_fixation values match exact formula: R[:, l, max(0, F[l] - s)]."""
+        """Test that T_fixation_start values match exact formula: R[:, l, min(s, F[l])]."""
         V, L, S = 10, 5, 8
         R = torch.arange(V * L * S, dtype=torch.float32).reshape(V, L, S)
         F = torch.tensor([0, 2, 4, 6, 7], dtype=torch.long)
         
-        T_steps, T_fixation, T_ratio = compute_trajectories(R, F, S)
+        T_steps, T_fixation_start, T_fixation_end, T_fixation_ratio = compute_trajectories(R, F, S)
         
-        # Verify formula for all positions and steps
+        # Verify T_fixation_start formula: R[:, l, min(s, F[l])] clamped to [0, S-1]
         for l in range(L):
-            fix_step = F[l].item()
+            fix_step = int(F[l].item())
             for s in range(S):
-                source_step = max(0, fix_step - s)
+                source_step = min(s, fix_step)
+                source_step = max(0, min(source_step, S - 1))
                 expected = R[:, l, source_step]
-                actual = T_fixation[:, l, s]
+                actual = T_fixation_start[:, l, s]
                 assert torch.equal(actual, expected), f"Failed at l={l}, s={s}, fix={fix_step}"
     
     def test_compute_trajectories_ratio_exact_formula(self):
-        """Test that T_ratio values match exact formula: R[:, l, floor(F[l] * s/S)]."""
+        """Test that T_fixation_ratio values match exact formula: R[:, l, floor(F[l]*s/(S-1))]."""
         V, L, S = 10, 5, 8
         R = torch.arange(V * L * S, dtype=torch.float32).reshape(V, L, S)
         F = torch.tensor([0, 2, 4, 6, 7], dtype=torch.long)
         
-        T_steps, T_fixation, T_ratio = compute_trajectories(R, F, S)
+        T_steps, T_fixation_start, T_fixation_end, T_fixation_ratio = compute_trajectories(R, F, S)
         
-        # Verify formula for all positions and steps
+        # Verify T_fixation_ratio formula: R[:, l, floor(F[l]*s/(S-1))] clamped to [0, S-1]
         for l in range(L):
-            fix_step = F[l].item()
+            fix_step = int(F[l].item())
             for s in range(S):
-                if S > 0:
-                    ratio_step = int(fix_step * (s / S))
-                    ratio_step = min(ratio_step, S - 1)
-                else:
-                    ratio_step = 0
+                ratio_step = int(fix_step * s / (S - 1))
+                ratio_step = max(0, min(ratio_step, S - 1))
                 expected = R[:, l, ratio_step]
-                actual = T_ratio[:, l, s]
+                actual = T_fixation_ratio[:, l, s]
                 assert torch.equal(actual, expected), f"Failed at l={l}, s={s}, fix={fix_step}"
     
     def test_extract_logits_at_step_exact_values(self):
@@ -155,15 +153,15 @@ class TestTensorDeviceHandling:
         if torch.cuda.is_available():
             R = R.cuda()
             F = F.cuda()
-            T_steps, T_fixation, T_ratio = compute_trajectories(R, F, S)
+            T_steps, T_fixation_start, T_fixation_end, T_fixation_ratio = compute_trajectories(R, F, S)
             assert T_steps.device.type == "cuda"
-            assert T_fixation.device.type == "cuda"
-            assert T_ratio.device.type == "cuda"
+            assert T_fixation_start.device.type == "cuda"
+            assert T_fixation_ratio.device.type == "cuda"
         else:
-            T_steps, T_fixation, T_ratio = compute_trajectories(R, F, S)
+            T_steps, T_fixation_start, T_fixation_end, T_fixation_ratio = compute_trajectories(R, F, S)
             assert T_steps.device.type == "cpu"
-            assert T_fixation.device.type == "cpu"
-            assert T_ratio.device.type == "cpu"
+            assert T_fixation_start.device.type == "cpu"
+            assert T_fixation_ratio.device.type == "cpu"
     
     def test_extract_logits_at_step_preserves_device(self):
         """Test that extract_logits_at_step preserves device."""
@@ -212,10 +210,10 @@ class TestTensorDtypeHandling:
         R = torch.randn(V, L, S, dtype=dtype)
         F = torch.randint(0, S, (L,), dtype=torch.long)
         
-        T_steps, T_fixation, T_ratio = compute_trajectories(R, F, S)
+        T_steps, T_fixation_start, T_fixation_end, T_fixation_ratio = compute_trajectories(R, F, S)
         assert T_steps.dtype == dtype
-        assert T_fixation.dtype == dtype
-        assert T_ratio.dtype == dtype
+        assert T_fixation_start.dtype == dtype
+        assert T_fixation_ratio.dtype == dtype
     
     @pytest.mark.parametrize("dtype", [torch.float32, torch.float16, torch.bfloat16])
     def test_extract_logits_at_step_preserves_dtype(self, dtype):
@@ -250,7 +248,7 @@ class TestTensorMemoryEfficiency:
         R = torch.randn(V, L, S)
         F = torch.randint(0, S, (L,))
         
-        T_steps, T_fixation, T_ratio = compute_trajectories(R, F, S)
+        T_steps, T_fixation_start, T_fixation_end, T_fixation_ratio = compute_trajectories(R, F, S)
         
         # Modify T_steps
         original_value = R[0, 0, 0].item()
@@ -260,31 +258,31 @@ class TestTensorMemoryEfficiency:
         assert R[0, 0, 0].item() == original_value
     
     def test_t_fixation_is_new_tensor(self):
-        """Test that T_fixation is a new tensor, not a view."""
+        """Test that T_fixation_start is a new tensor, not a view."""
         V, L, S = 100, 20, 10
         R = torch.randn(V, L, S)
         F = torch.randint(0, S, (L,))
         
-        T_steps, T_fixation, T_ratio = compute_trajectories(R, F, S)
+        T_steps, T_fixation_start, T_fixation_end, T_fixation_ratio = compute_trajectories(R, F, S)
         
-        # T_fixation should be independent
+        # T_fixation_start should be independent
         original_value = R[0, 0, 0].item()
-        T_fixation[0, 0, 0] = 999.0
+        T_fixation_start[0, 0, 0] = 999.0
         
         # R should be unchanged
         assert R[0, 0, 0].item() == original_value
     
     def test_t_ratio_is_new_tensor(self):
-        """Test that T_ratio is a new tensor, not a view."""
+        """Test that T_fixation_ratio is a new tensor, not a view."""
         V, L, S = 100, 20, 10
         R = torch.randn(V, L, S)
         F = torch.randint(0, S, (L,))
         
-        T_steps, T_fixation, T_ratio = compute_trajectories(R, F, S)
+        T_steps, T_fixation_start, T_fixation_end, T_fixation_ratio = compute_trajectories(R, F, S)
         
-        # T_ratio should be independent
+        # T_fixation_ratio should be independent
         original_value = R[0, 0, 0].item()
-        T_ratio[0, 0, 0] = 999.0
+        T_fixation_ratio[0, 0, 0] = 999.0
         
         # R should be unchanged
         assert R[0, 0, 0].item() == original_value
@@ -306,10 +304,10 @@ class TestTensorShapeConsistency:
         R = torch.randn(V, L, S)
         F = torch.randint(0, S, (L,))
         
-        T_steps, T_fixation, T_ratio = compute_trajectories(R, F, S)
+        T_steps, T_fixation_start, T_fixation_end, T_fixation_ratio = compute_trajectories(R, F, S)
         assert T_steps.shape == (V, L, S)
-        assert T_fixation.shape == (V, L, S)
-        assert T_ratio.shape == (V, L, S)
+        assert T_fixation_start.shape == (V, L, S)
+        assert T_fixation_ratio.shape == (V, L, S)
     
     @pytest.mark.parametrize("V,L,S", [(100, 20, 8), (1000, 64, 16), (5000, 128, 32)])
     def test_extract_logits_at_step_shape_consistency(self, V, L, S):
@@ -325,17 +323,17 @@ class TestTensorEdgeCases:
     """Tests for tensor edge cases (empty, single element, etc.)."""
     
     def test_single_step_single_token(self):
-        """Test with S=1, L=1 (minimal case)."""
+        """Test with S=2, L=1 (minimal case; S must be > 1)."""
         V = 100
-        logits_history = [torch.randn(1, 1, V)]
+        logits_history = [torch.randn(1, 1, V) for _ in range(2)]
         R = stack_logits_history(logits_history)
-        assert R.shape == (V, 1, 1)
+        assert R.shape == (V, 1, 2)
         
         F = torch.tensor([0], dtype=torch.long)
-        T_steps, T_fixation, T_ratio = compute_trajectories(R, F, 1)
-        assert T_steps.shape == (V, 1, 1)
-        assert T_fixation.shape == (V, 1, 1)
-        assert T_ratio.shape == (V, 1, 1)
+        T_steps, T_fixation_start, T_fixation_end, T_fixation_ratio = compute_trajectories(R, F, 2)
+        assert T_steps.shape == (V, 1, 2)
+        assert T_fixation_start.shape == (V, 1, 2)
+        assert T_fixation_ratio.shape == (V, 1, 2)
     
     def test_single_vocab_token(self):
         """Test with V=1 (minimal vocab)."""
@@ -345,7 +343,7 @@ class TestTensorEdgeCases:
         assert R.shape == (V, L, S)
         
         F = torch.randint(0, S, (L,))
-        T_steps, T_fixation, T_ratio = compute_trajectories(R, F, S)
+        T_steps, T_fixation_start, T_fixation_end, T_fixation_ratio = compute_trajectories(R, F, S)
         assert T_steps.shape == (V, L, S)
     
     def test_large_tensors(self):
@@ -359,10 +357,10 @@ class TestTensorEdgeCases:
         assert R.shape == (V, L, S)
         
         F = torch.randint(0, S, (L,))
-        T_steps, T_fixation, T_ratio = compute_trajectories(R, F, S)
+        T_steps, T_fixation_start, T_fixation_end, T_fixation_ratio = compute_trajectories(R, F, S)
         assert T_steps.shape == (V, L, S)
-        assert T_fixation.shape == (V, L, S)
-        assert T_ratio.shape == (V, L, S)
+        assert T_fixation_start.shape == (V, L, S)
+        assert T_fixation_ratio.shape == (V, L, S)
 
 
 if __name__ == "__main__":

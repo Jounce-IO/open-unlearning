@@ -27,6 +27,7 @@ from evals.metrics.trajectory_utils import (
 )
 from evals.metrics.trajectory_adapters import (
     LogitModelWrapper,
+    DualLogitModelWrapper,
     compute_logit_metric_at_step,
     compute_text_metric_at_step,
 )
@@ -54,6 +55,92 @@ def _get_sampler_from_model(model) -> Optional[Any]:
     return None
 
 
+def _generate_trajectories_for_dataloader(
+    sampler: Any,
+    dataloader: DataLoader,
+    trajectory_config: Dict[str, Any],
+) -> Dict[str, Dict[str, Any]]:
+    """Generate trajectories for all samples in a dataloader. Returns {idx_str: trajectories}."""
+    trajectories_by_idx = {}
+    for batch_idx, batch in enumerate(dataloader):
+        input_ids = batch["input_ids"]
+        labels = batch.get("labels")
+        indices = batch.get(
+            "index",
+            torch.arange(
+                batch_idx * input_ids.shape[0],
+                (batch_idx + 1) * input_ids.shape[0],
+            ),
+        )
+        B = input_ids.shape[0]
+        prompts = []
+        prompt_lens = []
+        for i in range(B):
+            if labels is not None:
+                label_mask = labels[i] != IGNORE_INDEX
+                prompt_end = (
+                    label_mask.nonzero()[0][0].item()
+                    if label_mask.any()
+                    else input_ids.shape[1]
+                )
+            else:
+                prompt_end = input_ids.shape[1]
+            prompts.append(input_ids[i, :prompt_end].cpu().tolist())
+            prompt_lens.append(len(prompts[-1]))
+
+        sampler_output = sampler.sample(
+            inputs=prompts,
+            config=None,
+            return_dict=True,
+            return_logits=True,
+            **trajectory_config.get("sampler_kwargs", {}),
+        )
+        logits_history = sampler_output.logits_history
+        fixation_steps = sampler_output.fixation_steps
+        if logits_history is None or len(logits_history) == 0:
+            continue
+        if fixation_steps is None:
+            continue
+
+        R_full = stack_logits_history(logits_history)
+        V, T_full, S = R_full.shape
+        max_prompt_len = max(prompt_lens)
+        generated_len = T_full - max_prompt_len
+        R = R_full[:, max_prompt_len : max_prompt_len + generated_len, :]
+        V, L, S = R.shape
+        if fixation_steps.dim() == 2:
+            F_full = fixation_steps[0]
+            F = (
+                F_full[max_prompt_len : max_prompt_len + L]
+                if F_full.shape[0] > max_prompt_len
+                else torch.cat(
+                    [
+                        F_full,
+                        torch.full(
+                            (L - F_full.shape[0],),
+                            S - 1,
+                            dtype=torch.long,
+                            device=F_full.device,
+                        ),
+                    ]
+                )
+            )
+        else:
+            continue
+
+        T_steps, T_fix_start, T_fix_end, T_fix_ratio = compute_trajectories(R, F, S)
+        traj = {
+            "steps": T_steps,
+            "fixation_start": T_fix_start,
+            "fixation_end": T_fix_end,
+            "fixation_ratio": T_fix_ratio,
+        }
+        for i in range(B):
+            idx = indices[i].item() if torch.is_tensor(indices[i]) else indices[i]
+            trajectories_by_idx[str(idx)] = traj
+    return trajectories_by_idx
+
+
 def _get_metric_from_registry(metric_name: str):
     """Get metric from registry by name."""
     # Import here to avoid circular import
@@ -77,6 +164,7 @@ def _compute_pre_compute_metrics_at_step(
     sample_input_ids: torch.Tensor,
     sample_prompt_len: int,
     sample_idx: str,
+    model_wrapper_override: Optional[Any] = None,
     **kwargs
 ) -> Dict[str, Any]:
     """
@@ -150,7 +238,7 @@ def _compute_pre_compute_metrics_at_step(
                 }
             # Call the pre-compute metric at this step
             # Remove tokenizer from kwargs if present to avoid duplicate argument
-            kwargs_clean = {k: v for k, v in kwargs.items() if k != "tokenizer"}
+            kwargs_clean = {k: v for k, v in kwargs.items() if k not in ("tokenizer", "model_wrapper_override")}
             pre_result = _call_metric_at_step(
                 metric=pre_metric,
                 logits=logits,
@@ -161,6 +249,7 @@ def _compute_pre_compute_metrics_at_step(
                 sample_prompt_len=sample_prompt_len,
                 metric_config=pre_metric_cfg,
                 sample_idx=sample_idx,
+                model_wrapper_override=model_wrapper_override,
                 **kwargs_clean
             )
             
@@ -331,7 +420,11 @@ def _handle_text_based_metric(logits, tokenizer, sample_labels, sample_input_ids
         if isinstance(result, list) and len(result) > 0:
             result_dict = result[0]
             if isinstance(result_dict, dict) and rouge_type in result_dict:
-                return [{"score": result_dict[rouge_type]}]
+                score = result_dict[rouge_type]
+                logger.debug(
+                    f"ROUGE {rouge_type}: gen_len={len(gen_text)}, gt_len={len(ground_truth)}, score={score}"
+                )
+                return [{"score": score}]
     
     return result
 
@@ -346,6 +439,7 @@ def _call_metric_at_step(
     sample_prompt_len: int = 0,
     metric_config: Optional[Dict[str, Any]] = None,
     sample_idx: Optional[str] = None,
+    model_wrapper_override: Optional[Any] = None,
     **kwargs
 ) -> Any:
     """
@@ -389,9 +483,9 @@ def _call_metric_at_step(
     else:
         raise ValueError(f"Unexpected logits shape: {logits.shape}")
     
-    # Create model wrapper
-    device = logits.device
-    model_wrapper = LogitModelWrapper(logits, device)
+    # Create model wrapper (or use override for DualLogitModelWrapper e.g. mia_min_k)
+    device = logits.device if model_wrapper_override is None else model_wrapper_override.device
+    model_wrapper = model_wrapper_override if model_wrapper_override is not None else LogitModelWrapper(logits, device)
     
     # Prepare batch
     batch = {}
@@ -685,13 +779,29 @@ def trajectory_metrics(model, **kwargs):
 
     # Create dataloader
     dataloader = DataLoader(primary_data, batch_size=batch_size, collate_fn=collator)
-    
+    holdout_dataloader = (
+        DataLoader(secondary_data, batch_size=batch_size, collate_fn=collator)
+        if secondary_data is not None
+        else None
+    )
+
+    # Check if privleak needs dual trajectories (forget + holdout)
+    privleak_needs_dual = (
+        "privleak" in loaded_metrics
+        and secondary_data is not None
+        and holdout_dataloader is not None
+    )
+    if privleak_needs_dual:
+        privleak_cfg = loaded_metrics.get("privleak", {}).get("config", {})
+        privleak_pre = privleak_cfg.get("pre_compute", {})
+        privleak_needs_dual = "mia_min_k" in privleak_pre
+
     # Trajectory names
     trajectory_names = ["steps", "fixation_start", "fixation_end", "fixation_ratio"]
-    
+
     # Storage for aggregation: collect values across samples per step
     step_values = {traj_name: {} for traj_name in trajectory_names}
-    
+
     # Get sampler from model
     sampler = _get_sampler_from_model(model)
     if sampler is None:
@@ -699,7 +809,65 @@ def trajectory_metrics(model, **kwargs):
             "Model does not have a sampler. Trajectory metrics require a diffusion model with sampler. "
             "Ensure model is wrapped with DiffusionModelAdapter or has accessible sampler."
         )
-    
+
+    # When privleak + dual dataset: collect trajectories for forget and holdout first
+    trajectories_by_key = None
+    if privleak_needs_dual:
+        logger.info("Privleak with dual dataset: generating trajectories for forget and holdout")
+        forget_traj = _generate_trajectories_for_dataloader(
+            sampler, dataloader, trajectory_config
+        )
+        holdout_traj = _generate_trajectories_for_dataloader(
+            sampler, holdout_dataloader, trajectory_config
+        )
+        if forget_traj and holdout_traj:
+            trajectories_by_key = {"forget": forget_traj, "holdout": holdout_traj}
+            S_dual = next(iter(forget_traj.values()))["steps"].shape[2]
+            try:
+                device = getattr(model, "device", None) or next(model.parameters()).device
+            except (StopIteration, AttributeError):
+                device = torch.device("cpu")
+            privleak_cfg = loaded_metrics["privleak"]["config"]
+            for step in range(S_dual):
+                logits_by_key = {}
+                for key, traj_by_idx in trajectories_by_key.items():
+                    logits_by_key[key] = {
+                        idx: extract_logits_at_step(traj["steps"], step)
+                        for idx, traj in traj_by_idx.items()
+                    }
+                dual_wrapper = DualLogitModelWrapper(logits_by_key, device)
+                kwargs_priv = {
+                    "data": {"forget": primary_data, "holdout": secondary_data},
+                    "collators": collator,
+                    "batch_size": batch_size,
+                    **{k: v for k, v in kwargs.items() if k not in ("tokenizer", "model", "data", "collators")},
+                }
+                pre_result = _compute_pre_compute_metrics_at_step(
+                    pre_compute_config=privleak_cfg.get("pre_compute", {}),
+                    logits=next(iter(logits_by_key["forget"].values())),
+                    batch_template={},
+                    tokenizer=tokenizer,
+                    sample_labels=None,
+                    sample_input_ids=torch.zeros(1),
+                    sample_prompt_len=0,
+                    sample_idx="0",
+                    model_wrapper_override=dual_wrapper,
+                    **kwargs_priv,
+                )
+                privleak_result = _get_metric_from_registry("privleak")._metric_fn(
+                    model=dual_wrapper,
+                    pre_compute=pre_result,
+                    reference_logs=kwargs.get("reference_logs"),
+                    ref_value=privleak_cfg.get("ref_value", 0.5),
+                    **{k: v for k, v in kwargs.items() if k not in ("model", "tokenizer")},
+                )
+                for traj_name in trajectory_names:
+                    if step not in step_values[traj_name]:
+                        step_values[traj_name][step] = {m: [] for m in loaded_metrics}
+                    step_values[traj_name][step]["privleak"].append(privleak_result.get("agg_value"))
+        else:
+            logger.warning("Privleak dual trajectories empty, skipping privleak")
+
     # Process each batch
     for batch_idx, batch in enumerate(dataloader):
         input_ids = batch["input_ids"]
@@ -865,6 +1033,10 @@ def trajectory_metrics(model, **kwargs):
                             metric = metric_info["metric"]
                             metric_cfg = metric_info["config"]
                             
+                            # Skip privleak in main loop when already computed via dual-trajectory flow
+                            if metric_name == "privleak" and trajectories_by_key is not None:
+                                continue
+
                             # Call metric at this step
                             # Remove tokenizer from kwargs if present to avoid duplicate argument
                             kwargs_clean = {k: v for k, v in kwargs.items() if k != "tokenizer"}
@@ -932,6 +1104,12 @@ def trajectory_metrics(model, **kwargs):
                             elif isinstance(result, (int, float, np.number)):
                                 metric_value = float(result)
                             
+                            # Debug: log extraction_strength at first/last step for verification
+                            if metric_name == "extraction_strength" and step in (0, S - 1) and metric_value is not None:
+                                logger.debug(
+                                    f"extraction_strength step={step} sample={idx_str}: value={metric_value}"
+                                )
+
                             # Append to step_values for aggregation
                             if metric_value is not None:
                                 step_values[traj_name][step][metric_name].append(metric_value)

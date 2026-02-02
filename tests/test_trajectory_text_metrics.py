@@ -356,5 +356,52 @@ class TestTrajectoryMetricsWithTwoMetrics:
                     assert len(agg["steps"]["rouge"]) == S
 
 
+class TestRougeVerification:
+    """Reproduction tests: ROUGE > 0 when decoded text matches ground truth."""
+
+    def test_rouge_gt_zero_when_decoded_matches_ground_truth(self):
+        """When logits argmax decodes to exact ground truth, ROUGE > 0."""
+        from transformers import AutoTokenizer
+
+        tokenizer = AutoTokenizer.from_pretrained("gpt2")
+        ground_truth_text = "The quick brown fox"
+        gt_tokens = tokenizer.encode(ground_truth_text, add_special_tokens=False)
+        V = tokenizer.vocab_size
+        L = len(gt_tokens)
+
+        # Create logits where argmax yields ground truth tokens
+        logits = torch.full((V, L), float("-inf"))
+        for i, tok_id in enumerate(gt_tokens):
+            logits[tok_id, i] = 1.0
+
+        sample_labels = torch.tensor(gt_tokens, dtype=torch.long)
+        sample_input_ids = torch.zeros(1, dtype=torch.long)
+        sample_prompt_len = 0
+
+        with patch("evals.metrics.utils.eval_text_similarity") as mock_eval:
+            mock_eval.return_value = [
+                {
+                    "rouge1_recall": 1.0,
+                    "rougeL_f1": 1.0,
+                    "rougeL_recall": 1.0,
+                }
+            ]
+
+            result = _handle_text_based_metric(
+                logits=logits,
+                tokenizer=tokenizer,
+                sample_labels=sample_labels,
+                sample_input_ids=sample_input_ids,
+                sample_prompt_len=sample_prompt_len,
+                metric_name="rouge",
+                metric_config={"rouge_type": "rougeL_recall"},
+            )
+
+            assert result is not None
+            assert isinstance(result, list)
+            assert len(result) > 0
+            assert "score" in result[0]
+            assert result[0]["score"] > 0
+
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])

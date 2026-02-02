@@ -1,17 +1,12 @@
 # @package eval.tofu_trajectory.metrics.trajectory_model_utility
-# Trajectory-wrapped model_utility - hm_aggregate of 9 sub-metrics at each step
-# Requires multi-dataset support (retain, ra_*, wf_* datasets)
+# Trajectory-wrapped model_utility - hm_aggregate of retain sub-metrics at each step
+# Uses retain-only sub-metrics (retain_Q_A_Prob, retain_Q_A_ROUGE, retain_Truth_Ratio)
+# Full 9-metric version requires multi-dataset trajectory support (ra_*, wf_* datasets)
 
 defaults:
   - .@pre_compute.retain_Q_A_Prob: retain_Q_A_Prob
   - .@pre_compute.retain_Q_A_ROUGE: retain_Q_A_ROUGE
   - .@pre_compute.retain_Truth_Ratio: retain_Truth_Ratio
-  - .@pre_compute.ra_Q_A_Prob_normalised: ra_Q_A_Prob_normalised
-  - .@pre_compute.ra_Q_A_ROUGE: ra_Q_A_ROUGE
-  - .@pre_compute.ra_Truth_Ratio: ra_Truth_Ratio
-  - .@pre_compute.wf_Q_A_Prob_normalised: wf_Q_A_Prob_normalised
-  - .@pre_compute.wf_Q_A_ROUGE: wf_Q_A_ROUGE
-  - .@pre_compute.wf_Truth_Ratio: wf_Truth_Ratio
   - ../../data/datasets@datasets: TOFU_QA_retain_eval
   - ../../collator@collators: DataCollatorForSupervisedDatasetwithIndex
 

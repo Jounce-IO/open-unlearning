@@ -20,6 +20,7 @@ sys.path.insert(0, str(repo_root / "src"))
 
 from evals.metrics.trajectory_adapters import (
     LogitModelWrapper,
+    DualLogitModelWrapper,
     compute_logit_metric_at_step,
     compute_text_metric_at_step,
 )
@@ -160,6 +161,42 @@ class TestLogitModelWrapper:
         
         assert hasattr(output, "logits")
         assert torch.allclose(output.logits, logits)
+
+
+class TestDualLogitModelWrapper:
+    """Tests for DualLogitModelWrapper (per-sample logits for MIA)."""
+
+    def test_returns_different_logits_for_forget_vs_holdout(self):
+        """DualLogitModelWrapper returns different logits for forget vs holdout batch."""
+        B, L, V = 1, 10, 100
+        logits_forget = torch.randn(V, L)
+        logits_holdout = torch.randn(V, L)
+        logits_by_key = {
+            "forget": {"0": logits_forget},
+            "holdout": {"0": logits_holdout},
+        }
+        wrapper = DualLogitModelWrapper(logits_by_key, torch.device("cpu"))
+
+        batch = {
+            "input_ids": torch.zeros(1, L),
+            "labels": torch.randint(0, V, (1, L)),
+            "index": torch.tensor([0]),
+        }
+
+        wrapper.set_dataset_key("forget")
+        out_forget = wrapper(**batch)
+        wrapper.set_dataset_key("holdout")
+        out_holdout = wrapper(**batch)
+
+        assert not torch.allclose(out_forget.logits, out_holdout.logits)
+
+    def test_set_dataset_key_required(self):
+        """DualLogitModelWrapper raises if set_dataset_key not called."""
+        logits_by_key = {"forget": {"0": torch.randn(100, 10)}, "holdout": {"0": torch.randn(100, 10)}}
+        wrapper = DualLogitModelWrapper(logits_by_key, torch.device("cpu"))
+        batch = {"input_ids": torch.zeros(1, 10), "index": torch.tensor([0])}
+        with pytest.raises(RuntimeError, match="set_dataset_key"):
+            wrapper(**batch)
 
 
 class TestComputeLogitMetricAtStep:
