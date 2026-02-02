@@ -1,3 +1,4 @@
+import re
 from typing import Dict, Any, Union
 from omegaconf import DictConfig
 
@@ -39,10 +40,12 @@ def _load_single_dataset(dataset_name, dataset_cfg: DictConfig, **kwargs):
     # QADataset expects split in hf_args (for load_hf_dataset); move top-level split if present
     split_val = dataset_args.pop("split", None) or kwargs.pop("split", None)
     # Apply samples limit: slice base split (e.g. train -> train[:2], forget_qa -> forget_qa[:2])
+    # Strip existing slice from config (e.g. forget_qa[:5] -> forget_qa) to avoid double-slicing
     samples = kwargs.get("samples")
     if samples is not None and "hf_args" in dataset_args:
         base_split = dataset_args.get("hf_args", {}).get("split", "train")
-        split_val = f"{base_split}[:{samples}]"
+        base_name = re.sub(r"\[\d*:\d*\]", "", base_split) or "train"
+        split_val = f"{base_name}[:{samples}]"
     if split_val is not None and "hf_args" in dataset_args:
         dataset_args["hf_args"] = dict(dataset_args["hf_args"])
         dataset_args["hf_args"]["split"] = split_val
