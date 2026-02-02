@@ -53,11 +53,12 @@ def main(cfg: DictConfig):
     evaluators = get_evaluators(eval_cfgs)
     logger.info(f"Found {len(evaluators)} evaluator(s): {list(evaluators.keys())}")
     for evaluator_name, evaluator in evaluators.items():
-        log_retain_logs_path_none_if_needed(
-            "start of run",
-            evaluator.metrics,
-            evaluator.eval_cfg.get("retain_logs_path"),
-        )
+        if hasattr(evaluator, "metrics"):
+            log_retain_logs_path_none_if_needed(
+                "start of run",
+                evaluator.metrics,
+                evaluator.eval_cfg.get("retain_logs_path"),
+            )
         logger.info(f"Running evaluator: {evaluator_name}")
         eval_args = {
             "template_args": template_args,
