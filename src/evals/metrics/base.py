@@ -23,11 +23,7 @@ class UnlearningMetric:
         """Load the datasets from config"""
         if self.data:
             return self.data
-        data = get_datasets(
-            tokenizer=kwargs.get("tokenizer", None),
-            template_args=kwargs.get("template_args", None),
-            dataset_cfgs=dataset_cfgs,
-        )
+        data = get_datasets(dataset_cfgs=dataset_cfgs, **kwargs)
         return data
 
     def get_collators(self, collator_cfgs=None, **kwargs):
