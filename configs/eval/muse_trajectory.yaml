@@ -11,7 +11,7 @@ defaults:
 
 handler: MUSEEvaluator
 output_dir: ${paths.output_dir}
-metrics: ${eval.muse_trajectory.metrics}
+metrics: {}  # Populated by defaults (muse_metrics with @package eval.muse_trajectory.metrics.*)
 samples: null  # Limit dataset size; set via CLI (eval.muse_trajectory.samples=N)
 overwrite: false
 data_split: News

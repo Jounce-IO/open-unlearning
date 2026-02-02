@@ -14,7 +14,7 @@ defaults:
 
 handler: TOFUEvaluator
 output_dir: ${paths.output_dir}
-metrics: ${eval.tofu_trajectory.metrics}
+metrics: {}  # Populated by defaults (tofu_metrics with @package eval.tofu_trajectory.metrics.*)
 samples: null  # Limit dataset size; set via CLI (eval.tofu_trajectory.samples=N)
 overwrite: false
 forget_split: forget10

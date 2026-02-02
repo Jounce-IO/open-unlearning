@@ -19,7 +19,11 @@ class LMEvalEvaluator(Evaluator):
             self.eval_cfg.tasks, resolve=True, throw_on_missing=True
         )
         self.task_manager = TaskManager()
-        self.simple_evaluate_args = dict(kwargs.get("simple_evaluate_args", {}))
+        cfg_args = OmegaConf.to_container(
+            eval_cfg.get("simple_evaluate_args", {}), resolve=True
+        ) or {}
+        kw_args = kwargs.get("simple_evaluate_args", {}) or {}
+        self.simple_evaluate_args = dict(cfg_args, **kw_args)
 
     def prepare_model(self, model, **kwargs):
         """Prepare model for evaluation"""
