@@ -1,0 +1,14 @@
+# @package eval.muse_trajectory
+# Custom MUSE config that only includes trajectory_metrics (1 metric vs 5 in full muse_trajectory)
+
+defaults:
+  - muse_metrics:
+    - trajectory_metrics
+
+handler: MUSEEvaluator
+output_dir: ${paths.output_dir}
+metrics: {}
+overwrite: false
+samples: null
+data_split: News
+retain_logs_path: null
