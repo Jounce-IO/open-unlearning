@@ -2,6 +2,36 @@ import numpy as np
 from scipy.stats import ks_2samp
 from evals.metrics.base import unlearning_metric, logger
 
+# Metrics that require retain_model_logs (retain_logs_path)
+RETAIN_LOGS_METRICS = frozenset(
+    {"privleak", "forget_quality", "trajectory_privleak", "trajectory_forget_quality"}
+)
+
+# Message for retain_logs_path=None when privleak/forget_quality need it
+RETAIN_LOGS_PATH_NONE_MSG = (
+    "retain_logs_path is None. privleak and forget_quality compare the unlearned model "
+    "to a retain (baseline) model. Without retain evals, privleak falls back to ref_value (0.5) "
+    "and forget_quality returns None. To fix: (1) Evaluate your retain model (finetuned on retain split) "
+    "and save results to JSON; (2) Pass retain_logs_path=/path/to/TOFU_EVAL.json via Hydra override "
+    "(e.g. eval.tofu_trajectory.retain_logs_path=saves/eval/tofu_retain95/TOFU_EVAL.json for TOFU, "
+    "eval.muse_trajectory.retain_logs_path=... for MUSE)."
+)
+
+
+def log_retain_logs_path_none_if_needed(
+    context: str, metrics: dict, retain_logs_path
+) -> None:
+    """Log when retain-dependent metrics are chosen but retain_logs_path is None."""
+    retain_metrics = RETAIN_LOGS_METRICS & set(metrics.keys())
+    if not retain_metrics or retain_logs_path is not None:
+        return
+    logger.warning(
+        "[%s] retain_logs_path is None but metrics %s require retain_model_logs. %s",
+        context,
+        sorted(retain_metrics),
+        RETAIN_LOGS_PATH_NONE_MSG,
+    )
+
 
 @unlearning_metric(name="ks_test")
 def ks_test(model, **kwargs):
@@ -44,7 +74,9 @@ def privleak(model, **kwargs):
         ref = kwargs["reference_logs"]["retain_model_logs"]["retain"]["agg_value"]
     except Exception as _:
         logger.warning(
-            f"retain_model_logs evals not provided for privleak, using default retain auc of {kwargs['ref_value']}"
+            "privleak: retain_model_logs evals not provided, using default retain auc of %s. %s",
+            kwargs.get("ref_value", 0.5),
+            RETAIN_LOGS_PATH_NONE_MSG,
         )
         ref = kwargs["ref_value"]
     score = 1 - score
@@ -60,7 +92,9 @@ def rel_diff(model, **kwargs):
         ref = kwargs["reference_logs"]["retain_model_logs"]["retain"]["agg_value"]
     except Exception as _:
         logger.warning(
-            f"retain_model_logs evals not provided for privleak, using default retain auc of {kwargs['ref_value']}"
+            "rel_diff: retain_model_logs evals not provided, using default retain auc of %s. %s",
+            kwargs.get("ref_value", 0.5),
+            RETAIN_LOGS_PATH_NONE_MSG,
         )
         ref = kwargs["ref_value"]
     return {"agg_value": (score - ref) / (ref + 1e-10) * 100}

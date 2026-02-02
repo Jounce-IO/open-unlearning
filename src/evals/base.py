@@ -3,6 +3,7 @@ import json
 import logging
 import numpy as np
 from evals.metrics import get_metrics
+from evals.metrics.privacy import log_retain_logs_path_none_if_needed
 
 logger = logging.getLogger("evaluator")
 
@@ -131,6 +132,11 @@ class Evaluator:
             self.save_logs(logs, logs_file_path)
 
         logger.info(f"***** Running {self.name} evaluation suite *****")
+        log_retain_logs_path_none_if_needed(
+            "start of evaluation",
+            self.metrics,
+            self.eval_cfg.get("retain_logs_path"),
+        )
         logger.info(f"Fine-grained evaluations will be saved to: {logs_file_path}")
         logger.info(
             f"Aggregated evaluations will be summarised in: {summary_file_path}"
@@ -146,6 +152,11 @@ class Evaluator:
                 self.save_logs(self.summarize(logs), summary_file_path)
                 continue
             _ = logs.pop(metric_name, None)  # overwriting existing evals if present
+            log_retain_logs_path_none_if_needed(
+                f"start of metric {metric_name}",
+                {metric_name: self.eval_cfg.metrics[metric_name]},
+                self.eval_cfg.get("retain_logs_path"),
+            )
             kwargs = {
                 "tokenizer": kwargs.get("tokenizer", None),
                 "template_args": kwargs.get("template_args", None),

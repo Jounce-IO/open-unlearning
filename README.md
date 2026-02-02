@@ -168,7 +168,7 @@ python src/eval.py --config-name=eval.yaml experiment=eval/tofu/default \
 - `experiment`- Path to the evaluation configuration [`configs/experiment/eval/tofu/default.yaml`](configs/experiment/eval/tofu/default.yaml).
 - `model`- Sets up the model and tokenizer configs for the `Llama-3.2-1B-Instruct` model.
 - `model.model_args.pretrained_model_name_or_path`- Overrides the default experiment config to evaluate a model from a HuggingFace ID (can use a local model checkpoint path as well).
-- `retain_logs_path`- Sets the path to the reference model eval logs that is needed to compute reference model based metrics like `forget_quality` in TOFU.
+- `retain_logs_path`- Path to pre-computed evals from the retain (baseline) model. Required for **privleak** and **forget_quality**. Without it, privleak uses default (0.5) and forget_quality returns None. See [docs/evaluation.md](docs/evaluation.md#retain_logs_path-for-privleak-and-forget_quality) for how to set it.
 
 For more details about creating and running evaluations, refer [`docs/evaluation.md`](docs/evaluation.md).
 
