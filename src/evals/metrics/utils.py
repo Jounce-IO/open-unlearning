@@ -1,3 +1,4 @@
+import sys
 from typing import List
 from tqdm import tqdm
 from rouge_score import rouge_scorer
@@ -41,11 +42,31 @@ def get_forget_quality(model_tr, reference_tr):
     return {"agg_value": test_res.pvalue}
 
 
+def _is_tty() -> bool:
+    """True if stderr is a TTY (interactive terminal). False for kubectl logs, Docker, etc."""
+    return hasattr(sys.stderr, "isatty") and sys.stderr.isatty()
+
+
 def run_batchwise_evals(model, dataloader, batch_eval_fn, batch_eval_fn_args, eval_msg):
     """Run batch-wise evaluations on a dataset using a specified evaluation function. Handles
     multi-answer datasets by organizing evaluations by answer indices and aggregating results."""
     evals = defaultdict(dict)
-    for batch in tqdm(dataloader, desc=eval_msg, total=len(dataloader)):
+    total = len(dataloader)
+    # In non-TTY (kubectl logs, Docker), tqdm's \r overwrites never flush because
+    # log aggregators wait for newlines. Use explicit prints with newlines instead.
+    if _is_tty():
+        iterator = tqdm(dataloader, desc=eval_msg, total=total)
+    else:
+        iterator = dataloader
+        # Log every 10% or at least every 10 batches, whichever is more frequent
+        log_interval = max(1, min(total // 10, 10))
+
+    for batch_idx, batch in enumerate(iterator):
+        if not _is_tty():
+            n = batch_idx + 1
+            if n % log_interval == 0 or n == total:
+                pct = 100 * n / total
+                print(f"{eval_msg}: {n}/{total} ({pct:.0f}%)", flush=True)
         # if data arrives in normal format we convert the batch to multiple answer-style
         # like in tofu_perturbed by adding a fake intra_item_index
         if "input_ids" in batch:
