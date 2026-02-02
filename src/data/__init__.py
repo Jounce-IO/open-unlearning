@@ -46,8 +46,9 @@ def _load_single_dataset(dataset_name, dataset_cfg: DictConfig, **kwargs):
     if split_val is not None and "hf_args" in dataset_args:
         dataset_args["hf_args"] = dict(dataset_args["hf_args"])
         dataset_args["hf_args"]["split"] = split_val
-    # Don't pass samples to handler (not a valid arg)
-    handler_kwargs = {k: v for k, v in kwargs.items() if k != "samples"}
+    # Only pass dataset-relevant kwargs; metric config keys (collators, metrics, etc.) are not valid
+    dataset_relevant_keys = {"tokenizer", "template_args", "split"}
+    handler_kwargs = {k: v for k, v in kwargs.items() if k in dataset_relevant_keys}
     return dataset_handler(**dataset_args, **handler_kwargs)
 
 
