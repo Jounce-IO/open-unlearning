@@ -172,29 +172,23 @@ class TestTrajectoryMetricsShapeValidation:
     """Tests for shape validation in trajectory_metrics."""
     
     def test_extract_generated_portion_from_logits(self):
-        """Test that generated portion is correctly extracted from full sequence."""
-        # Simulate: prompt_len=5, generated_len=10, full_len=15
+        """Test that generated portion is correctly extracted from full sequence. R_full is [B, V, full_len, S]."""
         prompt_len = 5
         generated_len = 10
         full_len = prompt_len + generated_len
         V, S = 100, 8
-        
-        # Create logits_history with full sequence length
-        logits_history = [
-            torch.randn(1, full_len, V) for _ in range(S)
-        ]
-        
-        R_full = stack_logits_history(logits_history)  # [V, full_len, S]
-        assert R_full.shape == (V, full_len, S)
-        
-        # Extract generated portion
-        R = R_full[:, prompt_len:prompt_len + generated_len, :]  # [V, generated_len, S]
-        assert R.shape == (V, generated_len, S)
-        
-        # Verify it matches the generated region
+
+        logits_history = [torch.randn(1, full_len, V) for _ in range(S)]
+
+        R_full = stack_logits_history(logits_history)  # [B, V, full_len, S]
+        assert R_full.shape == (1, V, full_len, S)
+
+        R = R_full[:, :, prompt_len : prompt_len + generated_len, :]  # [B, V, generated_len, S]
+        assert R.shape == (1, V, generated_len, S)
+
         for s in range(S):
-            expected = logits_history[s][0, prompt_len:prompt_len + generated_len, :].T
-            assert torch.allclose(R[:, :, s], expected)
+            expected = logits_history[s][0, prompt_len : prompt_len + generated_len, :].T
+            assert torch.allclose(R[0, :, :, s], expected)
     
     def test_extract_fixation_steps_for_generated_region(self):
         """Test that fixation steps are extracted for generated region only."""
@@ -429,6 +423,215 @@ class TestTrajectoryMetricsIntegration:
             # If it fails, it should be on metric computation, not shape issues
             # Check that it's not a shape mismatch error
             assert "Expected target size" not in str(e)
+            assert "shape" not in str(e).lower() or "mismatch" not in str(e).lower()
+
+    def test_trajectory_metrics_batch_size_2_different_samples(self):
+        """With batch_size=2 and different logits per sample, trajectory_metrics runs and uses per-sample trajectories.
+        Asserts that the B=2 aggregate differs from the B=1 (first sample only) result, so both samples contribute."""
+        import numpy as np
+
+        V, L_gen, S = 100, 10, 8
+        prompt_len = 5
+        full_len = prompt_len + L_gen
+        B = 2
+
+        # Fix seeds so we have reproducible different logits per sample
+        torch.manual_seed(42)
+        logits_history_b2 = [torch.randn(B, full_len, V) for _ in range(S)]
+        fixation_steps_b2 = torch.randint(0, S, (B, full_len))
+
+        class MockSamplerOutput:
+            def __init__(self, sequences, histories, logits_history, fixation_steps):
+                self.sequences = sequences
+                self.histories = histories
+                self.logits_history = logits_history
+                self.fixation_steps = fixation_steps
+
+        # Run 1: batch_size=1, only first sample -> result_single
+        sampler1 = Mock()
+        sampler1.sample.return_value = MockSamplerOutput(
+            sequences=torch.randint(0, V, (1, full_len)),
+            histories=None,
+            logits_history=[t[0:1] for t in logits_history_b2],
+            fixation_steps=fixation_steps_b2[0:1],
+        )
+        model1 = Mock()
+        model1.sampler = sampler1
+
+        class MockDatasetSingle:
+            def __init__(self):
+                self.data = [
+                    {"input_ids": torch.randint(0, V, (full_len,)), "labels": torch.randint(0, V, (full_len,))}
+                ]
+
+            def __len__(self):
+                return len(self.data)
+
+            def __getitem__(self, idx):
+                return self.data[idx]
+
+        def mock_collator_single(batch):
+            return {
+                "input_ids": torch.stack([b["input_ids"] for b in batch]),
+                "labels": torch.stack([b["labels"] for b in batch]),
+                "indices": torch.tensor([0]),
+            }
+
+        tokenizer = Mock()
+        tokenizer.decode = lambda x, **kwargs: "decoded text"
+
+        result_single = trajectory_metrics(
+            model1,
+            metric_name="trajectory_metrics",
+            cache={},
+            metrics=["probability"],
+            data=MockDatasetSingle(),
+            collators=mock_collator_single,
+            tokenizer=tokenizer,
+            batch_size=1,
+            trajectory_config={
+                "return_logits": True,
+                "return_fixation_steps": True,
+                "sampler_kwargs": {"steps": S, "max_new_tokens": L_gen},
+            },
+        )
+        assert result_single is not None and "agg_value" in result_single
+
+        # Run 2: batch_size=2, two different samples -> result_b2
+        sampler2 = Mock()
+        sampler2.sample.return_value = MockSamplerOutput(
+            sequences=torch.randint(0, V, (B, full_len)),
+            histories=None,
+            logits_history=logits_history_b2,
+            fixation_steps=fixation_steps_b2,
+        )
+        model2 = Mock()
+        model2.sampler = sampler2
+
+        class MockDatasetTwo:
+            def __init__(self):
+                self.data = [
+                    {"input_ids": torch.randint(0, V, (full_len,)), "labels": torch.randint(0, V, (full_len,))}
+                    for _ in range(2)
+                ]
+
+            def __len__(self):
+                return len(self.data)
+
+            def __getitem__(self, idx):
+                return self.data[idx]
+
+        def mock_collator_two(batch):
+            return {
+                "input_ids": torch.stack([b["input_ids"] for b in batch]),
+                "labels": torch.stack([b["labels"] for b in batch]),
+                "indices": torch.tensor([0, 1]),
+            }
+
+        result_b2 = trajectory_metrics(
+            model2,
+            metric_name="trajectory_metrics",
+            cache={},
+            metrics=["probability"],
+            data=MockDatasetTwo(),
+            collators=mock_collator_two,
+            tokenizer=tokenizer,
+            batch_size=2,
+            trajectory_config={
+                "return_logits": True,
+                "return_fixation_steps": True,
+                "sampler_kwargs": {"steps": S, "max_new_tokens": L_gen},
+            },
+        )
+        assert result_b2 is not None and "agg_value" in result_b2
+
+        # If only the first sample were used in B=2, agg would match B=1. Different logits => different values.
+        agg1 = result_single["agg_value"]
+        agg2 = result_b2["agg_value"]
+        for traj_name in agg1:
+            if traj_name not in agg2:
+                continue
+            for metric_name in agg1[traj_name]:
+                if metric_name not in agg2[traj_name]:
+                    continue
+                a1 = np.asarray(agg1[traj_name][metric_name])
+                a2 = np.asarray(agg2[traj_name][metric_name])
+                if a1.size > 0 and a2.size > 0:
+                    assert not np.allclose(a1, a2), (
+                        f"B=2 aggregate should differ from B=1 when samples differ "
+                        f"(traj={traj_name}, metric={metric_name})"
+                    )
+                    break
+            else:
+                continue
+            break
+
+    def test_trajectory_metrics_batch_size_4_runs(self):
+        """trajectory_metrics with batch_size=4 runs without shape errors."""
+        V, L_gen, S = 50, 6, 4
+        full_len = 5 + L_gen
+        B = 4
+
+        sampler = Mock()
+        logits_history = [torch.randn(B, full_len, V) for _ in range(S)]
+        fixation_steps = torch.randint(0, S, (B, full_len))
+
+        class MockSamplerOutput:
+            def __init__(self, sequences, histories, logits_history, fixation_steps):
+                self.sequences = sequences
+                self.histories = histories
+                self.logits_history = logits_history
+                self.fixation_steps = fixation_steps
+
+        sampler.sample.return_value = MockSamplerOutput(
+            sequences=torch.randint(0, V, (B, full_len)),
+            histories=None,
+            logits_history=logits_history,
+            fixation_steps=fixation_steps,
+        )
+        model = Mock()
+        model.sampler = sampler
+
+        class MockDataset:
+            def __init__(self):
+                self.data = [
+                    {"input_ids": torch.randint(0, V, (full_len,)), "labels": torch.randint(0, V, (full_len,))}
+                    for _ in range(4)
+                ]
+
+            def __len__(self):
+                return len(self.data)
+
+            def __getitem__(self, idx):
+                return self.data[idx]
+
+        def mock_collator(batch):
+            return {
+                "input_ids": torch.stack([b["input_ids"] for b in batch]),
+                "labels": torch.stack([b["labels"] for b in batch]),
+                "indices": torch.tensor(list(range(len(batch)))),
+            }
+
+        tokenizer = Mock()
+        tokenizer.decode = lambda x, **kwargs: "decoded text"
+
+        kwargs = {
+            "metrics": ["probability"],
+            "data": MockDataset(),
+            "collators": mock_collator,
+            "tokenizer": tokenizer,
+            "batch_size": 4,
+            "trajectory_config": {
+                "return_logits": True,
+                "return_fixation_steps": True,
+                "sampler_kwargs": {"steps": S, "max_new_tokens": L_gen},
+            },
+        }
+        try:
+            result = trajectory_metrics(model, **kwargs)
+            assert result is not None
+            assert "agg_value" in result
+        except Exception as e:
             assert "shape" not in str(e).lower() or "mismatch" not in str(e).lower()
 
 

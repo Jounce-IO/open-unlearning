@@ -102,42 +102,51 @@ def _generate_trajectories_for_dataloader(
         if fixation_steps is None:
             continue
 
-        R_full = stack_logits_history(logits_history)
-        V, T_full, S = R_full.shape
+        R_full = stack_logits_history(logits_history)  # [B, V, T_full, S]
+        B_r, V, T_full, S = R_full.shape
+        assert B_r == B, f"Batch size mismatch: logits_history B={B_r} vs batch B={B}"
         max_prompt_len = max(prompt_lens)
         generated_len = T_full - max_prompt_len
-        R = R_full[:, max_prompt_len : max_prompt_len + generated_len, :]
-        V, L, S = R.shape
+        R = R_full[:, :, max_prompt_len : max_prompt_len + generated_len, :]  # [B, V, L, S]
+        _, _, L, _ = R.shape
         if fixation_steps.dim() == 2:
-            F_full = fixation_steps[0]
-            F = (
-                F_full[max_prompt_len : max_prompt_len + L]
-                if F_full.shape[0] > max_prompt_len
-                else torch.cat(
-                    [
-                        F_full,
-                        torch.full(
-                            (L - F_full.shape[0],),
-                            S - 1,
-                            dtype=torch.long,
-                            device=F_full.device,
-                        ),
-                    ]
-                )
-            )
+            F_list = []
+            for b in range(B):
+                F_full = fixation_steps[b]
+                if F_full.shape[0] > max_prompt_len:
+                    slice_F = F_full[max_prompt_len : max_prompt_len + L]
+                    if slice_F.shape[0] >= L:
+                        F_b = slice_F[:L]
+                    else:
+                        F_b = torch.cat(
+                            [
+                                slice_F,
+                                torch.full(
+                                    (L - slice_F.shape[0],),
+                                    S - 1,
+                                    dtype=torch.long,
+                                    device=F_full.device,
+                                ),
+                            ]
+                        )
+                else:
+                    F_b = torch.full(
+                        (L,), S - 1, dtype=torch.long, device=F_full.device
+                    )
+                F_list.append(F_b)
+            F = torch.stack(F_list, dim=0)  # [B, L]
         else:
             continue
 
-        T_steps, T_fix_start, T_fix_end, T_fix_ratio = compute_trajectories(R, F, S)
-        traj = {
-            "steps": T_steps,
-            "fixation_start": T_fix_start,
-            "fixation_end": T_fix_end,
-            "fixation_ratio": T_fix_ratio,
-        }
+        T_steps, T_fix_start, T_fix_end, T_fix_ratio = compute_trajectories(R, F, S)  # each [B, V, L, S]
         for i in range(B):
             idx = indices[i].item() if torch.is_tensor(indices[i]) else indices[i]
-            trajectories_by_idx[str(idx)] = traj
+            trajectories_by_idx[str(idx)] = {
+                "steps": T_steps[i],
+                "fixation_start": T_fix_start[i],
+                "fixation_end": T_fix_end[i],
+                "fixation_ratio": T_fix_ratio[i],
+            }
     return trajectories_by_idx
 
 
@@ -918,40 +927,47 @@ def trajectory_metrics(model, **kwargs):
             logger.warning(f"Batch {batch_idx}: No fixation_steps returned from sampler")
             continue
         
-        # Stack logits into tensor R [V, T, S] where T is full sequence length (prompt + generated)
-        R_full = stack_logits_history(logits_history)  # [V, T, S]
-        V, T_full, S = R_full.shape
-        
-        # Extract only the generated portion from R_full
-        # logits_history contains [B, T, V] where T includes prompt + generated
-        # We need to extract only the generated portion for trajectory computation
+        # Stack logits into tensor R [B, V, T, S] where T is full sequence length (prompt + generated)
+        R_full = stack_logits_history(logits_history)  # [B, V, T_full, S]
+        B_r, V, T_full, S = R_full.shape
+        assert B_r == B, f"Batch size mismatch: logits_history B={B_r} vs batch B={B}"
         max_prompt_len = max(prompt_lens)
         generated_len = T_full - max_prompt_len
-        
-        # Extract generated portion: R[:, max_prompt_len:max_prompt_len + generated_len, :]
-        # This gives us [V, L, S] where L = generated_len
-        R = R_full[:, max_prompt_len:max_prompt_len + generated_len, :]  # [V, L, S]
-        V, L, S = R.shape
-        
-        # Extract fixation steps F [L] for each sample
-        # fixation_steps is [B, T], we need [L] for generated region
-        # For now, use first sample or average
+
+        R = R_full[:, :, max_prompt_len : max_prompt_len + generated_len, :]  # [B, V, L, S]
+        _, _, L, _ = R.shape
+
+        # Extract fixation steps F [B, L] for generated region (per sample)
         if fixation_steps.dim() == 2:
-            # [B, T] -> take first sample and extract generated region
-            F_full = fixation_steps[0]  # [T]
-            # Extract only the generated portion (after max prompt length)
-            if F_full.shape[0] > max_prompt_len:
-                F = F_full[max_prompt_len:max_prompt_len + L]  # [L]
-            else:
-                # If fixation_steps doesn't cover full length, pad or truncate
-                F = F_full[:L] if F_full.shape[0] >= L else torch.cat([
-                    F_full,
-                    torch.full((L - F_full.shape[0],), S - 1, dtype=torch.long, device=F_full.device)
-                ])
+            F_list = []
+            for b in range(B):
+                F_full = fixation_steps[b]
+                if F_full.shape[0] > max_prompt_len:
+                    slice_F = F_full[max_prompt_len : max_prompt_len + L]
+                    if slice_F.shape[0] >= L:
+                        F_b = slice_F[:L]
+                    else:
+                        F_b = torch.cat(
+                            [
+                                slice_F,
+                                torch.full(
+                                    (L - slice_F.shape[0],),
+                                    S - 1,
+                                    dtype=torch.long,
+                                    device=F_full.device,
+                                ),
+                            ]
+                        )
+                else:
+                    F_b = torch.full(
+                        (L,), S - 1, dtype=torch.long, device=F_full.device
+                    )
+                F_list.append(F_b)
+            F = torch.stack(F_list, dim=0)  # [B, L]
         else:
             raise ValueError(f"Unexpected fixation_steps shape: {fixation_steps.shape}")
-        
-        # Compute four trajectory tensors
+
+        # Compute four trajectory tensors (each [B, V, L, S])
         T_steps, T_fixation_start, T_fixation_end, T_fixation_ratio = compute_trajectories(R, F, S)
         trajectories = {
             "steps": T_steps,
@@ -959,15 +975,18 @@ def trajectory_metrics(model, **kwargs):
             "fixation_end": T_fixation_end,
             "fixation_ratio": T_fixation_ratio,
         }
-        
-        # Process each sample in batch
+
+        # Process each sample in batch (each sample uses its own trajectory)
         for sample_idx in range(B):
             idx_str = str(indices[sample_idx].item() if torch.is_tensor(indices[sample_idx]) else indices[sample_idx])
-            
-            # For batched case, we'd need per-sample trajectories
-            # For now, use shared trajectories (assuming single sample or first sample)
-            sample_trajectories = trajectories if sample_idx == 0 else trajectories
-            
+
+            sample_trajectories = {
+                "steps": trajectories["steps"][sample_idx],
+                "fixation_start": trajectories["fixation_start"][sample_idx],
+                "fixation_end": trajectories["fixation_end"][sample_idx],
+                "fixation_ratio": trajectories["fixation_ratio"][sample_idx],
+            }
+
             # Get ground truth for this sample
             sample_labels = labels[sample_idx] if labels is not None else None
             sample_input_ids = input_ids[sample_idx]

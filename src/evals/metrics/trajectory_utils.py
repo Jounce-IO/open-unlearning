@@ -15,36 +15,22 @@ from typing import List
 def stack_logits_history(logits_history: List[torch.Tensor]) -> torch.Tensor:
     """
     Stack logits history list into a tensor.
-    
+
+    Supports any batch size B; no samples are discarded.
+
     Args:
         logits_history: List of [B, L, V] tensors (one per step)
-    
+
     Returns:
-        R: [V, L, S] tensor (stacked logits)
-        For single sample (B=1), transposes to [V, L, S]
-        For multiple samples, takes first sample or averages
+        R: [B, V, L, S] tensor (stacked logits, one per sample)
     """
     if not logits_history:
         raise ValueError("logits_history cannot be empty")
-    
-    # Stack along new dimension: [S, B, L, V]
+
+    # Stack along new dimension: [S, B, L, V] -> permute to [B, V, L, S]
     stacked = torch.stack(logits_history, dim=0)
     S, B, L, V = stacked.shape
-    
-    # For now, handle single sample case (B=1)
-    # TODO: Support batched case (average or select first)
-    if B == 1:
-        # Transpose to [V, L, S]
-        R = stacked[0].transpose(0, 1).transpose(1, 2)  # [L, V] -> [V, L] then add S
-        # Actually, we want [V, L, S], so:
-        R = stacked[0].permute(2, 1, 0)  # [B, L, V] -> [V, L] then stack gives [V, L, S]
-        # Wait, stacked is [S, B, L, V], so:
-        R = stacked.squeeze(1).permute(2, 1, 0)  # [S, L, V] -> [V, L, S]
-    else:
-        # For batched, take first sample for now
-        # TODO: Support averaging or per-sample trajectories
-        R = stacked[:, 0, :, :].permute(2, 1, 0)  # [S, L, V] -> [V, L, S]
-    
+    R = stacked.permute(1, 3, 2, 0)  # [B, V, L, S]
     return R
 
 
@@ -53,62 +39,65 @@ def compute_trajectories(
 ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
     """
     Compute four trajectory tensors from logits R and fixation steps F.
-    
+
+    Supports batched input: R [B, V, L, S], F [B, L]; returns four [B, V, L, S] tensors.
+    Also accepts single-sample R [V, L, S], F [L] (B=1); returns four [V, L, S] tensors.
+
     All fixation trajectories satisfy: first (s=0) = R step 0, last (s=S-1) = R step F[l].
-    
+
     Args:
-        R: [V, L, S] logits tensor
-        F: [L] fixation steps tensor (step index where each position was fixed)
+        R: [B, V, L, S] or [V, L, S] logits tensor
+        F: [B, L] or [L] fixation steps (step index where each position was fixed)
         S: Number of diffusion steps (must be > 1)
-    
+
     Returns:
-        T_steps: [V, L, S] steps trajectory (direct copy of R)
-        T_fixation_start: [V, L, S] fixation start trajectory (from step 0 to fixation)
-        T_fixation_end: [V, L, S] fixation end trajectory (from step 0 to fixation)
-        T_fixation_ratio: [V, L, S] fixation ratio trajectory (linear interpolation from 0 to F[l])
+        T_steps, T_fixation_start, T_fixation_end, T_fixation_ratio: each [B, V, L, S] or [V, L, S]
     """
-    V, L, S_actual = R.shape
+    if R.dim() == 3:
+        R = R.unsqueeze(0)
+        F = F.unsqueeze(0)
+        squeeze_out = True
+    else:
+        squeeze_out = False
+
+    B, V, L, S_actual = R.shape
     assert S == S_actual, f"S mismatch: {S} != {S_actual}"
-    assert F.shape[0] == L, f"F length mismatch: {F.shape[0]} != {L}"
+    assert F.shape == (B, L), f"F shape mismatch: {F.shape} != ({B}, {L})"
     assert S > 1, f"S must be > 1, got {S}"
-    
+
     device = R.device
-    dtype = R.dtype
-    
+
     # Steps trajectory: Direct copy of R
-    T_steps = R.clone()  # [V, L, S]
-    
-    # Fixation start trajectory: From step 0 to fixation
-    # T_fixation_start[v, l, s] = R[v, l, min(s, F[l])]
-    T_fixation_start = torch.zeros_like(R)
-    for l in range(L):
-        fix_step = int(F[l].item())
-        for s in range(S):
-            source_step = min(s, fix_step)
-            source_step = max(0, min(source_step, S - 1))  # Clamp to [0, S-1]
-            T_fixation_start[:, l, s] = R[:, l, source_step]
-    
-    # Fixation end trajectory: From step 0 to fixation
-    # T_fixation_end[v, l, s] = R[v, l, max(0, F[l]-(S-1)+s)]
-    T_fixation_end = torch.zeros_like(R)
-    for l in range(L):
-        fix_step = int(F[l].item())
-        for s in range(S):
-            source_step = max(0, fix_step - (S - 1) + s)
-            source_step = max(0, min(source_step, S - 1))  # Clamp to [0, S-1]
-            T_fixation_end[:, l, s] = R[:, l, source_step]
-    
-    # Fixation ratio trajectory: Linear interpolation from step 0 to fixation
-    # T_fixation_ratio[v, l, s] = R[v, l, floor(F[l]*s/(S-1))]
-    # Assumes S > 1 (asserted above)
-    T_fixation_ratio = torch.zeros_like(R)
-    for l in range(L):
-        fix_step = int(F[l].item())
-        for s in range(S):
-            ratio_step = int(fix_step * s / (S - 1))
-            ratio_step = max(0, min(ratio_step, S - 1))  # Clamp to [0, S-1]
-            T_fixation_ratio[:, l, s] = R[:, l, ratio_step]
-    
+    T_steps = R.clone()  # [B, V, L, S]
+
+    s_vec = torch.arange(S, device=device, dtype=torch.long)
+    F_exp = F.unsqueeze(2)  # [B, L, 1]
+    s_exp = s_vec.view(1, 1, S)  # [1, 1, S]
+
+    # Fixation start: T[b,v,l,s] = R[b,v,l, min(s, F[b,l])]
+    source_step = torch.minimum(s_exp, F_exp)
+    source_step = torch.clamp(source_step, 0, S - 1)
+    index = source_step.unsqueeze(1).expand(B, V, L, S)
+    T_fixation_start = torch.gather(R, dim=3, index=index)
+
+    # Fixation end: T[b,v,l,s] = R[b,v,l, max(0, F[b,l]-(S-1)+s)]
+    source_step = F_exp - (S - 1) + s_exp
+    source_step = torch.clamp(source_step, 0, S - 1)
+    index = source_step.unsqueeze(1).expand(B, V, L, S)
+    T_fixation_end = torch.gather(R, dim=3, index=index)
+
+    # Fixation ratio: T[b,v,l,s] = R[b,v,l, floor(F[b,l]*s/(S-1))]
+    ratio_step = (F_exp * s_exp) // (S - 1)
+    ratio_step = torch.clamp(ratio_step, 0, S - 1)
+    index = ratio_step.unsqueeze(1).expand(B, V, L, S)
+    T_fixation_ratio = torch.gather(R, dim=3, index=index)
+
+    if squeeze_out:
+        T_steps = T_steps.squeeze(0)
+        T_fixation_start = T_fixation_start.squeeze(0)
+        T_fixation_end = T_fixation_end.squeeze(0)
+        T_fixation_ratio = T_fixation_ratio.squeeze(0)
+
     return T_steps, T_fixation_start, T_fixation_end, T_fixation_ratio
 
 

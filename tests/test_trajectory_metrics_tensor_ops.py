@@ -28,21 +28,18 @@ class TestTensorValueVerification:
     """Tests that verify exact tensor values, not just shapes."""
     
     def test_stack_logits_history_exact_values(self):
-        """Test that stacked logits have exact values matching input."""
+        """Test that stacked logits have exact values matching input. Output [B, V, L, S]."""
         V, L, S = 50, 10, 5
-        # Use fixed values for reproducibility
         torch.manual_seed(42)
         logits_history = [torch.randn(1, L, V) for _ in range(S)]
-        
+
         R = stack_logits_history(logits_history)
-        
-        # Verify exact values for each step
+
+        assert R.shape == (1, V, L, S)
         for s in range(S):
             expected = logits_history[s][0].T  # [V, L]
-            actual = R[:, :, s]  # [V, L]
-            # Check element-wise equality
+            actual = R[0, :, :, s]  # [V, L]
             assert torch.allclose(actual, expected, atol=1e-6)
-            # Verify specific elements
             assert torch.allclose(actual[0, 0], expected[0, 0])
             assert torch.allclose(actual[-1, -1], expected[-1, -1])
     
@@ -293,10 +290,10 @@ class TestTensorShapeConsistency:
     
     @pytest.mark.parametrize("V,L,S", [(100, 20, 8), (1000, 64, 16), (5000, 128, 32)])
     def test_stack_logits_history_shape_consistency(self, V, L, S):
-        """Test shape consistency for various sizes."""
+        """Test shape consistency for various sizes. Output [B, V, L, S]."""
         logits_history = [torch.randn(1, L, V) for _ in range(S)]
         R = stack_logits_history(logits_history)
-        assert R.shape == (V, L, S)
+        assert R.shape == (1, V, L, S)
     
     @pytest.mark.parametrize("V,L,S", [(100, 20, 8), (1000, 64, 16), (5000, 128, 32)])
     def test_compute_trajectories_shape_consistency(self, V, L, S):
@@ -323,41 +320,39 @@ class TestTensorEdgeCases:
     """Tests for tensor edge cases (empty, single element, etc.)."""
     
     def test_single_step_single_token(self):
-        """Test with S=2, L=1 (minimal case; S must be > 1)."""
+        """Test with S=2, L=1 (minimal case; S must be > 1). Output [1, V, 1, 2]."""
         V = 100
         logits_history = [torch.randn(1, 1, V) for _ in range(2)]
         R = stack_logits_history(logits_history)
-        assert R.shape == (V, 1, 2)
-        
+        assert R.shape == (1, V, 1, 2)
+
         F = torch.tensor([0], dtype=torch.long)
-        T_steps, T_fixation_start, T_fixation_end, T_fixation_ratio = compute_trajectories(R, F, 2)
+        T_steps, T_fixation_start, T_fixation_end, T_fixation_ratio = compute_trajectories(R[0], F, 2)
         assert T_steps.shape == (V, 1, 2)
         assert T_fixation_start.shape == (V, 1, 2)
         assert T_fixation_ratio.shape == (V, 1, 2)
-    
+
     def test_single_vocab_token(self):
-        """Test with V=1 (minimal vocab)."""
+        """Test with V=1 (minimal vocab). Output [1, V, L, S]."""
         V, L, S = 1, 10, 5
         logits_history = [torch.randn(1, L, V) for _ in range(S)]
         R = stack_logits_history(logits_history)
-        assert R.shape == (V, L, S)
-        
+        assert R.shape == (1, V, L, S)
+
         F = torch.randint(0, S, (L,))
-        T_steps, T_fixation_start, T_fixation_end, T_fixation_ratio = compute_trajectories(R, F, S)
+        T_steps, T_fixation_start, T_fixation_end, T_fixation_ratio = compute_trajectories(R[0], F, S)
         assert T_steps.shape == (V, L, S)
-    
+
     def test_large_tensors(self):
-        """Test with moderately large tensors (realistic upper bound)."""
-        # Reduced from (50000, 512, 256) to avoid OOM - still tests large shapes
-        # Memory: ~0.8 GB instead of ~24 GB
-        V, L, S = 5000, 128, 32  # Moderate vocab, sequence length, and steps
+        """Test with moderately large tensors (realistic upper bound). Output [1, V, L, S]."""
+        V, L, S = 5000, 128, 32
         logits_history = [torch.randn(1, L, V) for _ in range(S)]
-        
+
         R = stack_logits_history(logits_history)
-        assert R.shape == (V, L, S)
-        
+        assert R.shape == (1, V, L, S)
+
         F = torch.randint(0, S, (L,))
-        T_steps, T_fixation_start, T_fixation_end, T_fixation_ratio = compute_trajectories(R, F, S)
+        T_steps, T_fixation_start, T_fixation_end, T_fixation_ratio = compute_trajectories(R[0], F, S)
         assert T_steps.shape == (V, L, S)
         assert T_fixation_start.shape == (V, L, S)
         assert T_fixation_ratio.shape == (V, L, S)

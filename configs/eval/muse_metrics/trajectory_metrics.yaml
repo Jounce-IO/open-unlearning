@@ -8,7 +8,7 @@ defaults:
   - ../../collator@collators: DataCollatorForSupervisedDatasetwithIndex
 
 handler: trajectory_metrics
-batch_size: 1  # Start with 1 for testing (trajectory metrics can be memory-intensive)
+batch_size: 1  # Any batch size supported; default 1 for memory (trajectory metrics can be memory-intensive)
 metrics:
   - probability  # Logit-based metric
   - rouge  # Text-based metric

@@ -36,100 +36,99 @@ class TestStackLogitsHistory:
             stack_logits_history([])
     
     def test_single_sample_single_step(self):
-        """Test stacking with B=1, S=1."""
+        """Test stacking with B=1, S=1. Output shape [B, V, L, S] = [1, V, L, S]."""
         V, L = 10, 5
         logits_history = [torch.randn(1, L, V)]  # [B, L, V]
         R = stack_logits_history(logits_history)
-        
-        assert R.shape == (V, L, 1)
-        assert torch.allclose(R[:, :, 0], logits_history[0][0].T)
-    
+
+        assert R.shape == (1, V, L, 1)
+        assert torch.allclose(R[0, :, :, 0], logits_history[0][0].T)
+
     def test_single_sample_multiple_steps(self):
-        """Test stacking with B=1, S=5."""
+        """Test stacking with B=1, S=5. Output shape [1, V, L, S]."""
         V, L, S = 100, 20, 5
         logits_history = [torch.randn(1, L, V) for _ in range(S)]
         R = stack_logits_history(logits_history)
-        
-        assert R.shape == (V, L, S)
+
+        assert R.shape == (1, V, L, S)
         for s in range(S):
-            assert torch.allclose(R[:, :, s], logits_history[s][0].T)
-    
+            assert torch.allclose(R[0, :, :, s], logits_history[s][0].T)
+
     def test_batch_multiple_steps(self):
-        """Test stacking with B=2, S=3 (takes first sample)."""
+        """Test stacking with B=2, S=3. Output shape [B, V, L, S]; each sample preserved."""
         V, L, S, B = 50, 10, 3, 2
         logits_history = [torch.randn(B, L, V) for _ in range(S)]
         R = stack_logits_history(logits_history)
-        
-        assert R.shape == (V, L, S)
-        # Should take first sample (index 0)
-        for s in range(S):
-            assert torch.allclose(R[:, :, s], logits_history[s][0].T)
-    
+
+        assert R.shape == (B, V, L, S)
+        for b in range(B):
+            for s in range(S):
+                assert torch.allclose(R[b, :, :, s], logits_history[s][b].T)
+
     def test_shape_consistency(self):
-        """Test that output shape is always [V, L, S] regardless of batch size."""
+        """Test that output shape is always [B, V, L, S] for any batch size B."""
         V, L, S = 1000, 64, 8
-        
+
         for B in [1, 2, 4]:
             logits_history = [torch.randn(B, L, V) for _ in range(S)]
             R = stack_logits_history(logits_history)
-            assert R.shape == (V, L, S), f"Failed for B={B}"
-    
+            assert R.shape == (B, V, L, S), f"Failed for B={B}"
+
     def test_larger_batches(self):
-        """Test stacking with larger batch sizes (B=4, B=8)."""
+        """Test stacking with larger batch sizes (B=4, B=8); all samples preserved."""
         V, L, S = 100, 20, 5
-        
+
         for B in [4, 8]:
             logits_history = [torch.randn(B, L, V) for _ in range(S)]
             R = stack_logits_history(logits_history)
-            assert R.shape == (V, L, S)
-            # Should take first sample (index 0)
-            for s in range(S):
-                assert torch.allclose(R[:, :, s], logits_history[s][0].T)
-    
+            assert R.shape == (B, V, L, S)
+            for b in range(B):
+                for s in range(S):
+                    assert torch.allclose(R[b, :, :, s], logits_history[s][b].T)
+
     def test_exact_tensor_values_match(self):
-        """Test that exact tensor values match, not just shapes."""
+        """Test that exact tensor values match, not just shapes (B=1)."""
         V, L, S = 50, 10, 3
-        # Use fixed seed for reproducibility
         torch.manual_seed(42)
         logits_history = [torch.randn(1, L, V) for _ in range(S)]
-        
+
         R = stack_logits_history(logits_history)
-        
-        # Verify exact values for each step
+
+        assert R.shape == (1, V, L, S)
         for s in range(S):
             expected = logits_history[s][0].T  # [V, L]
-            actual = R[:, :, s]  # [V, L]
+            actual = R[0, :, :, s]
             assert torch.allclose(actual, expected, atol=1e-6)
-            # Also check they're the same tensor (or exact copy)
             assert torch.equal(actual, expected) or torch.allclose(actual, expected)
-    
+
     @pytest.mark.parametrize("dtype", [torch.float32, torch.float16, torch.bfloat16])
     def test_different_dtypes(self, dtype):
-        """Test stacking with different dtypes."""
+        """Test stacking with different dtypes. Output [1, V, L, S]."""
         V, L, S = 100, 20, 5
         logits_history = [torch.randn(1, L, V, dtype=dtype) for _ in range(S)]
         R = stack_logits_history(logits_history)
-        
-        assert R.shape == (V, L, S)
+
+        assert R.shape == (1, V, L, S)
         assert R.dtype == dtype
         for s in range(S):
-            assert torch.allclose(R[:, :, s], logits_history[s][0].T, atol=1e-3 if dtype != torch.float32 else 1e-6)
-    
+            assert torch.allclose(
+                R[0, :, :, s], logits_history[s][0].T, atol=1e-3 if dtype != torch.float32 else 1e-6
+            )
+
     def test_different_devices(self):
-        """Test stacking with different devices."""
+        """Test stacking with different devices. Output [1, V, L, S]."""
         V, L, S = 100, 20, 5
-        
-        # CPU
+
         logits_history_cpu = [torch.randn(1, L, V) for _ in range(S)]
         R_cpu = stack_logits_history(logits_history_cpu)
         assert R_cpu.device.type == "cpu"
-        
-        # CUDA if available
+        assert R_cpu.shape == (1, V, L, S)
+
         if torch.cuda.is_available():
             logits_history_cuda = [torch.randn(1, L, V).cuda() for _ in range(S)]
             R_cuda = stack_logits_history(logits_history_cuda)
             assert R_cuda.device.type == "cuda"
-            assert R_cuda.shape == (V, L, S)
+            assert R_cuda.shape == (1, V, L, S)
 
 
 class TestComputeTrajectories:
@@ -204,14 +203,14 @@ class TestComputeTrajectories:
         """Test that shape mismatches raise assertions."""
         V, L, S = 10, 5, 8
         R = torch.randn(V, L, S)
-        
+
         # Wrong S
         with pytest.raises(AssertionError, match="S mismatch"):
             F = torch.randint(0, S, (L,))
             compute_trajectories(R, F, S + 1)
-        
-        # Wrong F length
-        with pytest.raises(AssertionError, match="F length mismatch"):
+
+        # Wrong F length (single-sample: F (L+1,) unsqueezed to (1, L+1) vs expected (1, L))
+        with pytest.raises(AssertionError, match="F shape mismatch"):
             F = torch.randint(0, S, (L + 1,))
             compute_trajectories(R, F, S)
     
