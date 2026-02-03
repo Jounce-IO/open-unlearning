@@ -95,17 +95,17 @@ class LMEvalEvaluator(Evaluator):
         # Set output_dir and file to store results
         output_dir = output_dir if output_dir else self.eval_cfg.output_dir
         logs_file_path = self.get_logs_file_path(output_dir)
-        summary_file_path = self.get_logs_file_path(output_dir, suffix="SUMMARY")
 
         # Load existing results from file if any.
         logs = self.load_logs_from_file(logs_file_path) if not overwrite else {}
-        summary = self.load_logs_from_file(summary_file_path) if not overwrite else {}
+        # Rebuild flat summary from EVAL (task_name -> task_summary) for return value.
+        summary = {}
+        for task_name, task_summary in logs.items():
+            if task_name != "config" and isinstance(task_summary, dict):
+                summary.update(task_summary)
 
         logger.info(f"***** Running {self.name} evaluation suite *****")
-        logger.info(f"Fine-grained evaluations will be saved to: {logs_file_path}")
-        logger.info(
-            f"Aggregated evaluations will be summarised in: {summary_file_path}"
-        )
+        logger.info(f"Evaluations will be saved to: {logs_file_path}")
 
         for task in self.tasks:
             task_name = self.get_task_name(task)
@@ -125,5 +125,4 @@ class LMEvalEvaluator(Evaluator):
             # Store aggregated metrics for this task (no sample-wise data)
             logs[task_name] = task_summary
             self.save_logs(logs, logs_file_path)
-            self.save_logs(summary, summary_file_path)
         return summary
