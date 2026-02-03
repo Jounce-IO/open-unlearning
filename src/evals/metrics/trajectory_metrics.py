@@ -21,6 +21,8 @@ from evals.metrics.utils import (
 from rouge_score import rouge_scorer
 from evals.metrics.trajectory_utils import (
     trajectories_from_logits,
+    prepare_R_from_logits,
+    compute_one_trajectory,
     compute_trajectories,
     extract_logits_at_step,
     decode_logits_to_text,
@@ -107,6 +109,9 @@ def _generate_trajectories_for_dataloader(
         T_fix_start = out["fixation_start"]
         T_fix_end = out["fixation_end"]
         T_fix_ratio = out["fixation_ratio"]
+        # Release logits/sampler refs to lower peak memory (optimization 5.3).
+        del logits_history
+        del sampler_output
         for i in range(T_steps.shape[0]):
             idx = indices[i].item() if torch.is_tensor(indices[i]) else indices[i]
             trajectories_by_idx[str(idx)] = {
@@ -115,6 +120,7 @@ def _generate_trajectories_for_dataloader(
                 "fixation_end": T_fix_end[i],
                 "fixation_ratio": T_fix_ratio[i],
             }
+        del out
     return trajectories_by_idx
 
 
@@ -903,66 +909,45 @@ def trajectory_metrics(model, **kwargs):
             logger.warning(f"Batch {batch_idx}: No fixation_steps returned from sampler")
             continue
 
-        out = trajectories_from_logits(logits_history, fixation_steps, prompt_lens)
-        S = out["S"]
-        L = out["L"]
-        trajectories = {
-            "steps": out["steps"],
-            "fixation_start": out["fixation_start"],
-            "fixation_end": out["fixation_end"],
-            "fixation_ratio": out["fixation_ratio"],
-        }
+        # Build R once per batch; then one trajectory type at a time (optimization 5.4).
+        prepared = prepare_R_from_logits(logits_history, fixation_steps, prompt_lens)
+        R = prepared["R"]
+        F = prepared["F"]
+        S = prepared["S"]
+        L = prepared["L"]
+        # Release logits and sampler output refs to lower peak memory (optimization 5.3).
+        del logits_history
+        del sampler_output
 
-        # Process each sample in batch (each sample uses its own trajectory)
+        # Precompute per-sample batch_templates and metadata (reused across traj_name and step).
+        sample_meta = []
         for sample_idx in range(B):
             idx_str = str(indices[sample_idx].item() if torch.is_tensor(indices[sample_idx]) else indices[sample_idx])
-
-            sample_trajectories = {
-                "steps": trajectories["steps"][sample_idx],
-                "fixation_start": trajectories["fixation_start"][sample_idx],
-                "fixation_end": trajectories["fixation_end"][sample_idx],
-                "fixation_ratio": trajectories["fixation_ratio"][sample_idx],
-            }
-
-            # Get ground truth for this sample
-            sample_labels = labels[sample_idx] if labels is not None else None
-            sample_input_ids = input_ids[sample_idx]
-            sample_prompt_len = prompt_lens[sample_idx]
-
-            # Extract only the generated portion of labels to match logits shape [V, L]
-        # Logits from trajectory only cover generated tokens (L), not the prompt
-        # evaluate_probability does: logits[..., :-1, :] and labels[..., 1:]
-        # So if logits are [1, L, V], after processing: logits [1, L-1, V], labels [1, L-1]
-            # This means we need labels of length L to get L-1 after shift
-            if sample_labels is not None:
-                # Extract generated region: from prompt_end to prompt_end + L
-                # L is now the generated length (not full sequence length)
-                generated_labels = sample_labels[sample_prompt_len:sample_prompt_len + L]
-                # Pad with IGNORE_INDEX if needed (shouldn't happen, but safety check)
+            sample_labels_i = labels[sample_idx] if labels is not None else None
+            sample_input_ids_i = input_ids[sample_idx]
+            sample_prompt_len_i = prompt_lens[sample_idx]
+            if sample_labels_i is not None:
+                generated_labels = sample_labels_i[sample_prompt_len_i:sample_prompt_len_i + L]
                 if generated_labels.shape[0] < L:
                     padding = torch.full(
                         (L - generated_labels.shape[0],),
                         IGNORE_INDEX,
                         dtype=generated_labels.dtype,
-                        device=generated_labels.device
+                        device=generated_labels.device,
                     )
                     generated_labels = torch.cat([generated_labels, padding])
             else:
                 generated_labels = None
-            
-            # Create batch template for logit metrics
-            # Use only generated portion to match logits shape
             batch_template = {
-                "input_ids": torch.zeros((1, L), dtype=torch.long, device=sample_input_ids.device),  # Dummy input_ids, not used by metrics
+                "input_ids": torch.zeros((1, L), dtype=torch.long, device=sample_input_ids_i.device),
                 "labels": generated_labels.unsqueeze(0) if generated_labels is not None else None,
-                "attention_mask": torch.ones((1, L), dtype=torch.long, device=sample_input_ids.device),  # All positions valid
-                "index": torch.tensor([int(idx_str)], dtype=torch.long, device=sample_input_ids.device),  # Required by run_batchwise_evals
+                "attention_mask": torch.ones((1, L), dtype=torch.long, device=sample_input_ids_i.device),
+                "index": torch.tensor([int(idx_str)], dtype=torch.long, device=sample_input_ids_i.device),
             }
-            # Add labels_correct/labels_wrong for truth_ratio pre_compute (dual-answer dataset)
             for key in ("labels_correct", "labels_wrong"):
                 if key in batch:
                     sample_labels_alt = batch[key][sample_idx]
-                    gen_alt = sample_labels_alt[sample_prompt_len:sample_prompt_len + L]
+                    gen_alt = sample_labels_alt[sample_prompt_len_i:sample_prompt_len_i + L]
                     if gen_alt.shape[0] < L:
                         padding = torch.full(
                             (L - gen_alt.shape[0],),
@@ -972,9 +957,24 @@ def trajectory_metrics(model, **kwargs):
                         )
                         gen_alt = torch.cat([gen_alt, padding])
                     batch_template[key] = gen_alt.unsqueeze(0)
-            
-            # Compute metrics for each trajectory type and step, aggregate directly
-            for traj_name, trajectory in sample_trajectories.items():
+            sample_meta.append({
+                "idx_str": idx_str,
+                "sample_labels": sample_labels_i,
+                "sample_input_ids": sample_input_ids_i,
+                "sample_prompt_len": sample_prompt_len_i,
+                "batch_template": batch_template,
+            })
+
+        # One trajectory type at a time to lower peak memory (optimization 5.4).
+        for traj_name in trajectory_names:
+            trajectory_tensor = compute_one_trajectory(R, F, S, traj_name)  # [B, V, L, S]
+            for sample_idx in range(B):
+                idx_str = sample_meta[sample_idx]["idx_str"]
+                sample_labels = sample_meta[sample_idx]["sample_labels"]
+                sample_input_ids = sample_meta[sample_idx]["sample_input_ids"]
+                sample_prompt_len = sample_meta[sample_idx]["sample_prompt_len"]
+                batch_template = sample_meta[sample_idx]["batch_template"]
+                trajectory = trajectory_tensor[sample_idx]  # [V, L, S]
                 for step in range(S):
                     # Initialize step_values[traj_name][step] if not exists
                     if step not in step_values[traj_name]:
@@ -1075,7 +1075,13 @@ def trajectory_metrics(model, **kwargs):
                                 f"Error computing {metric_name} at step {step} for {traj_name}: {e}",
                                 exc_info=True
                             )
-    
+            del trajectory_tensor
+
+        # Release R and prepared before next batch to lower peak memory (optimization 5.3).
+        del prepared
+        del R
+        del F
+
     # Aggregate results: compute mean across samples for each step (after all batches)
     agg_value = {}
     for traj_name in trajectory_names:

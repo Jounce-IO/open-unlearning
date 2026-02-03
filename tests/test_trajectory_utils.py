@@ -500,18 +500,16 @@ class TestComputeTrajectories:
             assert T_fixation_ratio_cuda.device.type == "cuda"
     
     def test_trajectories_are_new_tensors_not_views(self):
-        """Test that T_fixation and T_ratio are new tensors, not views of R."""
+        """Test that T_steps is R (no clone); T_fixation and T_ratio are new tensors, not views of R."""
         V, L, S = 100, 20, 10
         R = torch.randn(V, L, S)
         F = torch.randint(0, S, (L,))
         
         T_steps, T_fixation_start, T_fixation_end, T_fixation_ratio = compute_trajectories(R, F, S)
         
-        # T_steps is a clone, so modifying R shouldn't affect it
-        R_original = R.clone()
+        # T_steps is R (memory optimization); modifying R changes T_steps
         R[0, 0, 0] = 999.0
-        # T_steps should be unchanged (it's a clone)
-        assert torch.allclose(T_steps, R_original)
+        assert T_steps[0, 0, 0].item() == 999.0
         
         # T_fixation_start, T_fixation_end, and T_fixation_ratio are new tensors
         # They should be independent of R after computation

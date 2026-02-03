@@ -239,20 +239,17 @@ class TestTensorMemoryEfficiency:
         # If it's a view, trajectory should be modified
         assert trajectory[0, 0, 5].item() == 999.0
     
-    def test_t_steps_is_clone_not_view(self):
-        """Test that T_steps is a clone (new tensor), not a view."""
+    def test_t_steps_is_R_not_clone(self):
+        """Test that T_steps is R (memory optimization); callers must not modify T_steps."""
         V, L, S = 100, 20, 10
         R = torch.randn(V, L, S)
         F = torch.randint(0, S, (L,))
         
         T_steps, T_fixation_start, T_fixation_end, T_fixation_ratio = compute_trajectories(R, F, S)
         
-        # Modify T_steps
-        original_value = R[0, 0, 0].item()
-        T_steps[0, 0, 0] = 999.0
-        
-        # R should be unchanged (T_steps is a clone)
-        assert R[0, 0, 0].item() == original_value
+        # T_steps is R (no clone) — they share storage
+        assert T_steps.data_ptr() == R.data_ptr()
+        assert T_steps.shape == R.shape
     
     def test_t_fixation_is_new_tensor(self):
         """Test that T_fixation_start is a new tensor, not a view."""

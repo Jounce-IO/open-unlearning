@@ -68,8 +68,8 @@ def compute_trajectories(
 
     device = R.device
 
-    # Steps trajectory: Direct copy of R
-    T_steps = R.clone()  # [B, V, L, S]
+    # Steps trajectory: R itself (memory optimization; callers must not modify T_steps).
+    T_steps = R  # [B, V, L, S]
 
     s_vec = torch.arange(S, device=device, dtype=torch.long)
     F_exp = F.unsqueeze(2)  # [B, L, 1]
@@ -102,32 +102,82 @@ def compute_trajectories(
     return T_steps, T_fixation_start, T_fixation_end, T_fixation_ratio
 
 
-def trajectories_from_logits(
+# Trajectory type names for compute_one_trajectory (must match keys returned by compute_trajectories).
+TRAJECTORY_NAMES = ("steps", "fixation_start", "fixation_end", "fixation_ratio")
+
+
+def compute_one_trajectory(
+    R: torch.Tensor, F: torch.Tensor, S: int, traj_name: str
+) -> torch.Tensor:
+    """
+    Compute a single trajectory tensor from R and F (memory-efficient: one [B,V,L,S] at a time).
+
+    Args:
+        R: [B, V, L, S] logits tensor
+        F: [B, L] fixation steps
+        S: number of diffusion steps
+        traj_name: one of "steps", "fixation_start", "fixation_end", "fixation_ratio"
+
+    Returns:
+        Single tensor [B, V, L, S] for the requested trajectory type.
+    """
+    if R.dim() == 3:
+        R = R.unsqueeze(0)
+        F = F.unsqueeze(0)
+        squeeze_out = True
+    else:
+        squeeze_out = False
+
+    B, V, L, S_actual = R.shape
+    assert S == S_actual, f"S mismatch: {S} != {S_actual}"
+    assert F.shape == (B, L), f"F shape mismatch: {F.shape} != ({B}, {L})"
+    assert S > 1, f"S must be > 1, got {S}"
+    device = R.device
+
+    if traj_name == "steps":
+        out = R  # T_steps is R (callers must not modify)
+    else:
+        F_exp = F.unsqueeze(2)  # [B, L, 1]
+        s_vec = torch.arange(S, device=device, dtype=torch.long)
+        s_exp = s_vec.view(1, 1, S)  # [1, 1, S]
+
+        if traj_name == "fixation_start":
+            source_step = torch.minimum(s_exp, F_exp)
+            source_step = torch.clamp(source_step, 0, S - 1)
+            index = source_step.unsqueeze(1).expand(B, V, L, S)
+            out = torch.gather(R, dim=3, index=index)
+        elif traj_name == "fixation_end":
+            source_step = F_exp - (S - 1) + s_exp
+            source_step = torch.clamp(source_step, 0, S - 1)
+            index = source_step.unsqueeze(1).expand(B, V, L, S)
+            out = torch.gather(R, dim=3, index=index)
+        elif traj_name == "fixation_ratio":
+            ratio_step = (F_exp * s_exp) // (S - 1)
+            ratio_step = torch.clamp(ratio_step, 0, S - 1)
+            index = ratio_step.unsqueeze(1).expand(B, V, L, S)
+            out = torch.gather(R, dim=3, index=index)
+        else:
+            raise ValueError(
+                f"traj_name must be one of {TRAJECTORY_NAMES}, got {traj_name!r}"
+            )
+
+    if squeeze_out:
+        out = out.squeeze(0)
+    return out
+
+
+def prepare_R_from_logits(
     logits_history: List[torch.Tensor],
     fixation_steps: torch.Tensor,
     prompt_lens: Union[List[int], torch.Tensor],
 ) -> dict:
     """
-    Compute the four trajectory tensors from raw logits and fixation data (model-free).
+    Stack logits and slice to generated region; return R, F, S, L for one-at-a-time trajectory computation.
 
-    Tensor-in, tensor-out: no model or sampler dependency. Callers can pass data from
-    a saved file (logits_history, fixation_steps, prompt_lens) to get deterministic
-    trajectory tensors. Useful for testing and offline analysis.
-
-    Args:
-        logits_history: List of S tensors, each [B, L_full, V] (one per diffusion step).
-        fixation_steps: [B, T_full] long tensor; step index where each position was fixed.
-        prompt_lens: Length-B list (or 1-d tensor) of prompt lengths per sample.
-            Used to slice the generated region (after max(prompt_lens)).
+    Use with compute_one_trajectory(R, F, S, traj_name) to hold at most one trajectory tensor at a time.
 
     Returns:
-        Dict with keys:
-            - "steps": [B, V, L, S] tensor
-            - "fixation_start": [B, V, L, S] tensor
-            - "fixation_end": [B, V, L, S] tensor
-            - "fixation_ratio": [B, V, L, S] tensor
-            - "S": int (number of diffusion steps)
-            - "L": int (generated length)
+        Dict with "R", "F", "S", "L" (R [B,V,L,S], F [B,L], S int, L int).
     """
     if not logits_history:
         raise ValueError("logits_history cannot be empty")
@@ -136,8 +186,8 @@ def trajectories_from_logits(
             f"fixation_steps must be 2-d [B, T_full], got shape {fixation_steps.shape}"
         )
 
-    R_full = stack_logits_history(logits_history)  # [B, V, T_full, S]
-    B, V, T_full, S = R_full.shape
+    B, L_full, V = logits_history[0].shape
+    S = len(logits_history)
     if isinstance(prompt_lens, torch.Tensor):
         prompt_lens = prompt_lens.tolist()
     if len(prompt_lens) != B:
@@ -145,10 +195,15 @@ def trajectories_from_logits(
             f"prompt_lens length {len(prompt_lens)} must match batch size B={B}"
         )
 
+    # Slice-then-stack (optimization 5.5): avoid holding R_full; stack only generated region.
     max_prompt_len = max(prompt_lens)
-    generated_len = T_full - max_prompt_len
-    R = R_full[:, :, max_prompt_len : max_prompt_len + generated_len, :]  # [B, V, L, S]
-    _, _, L, _ = R.shape
+    generated_len = L_full - max_prompt_len
+    sliced_history = [
+        t[:, max_prompt_len : max_prompt_len + generated_len, :]
+        for t in logits_history
+    ]
+    R = stack_logits_history(sliced_history)  # [B, V, L, S]
+    L = generated_len
 
     F_list = []
     for b in range(B):
@@ -176,6 +231,35 @@ def trajectories_from_logits(
         F_list.append(F_b)
     F = torch.stack(F_list, dim=0)  # [B, L]
 
+    return {"R": R, "F": F, "S": S, "L": L}
+
+
+def trajectories_from_logits(
+    logits_history: List[torch.Tensor],
+    fixation_steps: torch.Tensor,
+    prompt_lens: Union[List[int], torch.Tensor],
+) -> dict:
+    """
+    Compute the four trajectory tensors from raw logits and fixation data (model-free).
+
+    Tensor-in, tensor-out: no model or sampler dependency. Callers can pass data from
+    a saved file (logits_history, fixation_steps, prompt_lens) to get deterministic
+    trajectory tensors. Useful for testing and offline analysis.
+
+    Returns:
+        Dict with keys:
+            - "steps": [B, V, L, S] tensor
+            - "fixation_start": [B, V, L, S] tensor
+            - "fixation_end": [B, V, L, S] tensor
+            - "fixation_ratio": [B, V, L, S] tensor
+            - "S": int (number of diffusion steps)
+            - "L": int (generated length)
+    """
+    prepared = prepare_R_from_logits(logits_history, fixation_steps, prompt_lens)
+    R = prepared["R"]
+    F = prepared["F"]
+    S = prepared["S"]
+    L = prepared["L"]
     T_steps, T_fixation_start, T_fixation_end, T_fixation_ratio = compute_trajectories(
         R, F, S
     )
