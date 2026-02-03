@@ -685,6 +685,7 @@ def trajectory_metrics(model, **kwargs):
         - {"probability": {}, "truth_ratio": {"aggregator": "closer_to_1_better"}}  # With configs
     - trajectory_config: config for trajectory computation
       - logits_source: "sampler" (default) or "external"
+      - use_fixation_logits: true (default)  # If model is adapter, use fixation logits in __call__
       - return_logits: true  # Sampler config
       - return_fixation_steps: true  # Sampler config
     - data: dataset to evaluate on
@@ -712,7 +713,14 @@ def trajectory_metrics(model, **kwargs):
     
     if not tokenizer:
         raise ValueError("tokenizer is required for trajectory metrics")
-    
+
+    # When model is DiffusionModelAdapter, set use_fixation_logits so __call__ returns
+    # fixation logits (trajectory run). Default True for trajectory metrics.
+    if hasattr(model, "adapter_config"):
+        model.adapter_config.use_fixation_logits = trajectory_config.get(
+            "use_fixation_logits", True
+        )
+
     # Parse metrics config: support both list and dict formats
     # Handle OmegaConf ListConfig and DictConfig (from Hydra)
     if isinstance(metrics_config, (list, ListConfig)):

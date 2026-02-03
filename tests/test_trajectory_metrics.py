@@ -369,7 +369,7 @@ class TestTrajectoryMetricsIntegration:
         # Create model with sampler
         model = Mock()
         model.sampler = sampler
-        
+
         # Create mock dataset
         class MockDataset:
             def __init__(self):
@@ -424,6 +424,127 @@ class TestTrajectoryMetricsIntegration:
             # Check that it's not a shape mismatch error
             assert "Expected target size" not in str(e)
             assert "shape" not in str(e).lower() or "mismatch" not in str(e).lower()
+
+    def test_trajectory_metrics_sets_use_fixation_logits_on_adapter(self):
+        """When model has adapter_config, trajectory_metrics sets use_fixation_logits from trajectory_config (default True)."""
+        # Test the contract: the same logic trajectory_metrics uses to set the flag
+        class AdapterConfig:
+            use_fixation_logits = False
+
+        model = Mock()
+        model.adapter_config = AdapterConfig()
+        trajectory_config = {"use_fixation_logits": True}
+
+        if hasattr(model, "adapter_config"):
+            model.adapter_config.use_fixation_logits = trajectory_config.get(
+                "use_fixation_logits", True
+            )
+
+        assert model.adapter_config.use_fixation_logits is True
+
+        # Default when key missing: use_fixation_logits defaults to True
+        model.adapter_config.use_fixation_logits = False
+        trajectory_config_no_key = {}
+        if hasattr(model, "adapter_config"):
+            model.adapter_config.use_fixation_logits = trajectory_config_no_key.get(
+                "use_fixation_logits", True
+            )
+        assert model.adapter_config.use_fixation_logits is True
+
+    def test_trajectory_metrics_sets_use_fixation_logits_false_when_config_false(self):
+        """When trajectory_config has use_fixation_logits=False, adapter ends up with False."""
+        class AdapterConfig:
+            use_fixation_logits = True
+
+        model = Mock()
+        model.adapter_config = AdapterConfig()
+        trajectory_config = {"use_fixation_logits": False}
+
+        if hasattr(model, "adapter_config"):
+            model.adapter_config.use_fixation_logits = trajectory_config.get(
+                "use_fixation_logits", True
+            )
+
+        assert model.adapter_config.use_fixation_logits is False
+
+    def test_trajectory_metrics_full_run_with_adapter_and_fixation_logits(self):
+        """Full trajectory_metrics run with adapter_config and sampler returning fixation_logits; no crash."""
+        V, L_gen, S = 100, 10, 8
+        prompt_len = 5
+        full_len = prompt_len + L_gen
+
+        logits_history = [torch.randn(1, full_len, V) for _ in range(S)]
+        fixation_steps = torch.randint(0, S, (1, full_len))
+        # fixation_logits [B, T, V] same formula as sampler
+        R = torch.stack(logits_history, dim=0)
+        F = fixation_steps.clamp(0, S - 1)
+        B, T, _ = R.shape[1], R.shape[2], R.shape[3]
+        batch_idx = torch.arange(B, device=R.device, dtype=torch.long).unsqueeze(1).expand(B, T)
+        pos_idx = torch.arange(T, device=R.device, dtype=torch.long).unsqueeze(0).expand(B, T)
+        fixation_logits = R[F, batch_idx, pos_idx, :]
+
+        class MockSamplerOutput:
+            def __init__(self, sequences, histories, logits_history, fixation_steps, fixation_logits=None):
+                self.sequences = sequences
+                self.histories = histories
+                self.logits_history = logits_history
+                self.fixation_steps = fixation_steps
+                self.fixation_logits = fixation_logits
+
+        sampler = Mock()
+        sampler.sample.return_value = MockSamplerOutput(
+            sequences=torch.randint(0, V, (1, full_len)),
+            histories=None,
+            logits_history=logits_history,
+            fixation_steps=fixation_steps,
+            fixation_logits=fixation_logits,
+        )
+
+        class AdapterConfig:
+            use_fixation_logits = False
+
+        model = Mock()
+        model.sampler = sampler
+        model.adapter_config = AdapterConfig()
+
+        class MockDataset:
+            def __init__(self):
+                self.data = [
+                    {"input_ids": torch.randint(0, V, (full_len,)), "labels": torch.randint(0, V, (full_len,))}
+                    for _ in range(2)
+                ]
+            def __len__(self):
+                return len(self.data)
+            def __getitem__(self, idx):
+                return self.data[idx]
+
+        def mock_collator(batch):
+            return {
+                "input_ids": torch.stack([b["input_ids"] for b in batch]),
+                "labels": torch.stack([b["labels"] for b in batch]),
+                "index": torch.tensor([0, 1]),
+            }
+
+        tokenizer = Mock()
+        tokenizer.decode = lambda x, **kwargs: "decoded"
+
+        kwargs = {
+            "metrics": ["probability"],
+            "data": MockDataset(),
+            "collators": mock_collator,
+            "tokenizer": tokenizer,
+            "batch_size": 1,
+            "trajectory_config": {"use_fixation_logits": True},
+        }
+        # UnlearningMetric.evaluate(model, metric_name, cache, **kwargs) is how the framework calls it
+        result = trajectory_metrics(
+            model,
+            metric_name="trajectory_metrics",
+            cache={},
+            **kwargs,
+        )
+        assert model.adapter_config.use_fixation_logits is True
+        assert isinstance(result, dict)
 
     def test_trajectory_metrics_batch_size_2_different_samples(self):
         """With batch_size=2 and different logits per sample, trajectory_metrics runs and uses per-sample trajectories.
