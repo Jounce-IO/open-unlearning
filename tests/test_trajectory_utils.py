@@ -4,6 +4,7 @@ Comprehensive unit tests for trajectory_utils module.
 Tests cover:
 - stack_logits_history: Shape validation, single/batch cases
 - compute_trajectories: Steps, fixation, ratio trajectory computation
+- trajectories_from_logits: Model-free entry-point (logits + fixation -> trajectory tensors)
 - extract_logits_at_step: Step extraction and bounds checking
 - decode_logits_to_text: Text decoding from logits
 """
@@ -22,6 +23,7 @@ sys.path.insert(0, str(repo_root / "src"))
 from evals.metrics.trajectory_utils import (
     stack_logits_history,
     compute_trajectories,
+    trajectories_from_logits,
     extract_logits_at_step,
     decode_logits_to_text,
 )
@@ -529,6 +531,124 @@ class TestComputeTrajectories:
         assert T_fixation_start.device == R.device
         assert T_fixation_end.device == R.device
         assert T_fixation_ratio.device == R.device
+
+
+class TestTrajectoriesFromLogits:
+    """Tests for trajectories_from_logits (model-free entry-point)."""
+
+    def test_empty_logits_history_raises(self):
+        """trajectories_from_logits raises on empty logits_history."""
+        fixation_steps = torch.randint(0, 5, (2, 20))
+        prompt_lens = [3, 3]
+        with pytest.raises(ValueError, match="logits_history cannot be empty"):
+            trajectories_from_logits([], fixation_steps, prompt_lens)
+
+    def test_fixation_steps_not_2d_raises(self):
+        """trajectories_from_logits raises when fixation_steps is not 2-d."""
+        S = 4
+        logits_history = [torch.randn(1, 10, 8) for _ in range(S)]
+        fixation_steps_1d = torch.randint(0, S, (10,))
+        prompt_lens = [2]
+        with pytest.raises(ValueError, match="fixation_steps must be 2-d"):
+            trajectories_from_logits(logits_history, fixation_steps_1d, prompt_lens)
+
+    def test_prompt_lens_length_mismatch_raises(self):
+        """trajectories_from_logits raises when len(prompt_lens) != B."""
+        B, V, L_full, S = 2, 8, 12, 4
+        logits_history = [torch.randn(B, L_full, V) for _ in range(S)]
+        fixation_steps = torch.randint(0, S, (B, L_full))
+        prompt_lens_wrong = [2]  # B=1, but B=2
+        with pytest.raises(ValueError, match="prompt_lens length.*must match batch size"):
+            trajectories_from_logits(logits_history, fixation_steps, prompt_lens_wrong)
+
+    def test_output_shapes_b1(self):
+        """trajectories_from_logits returns four [B, V, L, S] tensors; B=1."""
+        B, V, L_full, S = 1, 16, 20, 6
+        max_prompt_len = 4
+        generated_len = L_full - max_prompt_len
+        logits_history = [torch.randn(B, L_full, V) for _ in range(S)]
+        fixation_steps = torch.randint(0, S, (B, L_full))
+        prompt_lens = [max_prompt_len]
+
+        out = trajectories_from_logits(logits_history, fixation_steps, prompt_lens)
+
+        assert out["S"] == S
+        assert out["L"] == generated_len
+        for key in ("steps", "fixation_start", "fixation_end", "fixation_ratio"):
+            assert out[key].shape == (B, V, generated_len, S)
+
+    def test_output_shapes_b2(self):
+        """trajectories_from_logits returns four [B, V, L, S] tensors; B=2."""
+        B, V, L_full, S = 2, 32, 24, 8
+        max_prompt_len = 5
+        generated_len = L_full - max_prompt_len
+        logits_history = [torch.randn(B, L_full, V) for _ in range(S)]
+        fixation_steps = torch.randint(0, S, (B, L_full))
+        prompt_lens = [max_prompt_len, max_prompt_len]
+
+        out = trajectories_from_logits(logits_history, fixation_steps, prompt_lens)
+
+        assert out["S"] == S
+        assert out["L"] == generated_len
+        for key in ("steps", "fixation_start", "fixation_end", "fixation_ratio"):
+            assert out[key].shape == (B, V, generated_len, S)
+
+    def test_consistency_with_compute_trajectories(self):
+        """trajectories_from_logits output matches compute_trajectories(R, F, S) for same data."""
+        B, V, L, S = 2, 20, 10, 5
+        max_prompt_len = 3
+        L_full = max_prompt_len + L
+        R = torch.randn(B, V, L, S)
+        F = torch.randint(0, S, (B, L))
+        # Build logits_history and fixation_steps so that trajectories_from_logits yields R, F
+        R_full = torch.randn(B, V, L_full, S)
+        R_full[:, :, max_prompt_len : max_prompt_len + L, :] = R
+        logits_history = [
+            R_full[:, :, :, s].permute(0, 2, 1) for s in range(S)
+        ]  # each [B, L_full, V]
+        fixation_steps = torch.full((B, L_full), S - 1, dtype=torch.long)
+        fixation_steps[:, max_prompt_len : max_prompt_len + L] = F
+        prompt_lens = [max_prompt_len] * B
+
+        out = trajectories_from_logits(logits_history, fixation_steps, prompt_lens)
+        T_steps_ref, T_fs_ref, T_fe_ref, T_fr_ref = compute_trajectories(R, F, S)
+
+        assert out["S"] == S
+        assert out["L"] == L
+        assert torch.allclose(out["steps"], T_steps_ref)
+        assert torch.allclose(out["fixation_start"], T_fs_ref)
+        assert torch.allclose(out["fixation_end"], T_fe_ref)
+        assert torch.allclose(out["fixation_ratio"], T_fr_ref)
+
+    def test_prompt_lens_tensor_accepted(self):
+        """prompt_lens can be a 1-d tensor (converted to list internally)."""
+        B, V, L_full, S = 1, 8, 14, 3
+        logits_history = [torch.randn(B, L_full, V) for _ in range(S)]
+        fixation_steps = torch.randint(0, S, (B, L_full))
+        prompt_lens = torch.tensor([4])
+
+        out = trajectories_from_logits(logits_history, fixation_steps, prompt_lens)
+
+        assert out["L"] == L_full - 4
+        assert out["steps"].shape == (B, V, L_full - 4, S)
+
+    def test_f_padding_when_slice_short(self):
+        """F is padded with S-1 when fixation_steps slice is shorter than L."""
+        B, V, L_full, S = 1, 8, 15, 4
+        max_prompt_len = 10
+        # generated_len = 5; fixation_steps has only 12 positions, so slice has 2
+        logits_history = [torch.randn(B, L_full, V) for _ in range(S)]
+        fixation_steps = torch.zeros(B, 12, dtype=torch.long)  # 12 < L_full
+        fixation_steps[:, 10:12] = 1  # 2 positions in generated region
+        prompt_lens = [max_prompt_len]
+
+        out = trajectories_from_logits(logits_history, fixation_steps, prompt_lens)
+
+        generated_len = L_full - max_prompt_len  # 5
+        assert out["L"] == generated_len
+        assert out["fixation_start"].shape == (B, V, generated_len, S)
+        # F should have been padded to length 5 with S-1
+        assert out["steps"].shape == (1, V, 5, S)
 
 
 class TestExtractLogitsAtStep:

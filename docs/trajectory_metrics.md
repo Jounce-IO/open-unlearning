@@ -149,8 +149,9 @@ For each trajectory type and step:
 ### Key Modules
 
 1. **`trajectory_utils.py`**: Core trajectory computation
+   - `trajectories_from_logits()`: Model-free entry-point (logits + fixation → four trajectory tensors); no model or sampler; testable with saved tensors
    - `stack_logits_history()`: Convert list of logits to tensor
-   - `compute_trajectories()`: Compute three trajectory types
+   - `compute_trajectories()`: Compute four trajectory types from R, F, S
    - `extract_logits_at_step()`: Extract logits at specific step
 
 2. **`trajectory_adapters.py`**: Metric computation adapters

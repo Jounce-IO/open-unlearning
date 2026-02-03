@@ -4,12 +4,13 @@ Utilities for computing trajectory tensors from logits and fixation steps.
 This module provides functions to:
 - Stack logits history into a tensor
 - Compute four trajectory types (steps, fixation_start, fixation_end, fixation_ratio)
+- trajectories_from_logits: model-free entry-point (logits + fixation → trajectory tensors)
 - Extract logits at specific steps
 - Decode logits to text
 """
 
 import torch
-from typing import List
+from typing import List, Union
 
 
 def stack_logits_history(logits_history: List[torch.Tensor]) -> torch.Tensor:
@@ -99,6 +100,93 @@ def compute_trajectories(
         T_fixation_ratio = T_fixation_ratio.squeeze(0)
 
     return T_steps, T_fixation_start, T_fixation_end, T_fixation_ratio
+
+
+def trajectories_from_logits(
+    logits_history: List[torch.Tensor],
+    fixation_steps: torch.Tensor,
+    prompt_lens: Union[List[int], torch.Tensor],
+) -> dict:
+    """
+    Compute the four trajectory tensors from raw logits and fixation data (model-free).
+
+    Tensor-in, tensor-out: no model or sampler dependency. Callers can pass data from
+    a saved file (logits_history, fixation_steps, prompt_lens) to get deterministic
+    trajectory tensors. Useful for testing and offline analysis.
+
+    Args:
+        logits_history: List of S tensors, each [B, L_full, V] (one per diffusion step).
+        fixation_steps: [B, T_full] long tensor; step index where each position was fixed.
+        prompt_lens: Length-B list (or 1-d tensor) of prompt lengths per sample.
+            Used to slice the generated region (after max(prompt_lens)).
+
+    Returns:
+        Dict with keys:
+            - "steps": [B, V, L, S] tensor
+            - "fixation_start": [B, V, L, S] tensor
+            - "fixation_end": [B, V, L, S] tensor
+            - "fixation_ratio": [B, V, L, S] tensor
+            - "S": int (number of diffusion steps)
+            - "L": int (generated length)
+    """
+    if not logits_history:
+        raise ValueError("logits_history cannot be empty")
+    if fixation_steps.dim() != 2:
+        raise ValueError(
+            f"fixation_steps must be 2-d [B, T_full], got shape {fixation_steps.shape}"
+        )
+
+    R_full = stack_logits_history(logits_history)  # [B, V, T_full, S]
+    B, V, T_full, S = R_full.shape
+    if isinstance(prompt_lens, torch.Tensor):
+        prompt_lens = prompt_lens.tolist()
+    if len(prompt_lens) != B:
+        raise ValueError(
+            f"prompt_lens length {len(prompt_lens)} must match batch size B={B}"
+        )
+
+    max_prompt_len = max(prompt_lens)
+    generated_len = T_full - max_prompt_len
+    R = R_full[:, :, max_prompt_len : max_prompt_len + generated_len, :]  # [B, V, L, S]
+    _, _, L, _ = R.shape
+
+    F_list = []
+    for b in range(B):
+        F_full = fixation_steps[b]
+        if F_full.shape[0] > max_prompt_len:
+            slice_F = F_full[max_prompt_len : max_prompt_len + L]
+            if slice_F.shape[0] >= L:
+                F_b = slice_F[:L]
+            else:
+                F_b = torch.cat(
+                    [
+                        slice_F,
+                        torch.full(
+                            (L - slice_F.shape[0],),
+                            S - 1,
+                            dtype=torch.long,
+                            device=F_full.device,
+                        ),
+                    ]
+                )
+        else:
+            F_b = torch.full(
+                (L,), S - 1, dtype=torch.long, device=F_full.device
+            )
+        F_list.append(F_b)
+    F = torch.stack(F_list, dim=0)  # [B, L]
+
+    T_steps, T_fixation_start, T_fixation_end, T_fixation_ratio = compute_trajectories(
+        R, F, S
+    )
+    return {
+        "steps": T_steps,
+        "fixation_start": T_fixation_start,
+        "fixation_end": T_fixation_end,
+        "fixation_ratio": T_fixation_ratio,
+        "S": S,
+        "L": L,
+    }
 
 
 def extract_logits_at_step(trajectory: torch.Tensor, step: int) -> torch.Tensor:

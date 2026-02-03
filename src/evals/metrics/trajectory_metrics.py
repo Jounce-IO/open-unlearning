@@ -20,7 +20,7 @@ from evals.metrics.utils import (
 )
 from rouge_score import rouge_scorer
 from evals.metrics.trajectory_utils import (
-    stack_logits_history,
+    trajectories_from_logits,
     compute_trajectories,
     extract_logits_at_step,
     decode_logits_to_text,
@@ -102,44 +102,12 @@ def _generate_trajectories_for_dataloader(
         if fixation_steps is None:
             continue
 
-        R_full = stack_logits_history(logits_history)  # [B, V, T_full, S]
-        B_r, V, T_full, S = R_full.shape
-        assert B_r == B, f"Batch size mismatch: logits_history B={B_r} vs batch B={B}"
-        max_prompt_len = max(prompt_lens)
-        generated_len = T_full - max_prompt_len
-        R = R_full[:, :, max_prompt_len : max_prompt_len + generated_len, :]  # [B, V, L, S]
-        _, _, L, _ = R.shape
-        if fixation_steps.dim() == 2:
-            F_list = []
-            for b in range(B):
-                F_full = fixation_steps[b]
-                if F_full.shape[0] > max_prompt_len:
-                    slice_F = F_full[max_prompt_len : max_prompt_len + L]
-                    if slice_F.shape[0] >= L:
-                        F_b = slice_F[:L]
-                    else:
-                        F_b = torch.cat(
-                            [
-                                slice_F,
-                                torch.full(
-                                    (L - slice_F.shape[0],),
-                                    S - 1,
-                                    dtype=torch.long,
-                                    device=F_full.device,
-                                ),
-                            ]
-                        )
-                else:
-                    F_b = torch.full(
-                        (L,), S - 1, dtype=torch.long, device=F_full.device
-                    )
-                F_list.append(F_b)
-            F = torch.stack(F_list, dim=0)  # [B, L]
-        else:
-            continue
-
-        T_steps, T_fix_start, T_fix_end, T_fix_ratio = compute_trajectories(R, F, S)  # each [B, V, L, S]
-        for i in range(B):
+        out = trajectories_from_logits(logits_history, fixation_steps, prompt_lens)
+        T_steps = out["steps"]
+        T_fix_start = out["fixation_start"]
+        T_fix_end = out["fixation_end"]
+        T_fix_ratio = out["fixation_ratio"]
+        for i in range(T_steps.shape[0]):
             idx = indices[i].item() if torch.is_tensor(indices[i]) else indices[i]
             trajectories_by_idx[str(idx)] = {
                 "steps": T_steps[i],
@@ -926,54 +894,15 @@ def trajectory_metrics(model, **kwargs):
         if fixation_steps is None:
             logger.warning(f"Batch {batch_idx}: No fixation_steps returned from sampler")
             continue
-        
-        # Stack logits into tensor R [B, V, T, S] where T is full sequence length (prompt + generated)
-        R_full = stack_logits_history(logits_history)  # [B, V, T_full, S]
-        B_r, V, T_full, S = R_full.shape
-        assert B_r == B, f"Batch size mismatch: logits_history B={B_r} vs batch B={B}"
-        max_prompt_len = max(prompt_lens)
-        generated_len = T_full - max_prompt_len
 
-        R = R_full[:, :, max_prompt_len : max_prompt_len + generated_len, :]  # [B, V, L, S]
-        _, _, L, _ = R.shape
-
-        # Extract fixation steps F [B, L] for generated region (per sample)
-        if fixation_steps.dim() == 2:
-            F_list = []
-            for b in range(B):
-                F_full = fixation_steps[b]
-                if F_full.shape[0] > max_prompt_len:
-                    slice_F = F_full[max_prompt_len : max_prompt_len + L]
-                    if slice_F.shape[0] >= L:
-                        F_b = slice_F[:L]
-                    else:
-                        F_b = torch.cat(
-                            [
-                                slice_F,
-                                torch.full(
-                                    (L - slice_F.shape[0],),
-                                    S - 1,
-                                    dtype=torch.long,
-                                    device=F_full.device,
-                                ),
-                            ]
-                        )
-                else:
-                    F_b = torch.full(
-                        (L,), S - 1, dtype=torch.long, device=F_full.device
-                    )
-                F_list.append(F_b)
-            F = torch.stack(F_list, dim=0)  # [B, L]
-        else:
-            raise ValueError(f"Unexpected fixation_steps shape: {fixation_steps.shape}")
-
-        # Compute four trajectory tensors (each [B, V, L, S])
-        T_steps, T_fixation_start, T_fixation_end, T_fixation_ratio = compute_trajectories(R, F, S)
+        out = trajectories_from_logits(logits_history, fixation_steps, prompt_lens)
+        S = out["S"]
+        L = out["L"]
         trajectories = {
-            "steps": T_steps,
-            "fixation_start": T_fixation_start,
-            "fixation_end": T_fixation_end,
-            "fixation_ratio": T_fixation_ratio,
+            "steps": out["steps"],
+            "fixation_start": out["fixation_start"],
+            "fixation_end": out["fixation_end"],
+            "fixation_ratio": out["fixation_ratio"],
         }
 
         # Process each sample in batch (each sample uses its own trajectory)
