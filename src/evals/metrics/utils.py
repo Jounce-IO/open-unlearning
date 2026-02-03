@@ -1,3 +1,4 @@
+import os
 import sys
 from typing import List
 from tqdm import tqdm
@@ -47,14 +48,26 @@ def _is_tty() -> bool:
     return hasattr(sys.stderr, "isatty") and sys.stderr.isatty()
 
 
+def _should_use_tqdm() -> bool:
+    """Use tqdm only when interactive. In K8s/CI, tqdm's timer-based refresh prints a new line
+    per refresh (kubectl logs don't handle \\r), producing thousands of duplicate lines."""
+    if not _is_tty():
+        return False
+    if os.environ.get("KUBERNETES_SERVICE_HOST"):
+        return False
+    if os.environ.get("CI", "").lower() in ("1", "true", "yes"):
+        return False
+    return True
+
+
 def run_batchwise_evals(model, dataloader, batch_eval_fn, batch_eval_fn_args, eval_msg):
     """Run batch-wise evaluations on a dataset using a specified evaluation function. Handles
     multi-answer datasets by organizing evaluations by answer indices and aggregating results."""
     evals = defaultdict(dict)
     total = len(dataloader)
-    # In non-TTY (kubectl logs, Docker), tqdm's \r overwrites never flush because
-    # log aggregators wait for newlines. Use explicit prints with newlines instead.
-    if _is_tty():
+    # In non-TTY / K8s / CI, avoid tqdm: each timer refresh becomes a new line in logs.
+    # Use explicit prints at batch boundaries instead.
+    if _should_use_tqdm():
         iterator = tqdm(dataloader, desc=eval_msg, total=total)
     else:
         iterator = dataloader
@@ -62,7 +75,7 @@ def run_batchwise_evals(model, dataloader, batch_eval_fn, batch_eval_fn_args, ev
         log_interval = max(1, min(total // 10, 10))
 
     for batch_idx, batch in enumerate(iterator):
-        if not _is_tty():
+        if not _should_use_tqdm():
             n = batch_idx + 1
             if n % log_interval == 0 or n == total:
                 pct = 100 * n / total
