@@ -203,7 +203,10 @@ For more in-depth information on specific aspects of the framework, refer to the
 | [`community/leaderboard.md`](community/leaderboard.md)             | Reference results from various unlearning methods run using this framework on TOFU and MUSE benchmarks.              |
 | [`docs/links.md`](docs/links.md)             | List of all links to the research papers or other sources the implemented features are sourced from.              |
 | [`docs/repro.md`](docs/repro.md)            | Results are provided solely for reproducibility purposes, without any parameter tuning.             |
+| [`tests/README.md`](tests/README.md)         | Trajectory metrics unit tests (structure, running, coverage).             |
 ---
+
+When used as a submodule in the dllm repo: see the [dllm README](../../README.md) and [K8s deployment](../../scripts/k8s/README.md) for evaluation jobs.
 
 ## 🔗 Support & Contributors
 
