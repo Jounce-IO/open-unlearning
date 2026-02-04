@@ -1144,7 +1144,8 @@ def trajectory_metrics(model, **kwargs):
                                 # Call metric at this step
                                 # Remove tokenizer from kwargs if present to avoid duplicate argument
                                 kwargs_clean = {k: v for k, v in kwargs.items() if k != "tokenizer"}
-                                if _key is not None:
+                                # Pass indexable data to metrics (rouge, etc.): use primary_data so DataLoader can index 0,1,2...
+                                if primary_data is not None:
                                     kwargs_clean["data"] = primary_data
                                 result = _call_metric_at_step(
                                     metric=metric,

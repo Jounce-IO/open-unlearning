@@ -12,7 +12,12 @@ from evals.metrics.base import unlearning_metric
 
 @unlearning_metric(name="hm_aggregate")
 def hm_aggregate(model, **kwargs):
-    values = [result["agg_value"] for _, result in kwargs["pre_compute"].items()]
+    pre_compute = kwargs.get("pre_compute")
+    if not pre_compute:
+        return {"agg_value": None}
+    values = [result["agg_value"] for _, result in pre_compute.items() if isinstance(result, dict) and result.get("agg_value") is not None]
+    if not values:
+        return {"agg_value": None}
     return {"agg_value": sc.stats.hmean(values)}
 
 
