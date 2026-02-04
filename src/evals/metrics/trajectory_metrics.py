@@ -546,6 +546,17 @@ def _call_metric_at_step(
     # Add pre_compute results if available
     if pre_compute_results:
         metric_kwargs["pre_compute"] = pre_compute_results
+    # trajectory_model_utility: hm_aggregate needs retain sub-metrics from reference_logs (no per-step pre_compute)
+    elif metric.name == "hm_aggregate":
+        ref_logs = kwargs.get("reference_logs") or {}
+        retain_logs = ref_logs.get("retain_model_logs") or {}
+        model_utility_keys = ("retain_Q_A_Prob", "retain_Q_A_ROUGE", "retain_Truth_Ratio")
+        pre_compute_from_ref = {}
+        for key in model_utility_keys:
+            if key in retain_logs and isinstance(retain_logs[key], dict) and retain_logs[key].get("agg_value") is not None:
+                pre_compute_from_ref[key] = retain_logs[key]
+        if pre_compute_from_ref:
+            metric_kwargs["pre_compute"] = pre_compute_from_ref
     
     # Call the metric's underlying function
     # Note: We call _metric_fn directly, not evaluate(), because:
@@ -838,7 +849,19 @@ def trajectory_metrics(model, **kwargs):
         except ValueError as e:
             logger.error(f"Failed to load metric '{metric_name}': {e}")
             raise
-    
+
+    # One-time warning if hm_aggregate (trajectory_model_utility) will have no pre_compute
+    if "hm_aggregate" in loaded_metrics:
+        ref_logs = kwargs.get("reference_logs") or {}
+        retain_logs = ref_logs.get("retain_model_logs") or {}
+        model_utility_keys = ("retain_Q_A_Prob", "retain_Q_A_ROUGE", "retain_Truth_Ratio")
+        have = [k for k in model_utility_keys if retain_logs.get(k) and isinstance(retain_logs.get(k), dict) and retain_logs[k].get("agg_value") is not None]
+        if len(have) < len(model_utility_keys):
+            logger.warning(
+                "trajectory_model_utility (hm_aggregate) will be None: set eval.tofu_trajectory.retain_logs_path to a retain run JSON containing retain_Q_A_Prob, retain_Q_A_ROUGE, retain_Truth_Ratio. reference_logs keys: %s",
+                list(retain_logs.keys()) if retain_logs else "(retain_logs_path not set or file missing)",
+            )
+
     # Handle multi-dataset only when there are keys beyond forget/holdout (e.g. MUSE: forget_knowmem, retain_knowmem, forget_verbmem, forget, holdout)
     multi_dataset = (
         isinstance(data, dict)

@@ -15,6 +15,13 @@ reference_logs:
         access_key: retain
       forget_truth_ratio:
         access_key: retain
+      # For trajectory_model_utility (hm_aggregate): retain run must produce these keys
+      retain_Q_A_Prob:
+        access_key: retain_Q_A_Prob
+      retain_Q_A_ROUGE:
+        access_key: retain_Q_A_ROUGE
+      retain_Truth_Ratio:
+        access_key: retain_Truth_Ratio
 
 pre_compute:
   mia_min_k:
@@ -60,6 +67,7 @@ metrics:
     pre_compute:
       mia_min_k:
         access_key: forget
+        k: 0.4  # same as standalone mia_min_k.yaml; top-level default does not merge into this nested block
 
 # Set via CLI (e.g. dllm eval --metrics forget_Q_A_Prob forget_Q_A_ROUGE) to run a subset; null = all.
 include_metrics: null

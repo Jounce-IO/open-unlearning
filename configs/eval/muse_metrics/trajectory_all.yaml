@@ -41,6 +41,7 @@ metrics:
     pre_compute:
       mia_min_k:
         access_key: forget
+        k: 0.4  # same as standalone mia_min_k.yaml; top-level default does not merge into this nested block
 
 metric_display_names:
   - trajectory_forget_knowmem_ROUGE
