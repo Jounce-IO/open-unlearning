@@ -23,6 +23,9 @@ sys.path.insert(0, str(repo_root / "src"))
 from evals.metrics.trajectory_utils import (
     stack_logits_history,
     compute_trajectories,
+    compute_fixation_start_trajectory,
+    compute_fixation_end_trajectory,
+    compute_fixation_ratio_trajectory,
     trajectories_from_logits,
     extract_logits_at_step,
     decode_logits_to_text,
@@ -533,6 +536,67 @@ class TestComputeTrajectories:
         assert T_fixation_ratio.device == R.device
 
 
+class TestOnDemandTrajectoryFunctions:
+    """Tests for compute_fixation_start/end/ratio_trajectory (on-demand step computation)."""
+
+    def test_fixation_start_matches_compute_trajectories_slice(self):
+        """compute_fixation_start_trajectory(raw, s, F) equals T_fixation_start[0,:,:,s] from compute_trajectories."""
+        V, L, S = 20, 8, 6
+        torch.manual_seed(123)
+        R = torch.randn(V, L, S)
+        F = torch.randint(0, S, (L,))
+        _, T_fs, _, _ = compute_trajectories(R.unsqueeze(0), F.unsqueeze(0), S)
+        for step_index in [0, S - 1, S // 2]:
+            got = compute_fixation_start_trajectory(R, step_index, F)
+            ref = T_fs[0, :, :, step_index]
+            assert got.shape == (V, L)
+            assert torch.allclose(got, ref), f"step_index={step_index}"
+
+    def test_fixation_end_matches_compute_trajectories_slice(self):
+        """compute_fixation_end_trajectory(raw, s, F) equals T_fixation_end[0,:,:,s] from compute_trajectories."""
+        V, L, S = 20, 8, 6
+        torch.manual_seed(456)
+        R = torch.randn(V, L, S)
+        F = torch.randint(0, S, (L,))
+        _, _, T_fe, _ = compute_trajectories(R.unsqueeze(0), F.unsqueeze(0), S)
+        for step_index in [0, S - 1, S // 2]:
+            got = compute_fixation_end_trajectory(R, step_index, F)
+            ref = T_fe[0, :, :, step_index]
+            assert got.shape == (V, L)
+            assert torch.allclose(got, ref), f"step_index={step_index}"
+
+    def test_fixation_ratio_matches_compute_trajectories_slice(self):
+        """compute_fixation_ratio_trajectory(raw, s, F) equals T_fixation_ratio[0,:,:,s] from compute_trajectories."""
+        V, L, S = 20, 8, 6
+        torch.manual_seed(789)
+        R = torch.randn(V, L, S)
+        F = torch.randint(0, S, (L,))
+        _, _, _, T_fr = compute_trajectories(R.unsqueeze(0), F.unsqueeze(0), S)
+        for step_index in [0, S - 1, S // 2]:
+            got = compute_fixation_ratio_trajectory(R, step_index, F)
+            ref = T_fr[0, :, :, step_index]
+            assert got.shape == (V, L)
+            assert torch.allclose(got, ref), f"step_index={step_index}"
+
+    def test_on_demand_step_index_bounds(self):
+        """On-demand functions raise when step_index out of range."""
+        V, L, S = 10, 5, 4
+        R = torch.randn(V, L, S)
+        F = torch.randint(0, S, (L,))
+        with pytest.raises(AssertionError, match="step_index.*out of range"):
+            compute_fixation_start_trajectory(R, -1, F)
+        with pytest.raises(AssertionError, match="step_index.*out of range"):
+            compute_fixation_start_trajectory(R, S, F)
+
+    def test_on_demand_fixation_indices_shape(self):
+        """On-demand functions raise when fixation_indices shape != (L,)."""
+        V, L, S = 10, 5, 4
+        R = torch.randn(V, L, S)
+        F_wrong = torch.randint(0, S, (L + 1,))
+        with pytest.raises(AssertionError, match="fixation_indices shape"):
+            compute_fixation_start_trajectory(R, 0, F_wrong)
+
+
 class TestTrajectoriesFromLogits:
     """Tests for trajectories_from_logits (model-free entry-point)."""
 
@@ -649,6 +713,26 @@ class TestTrajectoriesFromLogits:
         assert out["fixation_start"].shape == (B, V, generated_len, S)
         # F should have been padded to length 5 with S-1
         assert out["steps"].shape == (1, V, 5, S)
+
+    def test_return_trajectory_tensors_false_returns_R_F_S_L_only(self):
+        """trajectories_from_logits(..., return_trajectory_tensors=False) returns only R, F, S, L."""
+        B, V, L_full, S = 2, 16, 20, 6
+        max_prompt_len = 4
+        logits_history = [torch.randn(B, L_full, V) for _ in range(S)]
+        fixation_steps = torch.randint(0, S, (B, L_full))
+        prompt_lens = [max_prompt_len, max_prompt_len]
+
+        out = trajectories_from_logits(
+            logits_history, fixation_steps, prompt_lens, return_trajectory_tensors=False
+        )
+
+        assert set(out.keys()) == {"R", "F", "S", "L"}
+        assert out["R"].shape == (B, V, L_full - max_prompt_len, S)
+        assert out["F"].shape == (B, L_full - max_prompt_len)
+        assert out["S"] == S
+        assert out["L"] == L_full - max_prompt_len
+        for key in ("steps", "fixation_start", "fixation_end", "fixation_ratio"):
+            assert key not in out
 
 
 class TestExtractLogitsAtStep:

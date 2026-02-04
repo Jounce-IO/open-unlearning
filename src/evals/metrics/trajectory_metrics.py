@@ -22,6 +22,9 @@ from rouge_score import rouge_scorer
 from evals.metrics.trajectory_utils import (
     trajectories_from_logits,
     compute_trajectories,
+    compute_fixation_start_trajectory,
+    compute_fixation_end_trajectory,
+    compute_fixation_ratio_trajectory,
     extract_logits_at_step,
     decode_logits_to_text,
 )
@@ -102,27 +105,41 @@ def _generate_trajectories_for_dataloader(
         if fixation_steps is None:
             continue
 
-        out = trajectories_from_logits(logits_history, fixation_steps, prompt_lens)
-        T_steps = out["steps"]
-        T_fix_start = out["fixation_start"]
-        T_fix_end = out["fixation_end"]
-        T_fix_ratio = out["fixation_ratio"]
-        for i in range(T_steps.shape[0]):
+        out = trajectories_from_logits(
+            logits_history, fixation_steps, prompt_lens, return_trajectory_tensors=False
+        )
+        R, F, S, L = out["R"], out["F"], out["S"], out["L"]
+        for i in range(R.shape[0]):
             idx = indices[i].item() if torch.is_tensor(indices[i]) else indices[i]
             trajectories_by_idx[str(idx)] = {
-                "steps": T_steps[i],
-                "fixation_start": T_fix_start[i],
-                "fixation_end": T_fix_end[i],
-                "fixation_ratio": T_fix_ratio[i],
+                "R": R[i],
+                "F": F[i],
+                "S": S,
+                "L": L,
             }
     return trajectories_by_idx
+
+
+def _get_logits_at_step(traj: Dict[str, Any], traj_name: str, step: int) -> torch.Tensor:
+    """Get [V, L] logits at a trajectory step. traj must have R, F, S, L (on-demand format)."""
+    R_sample = traj["R"]
+    F_sample = traj["F"]
+    if traj_name == "steps":
+        return R_sample[:, :, step]
+    if traj_name == "fixation_start":
+        return compute_fixation_start_trajectory(R_sample, step, F_sample)
+    if traj_name == "fixation_end":
+        return compute_fixation_end_trajectory(R_sample, step, F_sample)
+    if traj_name == "fixation_ratio":
+        return compute_fixation_ratio_trajectory(R_sample, step, F_sample)
+    raise ValueError(f"Unknown traj_name: {traj_name}")
 
 
 def _get_metric_from_registry(metric_name: str):
     """Get metric from registry by name."""
     # Import here to avoid circular import
     from evals.metrics import METRICS_REGISTRY
-    
+
     metric = METRICS_REGISTRY.get(metric_name)
     if metric is None:
         raise ValueError(
@@ -817,7 +834,7 @@ def trajectory_metrics(model, **kwargs):
                 logits_by_key = {}
                 for key, traj_by_idx in trajectories_by_key.items():
                     logits_by_key[key] = {
-                        idx: extract_logits_at_step(traj["steps"], step)
+                        idx: _get_logits_at_step(traj, "steps", step)
                         for idx, traj in traj_by_idx.items()
                     }
                 dual_wrapper = DualLogitModelWrapper(logits_by_key, device)
@@ -903,26 +920,15 @@ def trajectory_metrics(model, **kwargs):
             logger.warning(f"Batch {batch_idx}: No fixation_steps returned from sampler")
             continue
 
-        out = trajectories_from_logits(logits_history, fixation_steps, prompt_lens)
-        S = out["S"]
-        L = out["L"]
-        trajectories = {
-            "steps": out["steps"],
-            "fixation_start": out["fixation_start"],
-            "fixation_end": out["fixation_end"],
-            "fixation_ratio": out["fixation_ratio"],
-        }
+        out = trajectories_from_logits(
+            logits_history, fixation_steps, prompt_lens, return_trajectory_tensors=False
+        )
+        R, F, S, L = out["R"], out["F"], out["S"], out["L"]
 
-        # Process each sample in batch (each sample uses its own trajectory)
+        # Process each sample in batch (each sample uses its own R, F; logits computed on-demand)
         for sample_idx in range(B):
             idx_str = str(indices[sample_idx].item() if torch.is_tensor(indices[sample_idx]) else indices[sample_idx])
-
-            sample_trajectories = {
-                "steps": trajectories["steps"][sample_idx],
-                "fixation_start": trajectories["fixation_start"][sample_idx],
-                "fixation_end": trajectories["fixation_end"][sample_idx],
-                "fixation_ratio": trajectories["fixation_ratio"][sample_idx],
-            }
+            sample_traj = {"R": R[sample_idx], "F": F[sample_idx], "S": S, "L": L}
 
             # Get ground truth for this sample
             sample_labels = labels[sample_idx] if labels is not None else None
@@ -974,14 +980,14 @@ def trajectory_metrics(model, **kwargs):
                     batch_template[key] = gen_alt.unsqueeze(0)
             
             # Compute metrics for each trajectory type and step, aggregate directly
-            for traj_name, trajectory in sample_trajectories.items():
+            for traj_name in trajectory_names:
                 for step in range(S):
                     # Initialize step_values[traj_name][step] if not exists
                     if step not in step_values[traj_name]:
                         step_values[traj_name][step] = {metric_name: [] for metric_name in loaded_metrics.keys()}
-                    
-                    # Extract logits at this step
-                    logits = extract_logits_at_step(trajectory, step)  # [V, L]
+
+                    # Get logits at this step (on-demand from R, F)
+                    logits = _get_logits_at_step(sample_traj, traj_name, step)  # [V, L]
                     
                     # Compute each requested metric
                     for metric_name, metric_info in loaded_metrics.items():
