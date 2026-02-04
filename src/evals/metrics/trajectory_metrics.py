@@ -6,6 +6,9 @@ This module computes metrics at each diffusion step across three trajectory type
 """
 
 import logging
+import os
+import subprocess
+import time
 import numpy as np
 import torch
 from typing import Dict, List, Any, Optional, Union
@@ -36,6 +39,27 @@ from evals.metrics.trajectory_adapters import (
 )
 
 logger = logging.getLogger("evaluator")
+
+# #region agent log
+_DEBUG_LOG_PATH = "/workspaces/dllm/.cursor/debug.log"
+
+def _debug_log(location: str, message: str, data: dict, hypothesis_id: Union[str, List[str]] = None):
+    import json
+    payload = {"sessionId": "debug-session", "location": location, "message": message, "data": data, "timestamp": int(time.time() * 1000)}
+    if hypothesis_id is not None:
+        payload["hypothesisId"] = hypothesis_id if isinstance(hypothesis_id, str) else ",".join(hypothesis_id)
+    line = json.dumps(payload) + "\n"
+    try:
+        with open(_DEBUG_LOG_PATH, "a") as f:
+            f.write(line)
+    except Exception:
+        pass
+    try:
+        import sys
+        print(f"[DEBUG] {line.strip()}", file=sys.stderr, flush=True)
+    except Exception:
+        pass
+# #endregion
 
 # IGNORE_INDEX from data.utils
 IGNORE_INDEX = -100
@@ -685,6 +709,35 @@ def _call_metric_at_step(
 
 @unlearning_metric(name="trajectory_metrics")
 def trajectory_metrics(model, **kwargs):
+    # #region agent log
+    _debug_log(
+        "trajectory_metrics.py:trajectory_metrics:entry",
+        "trajectory_metrics entry",
+        {
+            "__file__": __file__,
+            "cuda_available": torch.cuda.is_available(),
+            "cuda_allocated_mib": round(torch.cuda.memory_allocated() / (1024**2), 2) if torch.cuda.is_available() else None,
+            "cuda_max_allocated_mib": round(torch.cuda.max_memory_allocated() / (1024**2), 2) if torch.cuda.is_available() else None,
+            "git_rev": (
+                (lambda r: r.stdout.strip() if r.returncode == 0 else None)(
+                    subprocess.run(
+                        ["git", "rev-parse", "HEAD"],
+                        capture_output=True,
+                        text=True,
+                        cwd=os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "..", "..")),
+                    )
+                )
+            ),
+        },
+        hypothesis_id="C",
+    )
+    if torch.cuda.is_available():
+        try:
+            stats = torch.cuda.memory_stats()
+            _debug_log("trajectory_metrics.py:trajectory_metrics:entry_stats", "cuda memory_stats at entry", {"allocator_stats_keys": list(stats.keys())[:20]}, hypothesis_id="B")
+        except Exception:
+            pass
+    # #endregion
     """
     Compute metrics along diffusion trajectories.
     
@@ -920,10 +973,41 @@ def trajectory_metrics(model, **kwargs):
             logger.warning(f"Batch {batch_idx}: No fixation_steps returned from sampler")
             continue
 
+        # #region agent log
+        if batch_idx == 0 and torch.cuda.is_available():
+            _debug_log(
+                "trajectory_metrics.py:after_sampler_sample",
+                "after sampler.sample() batch 0 (raw logits_history in memory)",
+                {
+                    "batch_idx": 0,
+                    "logits_history_len": len(logits_history),
+                    "first_step_shape": list(logits_history[0].shape),
+                    "cuda_allocated_mib": round(torch.cuda.memory_allocated() / (1024**2), 2),
+                    "cuda_max_allocated_mib": round(torch.cuda.max_memory_allocated() / (1024**2), 2),
+                },
+                hypothesis_id="B",
+            )
+        _debug_log("trajectory_metrics.py:trajectories_from_logits:call", "calling trajectories_from_logits", {"return_trajectory_tensors": False, "batch_idx": batch_idx}, hypothesis_id="C")
+        # #endregion
         out = trajectories_from_logits(
             logits_history, fixation_steps, prompt_lens, return_trajectory_tensors=False
         )
         R, F, S, L = out["R"], out["F"], out["S"], out["L"]
+        # #region agent log
+        if batch_idx == 0:
+            _debug_log(
+                "trajectory_metrics.py:after_trajectories_from_logits",
+                "after trajectories_from_logits (batch 0)",
+                {
+                    "R_shape": list(R.shape),
+                    "S": S,
+                    "L": L,
+                    "cuda_allocated_mib": round(torch.cuda.memory_allocated() / (1024**2), 2) if torch.cuda.is_available() else None,
+                    "cuda_max_allocated_mib": round(torch.cuda.max_memory_allocated() / (1024**2), 2) if torch.cuda.is_available() else None,
+                },
+                hypothesis_id="A,B",
+            )
+        # #endregion
 
         # Process each sample in batch (each sample uses its own R, F; logits computed on-demand)
         for sample_idx in range(B):
@@ -988,7 +1072,22 @@ def trajectory_metrics(model, **kwargs):
 
                     # Get logits at this step (on-demand from R, F)
                     logits = _get_logits_at_step(sample_traj, traj_name, step)  # [V, L]
-                    
+                    # #region agent log
+                    if batch_idx == 0 and sample_idx == 0 and traj_name == "steps" and (step == 0 or step == S - 1):
+                        _debug_log(
+                            "trajectory_metrics.py:after_get_logits_at_step",
+                            "after _get_logits_at_step",
+                            {
+                                "logits_shape": list(logits.shape),
+                                "traj_name": traj_name,
+                                "step": step,
+                                "cuda_allocated_mib": round(torch.cuda.memory_allocated() / (1024**2), 2) if torch.cuda.is_available() else None,
+                                "cuda_max_allocated_mib": round(torch.cuda.max_memory_allocated() / (1024**2), 2) if torch.cuda.is_available() else None,
+                            },
+                            hypothesis_id="A,B",
+                        )
+                    # #endregion
+
                     # Compute each requested metric
                     for metric_name, metric_info in loaded_metrics.items():
                         try:
@@ -1107,6 +1206,18 @@ def trajectory_metrics(model, **kwargs):
             else:
                 agg_value[traj_name][metric_name] = np.array([])
     
+    # #region agent log
+    if torch.cuda.is_available():
+        _debug_log(
+            "trajectory_metrics.py:trajectory_metrics:exit",
+            "trajectory_metrics exit",
+            {
+                "cuda_allocated_mib": round(torch.cuda.memory_allocated() / (1024**2), 2),
+                "cuda_max_allocated_mib": round(torch.cuda.max_memory_allocated() / (1024**2), 2),
+            },
+            hypothesis_id="B",
+        )
+    # #endregion
     return {
         "agg_value": agg_value,
         "value_by_index": {},  # Empty since we don't store per-sample trajectories
