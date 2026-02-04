@@ -2,15 +2,10 @@
 # TOFU trajectory mode - all 7 metrics computed at each diffusion step
 # Note: eval.tofu.forget_split etc come from experiment eval/tofu/default
 
+# Single-pass: one metric entry (trajectory_all) runs trajectory_metrics once for all 7 sub-metrics.
 defaults:
   - tofu_metrics:
-    - trajectory_forget_Q_A_Prob
-    - trajectory_forget_Q_A_ROUGE
-    - trajectory_extraction_strength
-    - trajectory_forget_Truth_Ratio
-    - trajectory_forget_quality
-    - trajectory_model_utility
-    - trajectory_privleak
+    - trajectory_all
 
 handler: TOFUEvaluator
 output_dir: ${paths.output_dir}

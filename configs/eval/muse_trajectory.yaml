@@ -1,13 +1,9 @@
 # @package eval.muse_trajectory
-# MUSE trajectory mode - all 5 metrics computed at each diffusion step
+# MUSE trajectory mode - single-pass (trajectory_all) for all 5 sub-metrics
 
 defaults:
   - muse_metrics:
-    - trajectory_forget_knowmem_ROUGE
-    - trajectory_retain_knowmem_ROUGE
-    - trajectory_forget_verbmem_ROUGE
-    - trajectory_extraction_strength
-    - trajectory_privleak
+    - trajectory_all
 
 handler: MUSEEvaluator
 output_dir: ${paths.output_dir}

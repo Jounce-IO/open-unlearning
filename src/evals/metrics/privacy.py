@@ -70,6 +70,8 @@ def privleak(model, **kwargs):
     scores as (1-x) when the more conventional way is x, we do adjustments here to our MIA AUC scores.
     calculations in the reverse way,"""
     score = kwargs["pre_compute"]["forget"]["agg_value"]
+    if score is None:
+        return {"agg_value": None}
     try:
         ref = kwargs["reference_logs"]["retain_model_logs"]["retain"]["agg_value"]
     except Exception as _:

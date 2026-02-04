@@ -136,7 +136,17 @@ class UnlearningMetric:
             model, metric_name, cache, **kwargs
         )
         results = self.evaluate_metric(model, metric_name, **metric_kwargs)
-        cache.update({metric_name: results})
+        # Single-pass trajectory: result can be dict of sub-results keyed by display name.
+        if (
+            isinstance(results, dict)
+            and len(results) > 0
+            and all(
+                isinstance(v, dict) and "agg_value" in v for v in results.values()
+            )
+        ):
+            cache.update(results)
+        else:
+            cache.update({metric_name: results})
         return results
 
     def __call__(self, model, **kwargs):
