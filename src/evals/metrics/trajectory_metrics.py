@@ -23,6 +23,7 @@ from evals.metrics.trajectory_utils import (
     trajectories_from_logits,
     prepare_R_from_logits,
     compute_one_trajectory,
+    get_logits_at_trajectory_step,
     compute_trajectories,
     extract_logits_at_step,
     decode_logits_to_text,
@@ -965,24 +966,18 @@ def trajectory_metrics(model, **kwargs):
                 "batch_template": batch_template,
             })
 
-        # One trajectory type at a time to lower peak memory (optimization 5.4).
         for traj_name in trajectory_names:
-            trajectory_tensor = compute_one_trajectory(R, F, S, traj_name)  # [B, V, L, S]
             for sample_idx in range(B):
                 idx_str = sample_meta[sample_idx]["idx_str"]
                 sample_labels = sample_meta[sample_idx]["sample_labels"]
                 sample_input_ids = sample_meta[sample_idx]["sample_input_ids"]
                 sample_prompt_len = sample_meta[sample_idx]["sample_prompt_len"]
                 batch_template = sample_meta[sample_idx]["batch_template"]
-                trajectory = trajectory_tensor[sample_idx]  # [V, L, S]
                 for step in range(S):
-                    # Initialize step_values[traj_name][step] if not exists
                     if step not in step_values[traj_name]:
                         step_values[traj_name][step] = {metric_name: [] for metric_name in loaded_metrics.keys()}
-                    
-                    # Extract logits at this step
-                    logits = extract_logits_at_step(trajectory, step)  # [V, L]
-                    
+                    logits = get_logits_at_trajectory_step(R, F, S, traj_name, sample_idx, step)
+
                     # Compute each requested metric
                     for metric_name, metric_info in loaded_metrics.items():
                         try:
@@ -1075,7 +1070,6 @@ def trajectory_metrics(model, **kwargs):
                                 f"Error computing {metric_name} at step {step} for {traj_name}: {e}",
                                 exc_info=True
                             )
-            del trajectory_tensor
 
         # Release R and prepared before next batch to lower peak memory (optimization 5.3).
         del prepared

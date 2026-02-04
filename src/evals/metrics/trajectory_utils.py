@@ -106,6 +106,40 @@ def compute_trajectories(
 TRAJECTORY_NAMES = ("steps", "fixation_start", "fixation_end", "fixation_ratio")
 
 
+def get_logits_at_trajectory_step(
+    R: torch.Tensor,
+    F: torch.Tensor,
+    S: int,
+    traj_name: str,
+    b: int,
+    step: int,
+) -> torch.Tensor:
+    """
+    Return logits for sample b at trajectory step `step` for the given trajectory type.
+    Does not build the full [B, V, L, S] trajectory tensor.
+    """
+    B, V, L, S_actual = R.shape
+    assert S == S_actual and F.shape == (B, L) and 0 <= b < B and 0 <= step < S and S > 1
+    if traj_name not in TRAJECTORY_NAMES:
+        raise ValueError(f"traj_name must be one of {TRAJECTORY_NAMES}, got {traj_name!r}")
+    device = R.device
+    R_b = R[b]
+    F_b = F[b]
+    if traj_name == "steps":
+        return R_b[:, :, step].clone()
+    if traj_name == "fixation_start":
+        source_step = torch.minimum(torch.tensor(step, device=device, dtype=torch.long), F_b)
+    elif traj_name == "fixation_end":
+        source_step = F_b - (S - 1) + step
+    elif traj_name == "fixation_ratio":
+        source_step = (F_b * step) // (S - 1)
+    else:
+        raise ValueError(f"traj_name must be one of {TRAJECTORY_NAMES}, got {traj_name!r}")
+    source_step = torch.clamp(source_step, 0, S - 1)
+    index = source_step.unsqueeze(0).unsqueeze(-1).expand(V, L, 1)
+    return torch.gather(R_b, dim=2, index=index).squeeze(-1)
+
+
 def compute_one_trajectory(
     R: torch.Tensor, F: torch.Tensor, S: int, traj_name: str
 ) -> torch.Tensor:
@@ -188,22 +222,27 @@ def prepare_R_from_logits(
 
     B, L_full, V = logits_history[0].shape
     S = len(logits_history)
+    T_full = fixation_steps.shape[1]
     if isinstance(prompt_lens, torch.Tensor):
         prompt_lens = prompt_lens.tolist()
     if len(prompt_lens) != B:
         raise ValueError(
             f"prompt_lens length {len(prompt_lens)} must match batch size B={B}"
         )
-
-    # Slice-then-stack (optimization 5.5): avoid holding R_full; stack only generated region.
-    max_prompt_len = max(prompt_lens)
-    generated_len = L_full - max_prompt_len
-    sliced_history = [
-        t[:, max_prompt_len : max_prompt_len + generated_len, :]
-        for t in logits_history
-    ]
-    R = stack_logits_history(sliced_history)  # [B, V, L, S]
+    if L_full < T_full:
+        generated_len = L_full
+        max_prompt_len = T_full - L_full
+    else:
+        max_prompt_len = max(prompt_lens)
+        generated_len = L_full - max_prompt_len
     L = generated_len
+    device = logits_history[0].device
+    dtype = logits_history[0].dtype
+    R = torch.empty((B, V, L, S), device=device, dtype=dtype)
+    for s in range(S):
+        t = logits_history[s]
+        slice_t = t[:, max_prompt_len : max_prompt_len + L, :] if L_full > L else t
+        R[:, :, :, s] = slice_t.permute(0, 2, 1)
 
     F_list = []
     for b in range(B):

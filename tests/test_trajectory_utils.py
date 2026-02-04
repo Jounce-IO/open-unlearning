@@ -23,9 +23,12 @@ sys.path.insert(0, str(repo_root / "src"))
 from evals.metrics.trajectory_utils import (
     stack_logits_history,
     compute_trajectories,
+    compute_one_trajectory,
+    get_logits_at_trajectory_step,
     trajectories_from_logits,
     extract_logits_at_step,
     decode_logits_to_text,
+    TRAJECTORY_NAMES,
 )
 
 
@@ -754,6 +757,23 @@ class TestExtractLogitsAtStep:
             logits = extract_logits_at_step(trajectory, step)
             expected = trajectory[:, :, step]
             assert torch.equal(logits, expected)
+
+
+class TestGetLogitsAtTrajectoryStep:
+    """Tests for get_logits_at_trajectory_step."""
+
+    def test_matches_extract_logits_at_step_for_all_trajectory_types_and_steps(self):
+        B, V, L, S = 2, 10, 5, 8
+        R = torch.randn(B, V, L, S)
+        F = torch.randint(0, S, (B, L))
+        for traj_name in TRAJECTORY_NAMES:
+            trajectory_tensor = compute_one_trajectory(R, F, S, traj_name)
+            for b in range(B):
+                trajectory_b = trajectory_tensor[b]
+                for step in range(S):
+                    expected = extract_logits_at_step(trajectory_b, step)
+                    got = get_logits_at_trajectory_step(R, F, S, traj_name, b, step)
+                    assert got.shape == (V, L) and torch.allclose(got, expected)
 
 
 class TestDecodeLogitsToText:

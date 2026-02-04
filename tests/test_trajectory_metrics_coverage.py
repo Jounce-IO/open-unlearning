@@ -1207,7 +1207,7 @@ class TestTrajectoryMetricsMediumImportance:
         tokenizer = Mock()
         
         trajectory_metrics_fn = METRICS_REGISTRY["trajectory_metrics"]._metric_fn
-        with pytest.raises(ValueError, match="Unexpected fixation_steps shape"):
+        with pytest.raises(ValueError, match="fixation_steps must be 2-d"):
             trajectory_metrics_fn(
                 model=model,
                 metrics=["probability"] if "probability" in METRICS_REGISTRY else [],
