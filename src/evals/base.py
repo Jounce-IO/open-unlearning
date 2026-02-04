@@ -180,7 +180,6 @@ class Evaluator:
             if self.eval_cfg.get("samples") is not None:
                 kwargs["samples"] = self.eval_cfg.samples
             metrics_args = self.eval_cfg.metrics[metric_name]
-            _
             result = metric_fn(
                 model,
                 metric_name=metric_name,
