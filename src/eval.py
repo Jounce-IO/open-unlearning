@@ -7,6 +7,7 @@ from trainer.utils import seed_everything
 from model import get_model
 from evals import get_evaluators
 from evals.metrics.privacy import log_retain_logs_path_none_if_needed
+from evals.gpu_phase_logger import set_phase as gpu_set_phase
 
 # Set up logging
 logging.basicConfig(
@@ -27,6 +28,7 @@ def main(cfg: DictConfig):
         cfg (DictConfig): Config to train
     """
     logger.info("=== Starting evaluation ===")
+    gpu_set_phase("eval_start")
     seed_everything(cfg.seed)
     model_cfg = cfg.model
     template_args = model_cfg.get("template_args", None)
@@ -34,6 +36,7 @@ def main(cfg: DictConfig):
     logger.info(f"Loading model: {model_cfg.get('model_args', {}).get('pretrained_model_name_or_path', 'unknown')}")
     model, tokenizer = get_model(model_cfg)
     logger.info("Model and tokenizer loaded successfully")
+    gpu_set_phase("eval_model_loaded")
 
     eval_cfgs = cfg.eval
     # When using eval=trajectory_test, Hydra loads the config and cfg.eval
@@ -60,13 +63,16 @@ def main(cfg: DictConfig):
                 evaluator.eval_cfg.get("retain_logs_path"),
             )
         logger.info(f"Running evaluator: {evaluator_name}")
+        gpu_set_phase("evaluator_start", metric=evaluator_name)
         eval_args = {
             "template_args": template_args,
             "model": model,
             "tokenizer": tokenizer,
         }
         _ = evaluator.evaluate(**eval_args)
+        gpu_set_phase("evaluator_end", metric=evaluator_name)
         logger.info(f"Evaluator {evaluator_name} completed")
+    gpu_set_phase("eval_complete")
     logger.info("=== Evaluation complete ===")
 
 

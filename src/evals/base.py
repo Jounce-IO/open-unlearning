@@ -94,7 +94,7 @@ class Evaluator:
         """Summarize the metrics results"""
         metric_summary = {}
         for metric_name, metric_results in logs.items():
-            if metric_name not in self.metrics:
+            if metric_name == "config":
                 continue
             agg_value = metric_results.get("agg_value", None)
             if agg_value is not None:
@@ -139,14 +139,35 @@ class Evaluator:
         logger.info(f"Evaluations will be saved to: {logs_file_path}")
         logger.info(f"Evaluating {len(self.metrics)} metrics: {list(self.metrics.keys())}")
         for metric_name, metric_fn in self.metrics.items():
-            if not overwrite and metric_name in logs and logs[metric_name]:
-                logger.info(f"Skipping {metric_name}, already evaluated.")
-                if "agg_value" in logs[metric_name]:
+            metric_cfg = self.eval_cfg.metrics[metric_name]
+            metric_display_names = metric_cfg.get("metric_display_names", None)
+            if metric_display_names is not None:
+                if isinstance(metric_display_names, (list, tuple)):
+                    display_names = list(metric_display_names)
+                else:
+                    display_names = list(metric_display_names)
+                skip = (
+                    not overwrite
+                    and display_names
+                    and all(k in logs and logs.get(k) for k in display_names)
+                )
+                if skip:
                     logger.info(
-                        f"Result for metric {metric_name}:\t{logs[metric_name]['agg_value']}"
+                        f"Skipping {metric_name}, already evaluated (all sub-results present)."
                     )
-                continue
-            _ = logs.pop(metric_name, None)  # overwriting existing evals if present
+                    continue
+                if overwrite:
+                    for k in display_names:
+                        _ = logs.pop(k, None)
+            else:
+                if not overwrite and metric_name in logs and logs[metric_name]:
+                    logger.info(f"Skipping {metric_name}, already evaluated.")
+                    if "agg_value" in logs[metric_name]:
+                        logger.info(
+                            f"Result for metric {metric_name}:\t{logs[metric_name]['agg_value']}"
+                        )
+                    continue
+                _ = logs.pop(metric_name, None)  # overwriting existing evals if present
             log_retain_logs_path_none_if_needed(
                 f"start of metric {metric_name}",
                 {metric_name: self.eval_cfg.metrics[metric_name]},
@@ -159,7 +180,6 @@ class Evaluator:
             if self.eval_cfg.get("samples") is not None:
                 kwargs["samples"] = self.eval_cfg.samples
             metrics_args = self.eval_cfg.metrics[metric_name]
-            _
             result = metric_fn(
                 model,
                 metric_name=metric_name,

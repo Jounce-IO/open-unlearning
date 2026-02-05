@@ -144,8 +144,9 @@ class TestGenerateTrajectoriesForDataloaderBatchSupport:
         assert len(trajectories_by_idx) == 2
         assert "0" in trajectories_by_idx
         assert "1" in trajectories_by_idx
-        traj0 = trajectories_by_idx["0"]["steps"]
-        traj1 = trajectories_by_idx["1"]["steps"]
-        assert traj0.shape == (V, generated_len, S)
-        assert traj1.shape == (V, generated_len, S)
-        assert not torch.allclose(traj0, traj1), "Two samples should have different trajectories when logits differ"
+        traj0 = trajectories_by_idx["0"]
+        traj1 = trajectories_by_idx["1"]
+        assert "R" in traj0 and "F" in traj0 and "S" in traj0 and "L" in traj0
+        assert traj0["R"].shape == (V, generated_len, S)
+        assert traj1["R"].shape == (V, generated_len, S)
+        assert not torch.allclose(traj0["R"], traj1["R"]), "Two samples should have different trajectories when logits differ"

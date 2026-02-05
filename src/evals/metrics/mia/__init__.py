@@ -34,13 +34,21 @@ def mia_loss(model, **kwargs):
 
 @unlearning_metric(name="mia_min_k")
 def mia_min_k(model, **kwargs):
+    k = kwargs.get("k", 0.4)
+    if "k" in kwargs:
+        logger.info("mia_min_k: using k=%.2f from config", k)
+    else:
+        logger.info(
+            "mia_min_k: using default k=%.2f (config had no k; open-unlearning configs use 0.4, attack class default 0.2)",
+            k,
+        )
     return mia_auc(
         MinKProbAttack,
         model,
         data=kwargs["data"],
         collator=kwargs["collators"],
         batch_size=kwargs["batch_size"],
-        k=kwargs["k"],
+        k=k,
     )
 
 
@@ -52,7 +60,7 @@ def mia_min_k_plus_plus(model, **kwargs):
         data=kwargs["data"],
         collator=kwargs["collators"],
         batch_size=kwargs["batch_size"],
-        k=kwargs["k"],
+        k=kwargs.get("k", 0.4),
     )
 
 
@@ -64,7 +72,7 @@ def mia_gradnorm(model, **kwargs):
         data=kwargs["data"],
         collator=kwargs["collators"],
         batch_size=kwargs["batch_size"],
-        p=kwargs["p"],
+        p=kwargs.get("p", 2),
     )
 
 
