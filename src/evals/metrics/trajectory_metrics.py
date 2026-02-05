@@ -720,678 +720,685 @@ def _call_metric_at_step(
 
 @unlearning_metric(name="trajectory_metrics")
 def trajectory_metrics(model, **kwargs):
-    # #region agent log
-    _debug_log(
-        "trajectory_metrics.py:trajectory_metrics:entry",
-        "trajectory_metrics entry",
-        {
-            "__file__": __file__,
-            "cuda_available": torch.cuda.is_available(),
-            "cuda_allocated_mib": round(torch.cuda.memory_allocated() / (1024**2), 2) if torch.cuda.is_available() else None,
-            "cuda_max_allocated_mib": round(torch.cuda.max_memory_allocated() / (1024**2), 2) if torch.cuda.is_available() else None,
-            "git_rev": (
-                (lambda r: r.stdout.strip() if r.returncode == 0 else None)(
-                    subprocess.run(
-                        ["git", "rev-parse", "HEAD"],
-                        capture_output=True,
-                        text=True,
-                        cwd=os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "..", "..")),
+    with torch.inference_mode():
+        # #region agent log
+        _debug_log(
+            "trajectory_metrics.py:trajectory_metrics:entry",
+            "trajectory_metrics entry",
+            {
+                "__file__": __file__,
+                "cuda_available": torch.cuda.is_available(),
+                "cuda_allocated_mib": round(torch.cuda.memory_allocated() / (1024**2), 2) if torch.cuda.is_available() else None,
+                "cuda_max_allocated_mib": round(torch.cuda.max_memory_allocated() / (1024**2), 2) if torch.cuda.is_available() else None,
+                "git_rev": (
+                    (lambda r: r.stdout.strip() if r.returncode == 0 else None)(
+                        subprocess.run(
+                            ["git", "rev-parse", "HEAD"],
+                            capture_output=True,
+                            text=True,
+                            cwd=os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "..", "..")),
+                        )
                     )
-                )
-            ),
-        },
-        hypothesis_id="C",
-    )
-    if torch.cuda.is_available():
-        try:
-            stats = torch.cuda.memory_stats()
-            _debug_log("trajectory_metrics.py:trajectory_metrics:entry_stats", "cuda memory_stats at entry", {"allocator_stats_keys": list(stats.keys())[:20]}, hypothesis_id="B")
-        except Exception:
-            pass
-    # #endregion
-    gpu_set_phase("trajectory_entry")
-    """
-    Compute metrics along diffusion trajectories.
-    
-    This function:
-    1. Generates text using the model's sampler (with return_logits=True)
-    2. Extracts logits_history and fixation_steps from sampler output
-    3. Computes three trajectory tensors (steps, fixation, ratio)
-    4. For each trajectory type and step, computes specified metrics
-    5. Returns results organized by trajectory, step, and metric
-    
-    Config structure:
-    - metrics: list of metric names OR dict mapping metric names to configs
-      Examples:
-        - ["probability", "exact_memorization"]  # Simple list
-        - {"probability": {}, "truth_ratio": {"aggregator": "closer_to_1_better"}}  # With configs
-    - trajectory_config: config for trajectory computation
-      - logits_source: "sampler" (default) or "external"
-      - use_fixation_logits: true (default)  # If model is adapter, use fixation logits in __call__
-      - return_logits: true  # Sampler config
-      - return_fixation_steps: true  # Sampler config
-    - data: dataset to evaluate on
-    - collators: collator for batching
-    - batch_size: batch size for evaluation
-    - tokenizer: tokenizer for text processing
-    - generation_args: args for text generation (for text-based metrics)
-    
-    Note: Metrics that require pre_compute (like truth_ratio) will need their
-    pre_compute metrics to be computed at each step. This is handled automatically
-    if pre_compute configs are provided in the metric configs.
-    """
-    # Extract config
-    metrics_config = kwargs.get("metrics", [])
-    trajectory_config = kwargs.get("trajectory_config", {})
-    logits_source = trajectory_config.get("logits_source", "sampler")
-    data = kwargs.get("data")
-    collator = kwargs.get("collators")
-    batch_size = kwargs.get("batch_size", 1)
-    tokenizer = kwargs.get("tokenizer")
-    generation_args = kwargs.get("generation_args", {})
-    
-    if not metrics_config:
-        raise ValueError("No metrics specified in config")
-    
-    if not tokenizer:
-        raise ValueError("tokenizer is required for trajectory metrics")
-
-    # When model is DiffusionModelAdapter, set use_fixation_logits so __call__ returns
-    # fixation logits (trajectory run). Default True for trajectory metrics.
-    if hasattr(model, "adapter_config"):
-        model.adapter_config.use_fixation_logits = trajectory_config.get(
-            "use_fixation_logits", True
+                ),
+            },
+            hypothesis_id="C",
         )
+        if torch.cuda.is_available():
+            try:
+                stats = torch.cuda.memory_stats()
+                _debug_log("trajectory_metrics.py:trajectory_metrics:entry_stats", "cuda memory_stats at entry", {"allocator_stats_keys": list(stats.keys())[:20]}, hypothesis_id="B")
+            except Exception:
+                pass
+        # #endregion
+        gpu_set_phase("trajectory_entry")
+        """
+        Compute metrics along diffusion trajectories.
+    
+        This function:
+        1. Generates text using the model's sampler (with return_logits=True)
+        2. Extracts logits_history and fixation_steps from sampler output
+        3. Computes three trajectory tensors (steps, fixation, ratio)
+        4. For each trajectory type and step, computes specified metrics
+        5. Returns results organized by trajectory, step, and metric
+    
+        Config structure:
+        - metrics: list of metric names OR dict mapping metric names to configs
+          Examples:
+            - ["probability", "exact_memorization"]  # Simple list
+            - {"probability": {}, "truth_ratio": {"aggregator": "closer_to_1_better"}}  # With configs
+        - trajectory_config: config for trajectory computation
+          - logits_source: "sampler" (default) or "external"
+          - use_fixation_logits: true (default)  # If model is adapter, use fixation logits in __call__
+          - return_logits: true  # Sampler config
+          - return_fixation_steps: true  # Sampler config
+        - data: dataset to evaluate on
+        - collators: collator for batching
+        - batch_size: batch size for evaluation
+        - tokenizer: tokenizer for text processing
+        - generation_args: args for text generation (for text-based metrics)
+    
+        Note: Metrics that require pre_compute (like truth_ratio) will need their
+        pre_compute metrics to be computed at each step. This is handled automatically
+        if pre_compute configs are provided in the metric configs.
+        """
+        # Extract config
+        metrics_config = kwargs.get("metrics", [])
+        trajectory_config = kwargs.get("trajectory_config", {})
+        logits_source = trajectory_config.get("logits_source", "sampler")
+        data = kwargs.get("data")
+        collator = kwargs.get("collators")
+        batch_size = kwargs.get("batch_size", 1)
+        tokenizer = kwargs.get("tokenizer")
+        generation_args = kwargs.get("generation_args", {})
+    
+        if not metrics_config:
+            raise ValueError("No metrics specified in config")
+    
+        if not tokenizer:
+            raise ValueError("tokenizer is required for trajectory metrics")
 
-    # Parse metrics config: support both list and dict formats
-    # Handle OmegaConf ListConfig and DictConfig (from Hydra)
-    if isinstance(metrics_config, (list, ListConfig)):
-        # Simple list of metric names: ["probability", "exact_memorization"]
-        # Convert ListConfig to list if needed
-        if isinstance(metrics_config, ListConfig):
-            metrics_config = list(metrics_config)
-        metrics_to_compute = {name: {} for name in metrics_config}
-    elif isinstance(metrics_config, (dict, DictConfig)):
-        # Dict mapping metric names to configs: {"probability": {}, "truth_ratio": {"aggregator": "..."}}
-        # Convert DictConfig to dict if needed
-        if isinstance(metrics_config, DictConfig):
-            metrics_to_compute = dict(metrics_config)
-        else:
-            metrics_to_compute = metrics_config
-    else:
-        raise ValueError(
-            f"metrics must be a list or dict, got {type(metrics_config)}"
-        )
-
-    # Full order for display-name mapping (before optional filter)
-    full_internal_order = list(metrics_to_compute.keys())
-    full_display_order = list(kwargs.get("metric_display_names") or [])
-
-    # Optional subset: only compute these (e.g. from CLI --metrics A B C)
-    include_metrics = kwargs.get("include_metrics")
-    if include_metrics is not None:
-        include_metrics = list(include_metrics)
-        if include_metrics:
-            metrics_to_compute = {
-                k: metrics_to_compute[k]
-                for k in include_metrics
-                if k in metrics_to_compute
-            }
-
-    # Load metrics from registry (support handler= for logical names, e.g. forget_knowmem_rouge -> rouge)
-    loaded_metrics = {}
-    for metric_name, metric_cfg in metrics_to_compute.items():
-        try:
-            registry_name = metric_cfg.get("handler", metric_name) if hasattr(metric_cfg, "get") else metric_name
-            metric = _get_metric_from_registry(registry_name)
-            loaded_metrics[metric_name] = {
-                "metric": metric,
-                "config": metric_cfg if (isinstance(metric_cfg, dict) or hasattr(metric_cfg, "get")) else {},
-            }
-        except ValueError as e:
-            logger.error(f"Failed to load metric '{metric_name}': {e}")
-            raise
-
-    # One-time warning if hm_aggregate (trajectory_model_utility) will have no pre_compute
-    if "hm_aggregate" in loaded_metrics:
-        ref_logs = kwargs.get("reference_logs") or {}
-        retain_logs = ref_logs.get("retain_model_logs") or {}
-        model_utility_keys = ("retain_Q_A_Prob", "retain_Q_A_ROUGE", "retain_Truth_Ratio")
-        have = [k for k in model_utility_keys if retain_logs.get(k) and isinstance(retain_logs.get(k), dict) and retain_logs[k].get("agg_value") is not None]
-        if len(have) < len(model_utility_keys):
-            logger.warning(
-                "trajectory_model_utility (hm_aggregate) will be None: set eval.tofu_trajectory.retain_logs_path to a retain run JSON containing retain_Q_A_Prob, retain_Q_A_ROUGE, retain_Truth_Ratio. reference_logs keys: %s",
-                list(retain_logs.keys()) if retain_logs else "(retain_logs_path not set or file missing)",
+        # When model is DiffusionModelAdapter, set use_fixation_logits so __call__ returns
+        # fixation logits (trajectory run). Default True for trajectory metrics.
+        if hasattr(model, "adapter_config"):
+            model.adapter_config.use_fixation_logits = trajectory_config.get(
+                "use_fixation_logits", True
             )
 
-    # Handle multi-dataset only when there are keys beyond forget/holdout (e.g. MUSE: forget_knowmem, retain_knowmem, forget_verbmem, forget, holdout)
-    multi_dataset = (
-        isinstance(data, dict)
-        and bool(set(data.keys()) - {"forget", "holdout"})
-    )
-    if isinstance(data, dict) and "forget" in data and "holdout" in data and not multi_dataset:
-        primary_data = data["forget"]
-        secondary_data = data["holdout"]
-    else:
-        primary_data = data if not multi_dataset else None
-        secondary_data = None
+        # Parse metrics config: support both list and dict formats
+        # Handle OmegaConf ListConfig and DictConfig (from Hydra)
+        if isinstance(metrics_config, (list, ListConfig)):
+            # Simple list of metric names: ["probability", "exact_memorization"]
+            # Convert ListConfig to list if needed
+            if isinstance(metrics_config, ListConfig):
+                metrics_config = list(metrics_config)
+            metrics_to_compute = {name: {} for name in metrics_config}
+        elif isinstance(metrics_config, (dict, DictConfig)):
+            # Dict mapping metric names to configs: {"probability": {}, "truth_ratio": {"aggregator": "..."}}
+            # Convert DictConfig to dict if needed
+            if isinstance(metrics_config, DictConfig):
+                metrics_to_compute = dict(metrics_config)
+            else:
+                metrics_to_compute = metrics_config
+        else:
+            raise ValueError(
+                f"metrics must be a list or dict, got {type(metrics_config)}"
+            )
 
-    single_dataset_keys = [k for k in data if k not in ("forget", "holdout")] if multi_dataset else []
+        # Full order for display-name mapping (before optional filter)
+        full_internal_order = list(metrics_to_compute.keys())
+        full_display_order = list(kwargs.get("metric_display_names") or [])
 
-    # Create dataloader(s)
-    if not multi_dataset:
-        dataloader = DataLoader(primary_data, batch_size=batch_size, collate_fn=collator)
-    else:
-        dataloader = None  # created per key in loop
-    holdout_dataloader = (
-        DataLoader(secondary_data, batch_size=batch_size, collate_fn=collator)
-        if secondary_data is not None
-        else None
-    )
-
-    # Check if privleak needs dual trajectories (forget + holdout)
-    privleak_has_dual_data = (secondary_data is not None and holdout_dataloader is not None) or (
-        multi_dataset and "forget" in data and "holdout" in data
-    )
-    privleak_needs_dual = (
-        "privleak" in loaded_metrics
-        and privleak_has_dual_data
-    )
-    if privleak_needs_dual:
-        privleak_cfg = loaded_metrics.get("privleak", {}).get("config", {})
-        privleak_pre = privleak_cfg.get("pre_compute", {})
-        privleak_needs_dual = "mia_min_k" in privleak_pre
-
-    # Trajectory names
-    trajectory_names = ["steps", "fixation_start", "fixation_end", "fixation_ratio"]
-
-    # Storage for aggregation: collect values across samples per step
-    step_values = {traj_name: {} for traj_name in trajectory_names}
-
-    # Get sampler from model
-    sampler = _get_sampler_from_model(model)
-    if sampler is None:
-        raise ValueError(
-            "Model does not have a sampler. Trajectory metrics require a diffusion model with sampler. "
-            "Ensure model is wrapped with DiffusionModelAdapter or has accessible sampler."
-        )
-
-    # When privleak + dual dataset: collect trajectories for forget and holdout first (skip when multi_dataset; run after per-key loops)
-    trajectories_by_key = None
-    if privleak_needs_dual and not multi_dataset:
-        logger.info("Privleak with dual dataset: generating trajectories for forget and holdout")
-        gpu_set_phase("privleak_dual_forget")
-        forget_traj = _generate_trajectories_for_dataloader(
-            sampler, dataloader, trajectory_config
-        )
-        gpu_set_phase("privleak_dual_holdout")
-        holdout_traj = _generate_trajectories_for_dataloader(
-            sampler, holdout_dataloader, trajectory_config
-        )
-        if forget_traj and holdout_traj:
-            trajectories_by_key = {"forget": forget_traj, "holdout": holdout_traj}
-            S_dual = next(iter(forget_traj.values()))["S"]
-            try:
-                device = getattr(model, "device", None) or next(model.parameters()).device
-            except (StopIteration, AttributeError):
-                device = torch.device("cpu")
-            privleak_cfg = loaded_metrics["privleak"]["config"]
-            for step in range(S_dual):
-                gpu_set_phase("privleak_dual_step", step=step)
-                logits_by_key = {}
-                for key, traj_by_idx in trajectories_by_key.items():
-                    logits_by_key[key] = {
-                        idx: _get_logits_at_step(traj, "steps", step)
-                        for idx, traj in traj_by_idx.items()
-                    }
-                dual_wrapper = DualLogitModelWrapper(logits_by_key, device)
-                kwargs_priv = {
-                    "data": {"forget": primary_data, "holdout": secondary_data},
-                    "collators": collator,
-                    "batch_size": batch_size,
-                    **{k: v for k, v in kwargs.items() if k not in ("tokenizer", "model", "data", "collators")},
+        # Optional subset: only compute these (e.g. from CLI --metrics A B C)
+        include_metrics = kwargs.get("include_metrics")
+        if include_metrics is not None:
+            include_metrics = list(include_metrics)
+            if include_metrics:
+                metrics_to_compute = {
+                    k: metrics_to_compute[k]
+                    for k in include_metrics
+                    if k in metrics_to_compute
                 }
-                pre_result = _compute_pre_compute_metrics_at_step(
-                    pre_compute_config=privleak_cfg.get("pre_compute", {}),
-                    logits=next(iter(logits_by_key["forget"].values())),
-                    batch_template={},
-                    tokenizer=tokenizer,
-                    sample_labels=None,
-                    sample_input_ids=torch.zeros(1),
-                    sample_prompt_len=0,
-                    sample_idx="0",
-                    model_wrapper_override=dual_wrapper,
-                    **kwargs_priv,
-                )
-                privleak_result = _get_metric_from_registry("privleak")._metric_fn(
-                    model=dual_wrapper,
-                    pre_compute=pre_result,
-                    reference_logs=kwargs.get("reference_logs"),
-                    ref_value=privleak_cfg.get("ref_value", 0.5),
-                    **{k: v for k, v in kwargs.items() if k not in ("model", "tokenizer", "pre_compute")},
-                )
-                for traj_name in trajectory_names:
-                    if step not in step_values[traj_name]:
-                        step_values[traj_name][step] = {m: [] for m in loaded_metrics}
-                    step_values[traj_name][step]["privleak"].append(privleak_result.get("agg_value"))
-        else:
-            logger.warning("Privleak dual trajectories empty, skipping privleak")
 
-    keys_to_process = [None] if not multi_dataset else single_dataset_keys
-    for _key in keys_to_process:
-        if _key is not None:
-            primary_data = data[_key]
+        # Load metrics from registry (support handler= for logical names, e.g. forget_knowmem_rouge -> rouge)
+        loaded_metrics = {}
+        for metric_name, metric_cfg in metrics_to_compute.items():
+            try:
+                registry_name = metric_cfg.get("handler", metric_name) if hasattr(metric_cfg, "get") else metric_name
+                metric = _get_metric_from_registry(registry_name)
+                loaded_metrics[metric_name] = {
+                    "metric": metric,
+                    "config": metric_cfg if (isinstance(metric_cfg, dict) or hasattr(metric_cfg, "get")) else {},
+                }
+            except ValueError as e:
+                logger.error(f"Failed to load metric '{metric_name}': {e}")
+                raise
+
+        # One-time warning if hm_aggregate (trajectory_model_utility) will have no pre_compute
+        if "hm_aggregate" in loaded_metrics:
+            ref_logs = kwargs.get("reference_logs") or {}
+            retain_logs = ref_logs.get("retain_model_logs") or {}
+            model_utility_keys = ("retain_Q_A_Prob", "retain_Q_A_ROUGE", "retain_Truth_Ratio")
+            have = [k for k in model_utility_keys if retain_logs.get(k) and isinstance(retain_logs.get(k), dict) and retain_logs[k].get("agg_value") is not None]
+            if len(have) < len(model_utility_keys):
+                logger.warning(
+                    "trajectory_model_utility (hm_aggregate) will be None: set eval.tofu_trajectory.retain_logs_path to a retain run JSON containing retain_Q_A_Prob, retain_Q_A_ROUGE, retain_Truth_Ratio. reference_logs keys: %s",
+                    list(retain_logs.keys()) if retain_logs else "(retain_logs_path not set or file missing)",
+                )
+
+        # Handle multi-dataset only when there are keys beyond forget/holdout (e.g. MUSE: forget_knowmem, retain_knowmem, forget_verbmem, forget, holdout)
+        multi_dataset = (
+            isinstance(data, dict)
+            and bool(set(data.keys()) - {"forget", "holdout"})
+        )
+        if isinstance(data, dict) and "forget" in data and "holdout" in data and not multi_dataset:
+            primary_data = data["forget"]
+            secondary_data = data["holdout"]
+        else:
+            primary_data = data if not multi_dataset else None
+            secondary_data = None
+
+        single_dataset_keys = [k for k in data if k not in ("forget", "holdout")] if multi_dataset else []
+
+        # Create dataloader(s)
+        if not multi_dataset:
             dataloader = DataLoader(primary_data, batch_size=batch_size, collate_fn=collator)
-            metrics_to_run = [
-                m for m in loaded_metrics
-                if (loaded_metrics[m].get("config") or {}).get("dataset_key") == _key
-            ]
         else:
-            metrics_to_run = [
-                m for m in loaded_metrics
-                if m != "privleak" or not privleak_needs_dual
-            ]
-        if not metrics_to_run:
-            continue
+            dataloader = None  # created per key in loop
+        holdout_dataloader = (
+            DataLoader(secondary_data, batch_size=batch_size, collate_fn=collator)
+            if secondary_data is not None
+            else None
+        )
 
-    # Process each batch
-        for batch_idx, batch in enumerate(dataloader):
-            gpu_set_phase("trajectory_batch_start", batch_idx=batch_idx)
-            input_ids = batch["input_ids"]
-            labels = batch.get("labels")
-            attention_mask = batch.get("attention_mask")
-            indices = batch.get("index", torch.arange(batch_idx * batch_size, 
-                                                      (batch_idx + 1) * batch_size))
+        # Check if privleak needs dual trajectories (forget + holdout)
+        privleak_has_dual_data = (secondary_data is not None and holdout_dataloader is not None) or (
+            multi_dataset and "forget" in data and "holdout" in data
+        )
+        privleak_needs_dual = (
+            "privleak" in loaded_metrics
+            and privleak_has_dual_data
+        )
+        if privleak_needs_dual:
+            privleak_cfg = loaded_metrics.get("privleak", {}).get("config", {})
+            privleak_pre = privleak_cfg.get("pre_compute", {})
+            privleak_needs_dual = "mia_min_k" in privleak_pre
+
+        # Trajectory names
+        trajectory_names = ["steps", "fixation_start", "fixation_end", "fixation_ratio"]
+
+        # Storage for aggregation: collect values across samples per step
+        step_values = {traj_name: {} for traj_name in trajectory_names}
+
+        # Get sampler from model
+        sampler = _get_sampler_from_model(model)
+        if sampler is None:
+            raise ValueError(
+                "Model does not have a sampler. Trajectory metrics require a diffusion model with sampler. "
+                "Ensure model is wrapped with DiffusionModelAdapter or has accessible sampler."
+            )
+
+        # When privleak + dual dataset: collect trajectories for forget and holdout first (skip when multi_dataset; run after per-key loops)
+        trajectories_by_key = None
+        if privleak_needs_dual and not multi_dataset:
+            logger.info("Privleak with dual dataset: generating trajectories for forget and holdout")
+            gpu_set_phase("privleak_dual_forget")
+            forget_traj = _generate_trajectories_for_dataloader(
+                sampler, dataloader, trajectory_config
+            )
+            gpu_set_phase("privleak_dual_holdout")
+            holdout_traj = _generate_trajectories_for_dataloader(
+                sampler, holdout_dataloader, trajectory_config
+            )
+            if forget_traj and holdout_traj:
+                trajectories_by_key = {"forget": forget_traj, "holdout": holdout_traj}
+                S_dual = next(iter(forget_traj.values()))["S"]
+                try:
+                    device = getattr(model, "device", None) or next(model.parameters()).device
+                except (StopIteration, AttributeError):
+                    device = torch.device("cpu")
+                privleak_cfg = loaded_metrics["privleak"]["config"]
+                for step in range(S_dual):
+                    gpu_set_phase("privleak_dual_step", step=step)
+                    logits_by_key = {}
+                    for key, traj_by_idx in trajectories_by_key.items():
+                        logits_by_key[key] = {
+                            idx: _get_logits_at_step(traj, "steps", step)
+                            for idx, traj in traj_by_idx.items()
+                        }
+                    dual_wrapper = DualLogitModelWrapper(logits_by_key, device)
+                    kwargs_priv = {
+                        "data": {"forget": primary_data, "holdout": secondary_data},
+                        "collators": collator,
+                        "batch_size": batch_size,
+                        **{k: v for k, v in kwargs.items() if k not in ("tokenizer", "model", "data", "collators")},
+                    }
+                    pre_result = _compute_pre_compute_metrics_at_step(
+                        pre_compute_config=privleak_cfg.get("pre_compute", {}),
+                        logits=next(iter(logits_by_key["forget"].values())),
+                        batch_template={},
+                        tokenizer=tokenizer,
+                        sample_labels=None,
+                        sample_input_ids=torch.zeros(1),
+                        sample_prompt_len=0,
+                        sample_idx="0",
+                        model_wrapper_override=dual_wrapper,
+                        **kwargs_priv,
+                    )
+                    privleak_result = _get_metric_from_registry("privleak")._metric_fn(
+                        model=dual_wrapper,
+                        pre_compute=pre_result,
+                        reference_logs=kwargs.get("reference_logs"),
+                        ref_value=privleak_cfg.get("ref_value", 0.5),
+                        **{k: v for k, v in kwargs.items() if k not in ("model", "tokenizer", "pre_compute")},
+                    )
+                    for traj_name in trajectory_names:
+                        if step not in step_values[traj_name]:
+                            step_values[traj_name][step] = {m: [] for m in loaded_metrics}
+                        step_values[traj_name][step]["privleak"].append(privleak_result.get("agg_value"))
+            else:
+                logger.warning("Privleak dual trajectories empty, skipping privleak")
+
+        keys_to_process = [None] if not multi_dataset else single_dataset_keys
+        for _key in keys_to_process:
+            if _key is not None:
+                primary_data = data[_key]
+                dataloader = DataLoader(primary_data, batch_size=batch_size, collate_fn=collator)
+                metrics_to_run = [
+                    m for m in loaded_metrics
+                    if (loaded_metrics[m].get("config") or {}).get("dataset_key") == _key
+                ]
+            else:
+                metrics_to_run = [
+                    m for m in loaded_metrics
+                    if m != "privleak" or not privleak_needs_dual
+                ]
+            if not metrics_to_run:
+                continue
+
+        # Process each batch
+            for batch_idx, batch in enumerate(dataloader):
+                gpu_set_phase("trajectory_batch_start", batch_idx=batch_idx)
+                input_ids = batch["input_ids"]
+                labels = batch.get("labels")
+                attention_mask = batch.get("attention_mask")
+                indices = batch.get("index", torch.arange(batch_idx * batch_size, 
+                                                          (batch_idx + 1) * batch_size))
         
-            B = input_ids.shape[0]
+                B = input_ids.shape[0]
         
-            # Prepare inputs for sampler (list of token sequences)
-            prompts = []
-            prompt_lens = []
-            for i in range(B):
-                # Extract prompt (non-ignored tokens)
-                if labels is not None:
-                    # Find where labels start (first non-IGNORE_INDEX)
-                    label_mask = labels[i] != IGNORE_INDEX
-                    if label_mask.any():
-                        prompt_end = label_mask.nonzero()[0][0].item()
+                # Prepare inputs for sampler (list of token sequences)
+                prompts = []
+                prompt_lens = []
+                for i in range(B):
+                    # Extract prompt (non-ignored tokens)
+                    if labels is not None:
+                        # Find where labels start (first non-IGNORE_INDEX)
+                        label_mask = labels[i] != IGNORE_INDEX
+                        if label_mask.any():
+                            prompt_end = label_mask.nonzero()[0][0].item()
+                        else:
+                            prompt_end = input_ids.shape[1]
                     else:
                         prompt_end = input_ids.shape[1]
-                else:
-                    prompt_end = input_ids.shape[1]
             
-                prompt = input_ids[i, :prompt_end].cpu().tolist()
-                prompts.append(prompt)
-                prompt_lens.append(len(prompt))
+                    prompt = input_ids[i, :prompt_end].cpu().tolist()
+                    prompts.append(prompt)
+                    prompt_lens.append(len(prompt))
         
-            # Generate using sampler with logits tracking
-            sampler_output = sampler.sample(
-                inputs=prompts,
-                config=None,  # Use default config
-                return_dict=True,
-                return_logits=True,
-                **trajectory_config.get("sampler_kwargs", {}),
-            )
-            gpu_set_phase("trajectory_after_sampler", batch_idx=batch_idx)
+                # Generate using sampler with logits tracking
+                sampler_output = sampler.sample(
+                    inputs=prompts,
+                    config=None,  # Use default config
+                    return_dict=True,
+                    return_logits=True,
+                    **trajectory_config.get("sampler_kwargs", {}),
+                )
+                gpu_set_phase("trajectory_after_sampler", batch_idx=batch_idx)
 
-            # Extract logits and fixation steps
-            logits_history = sampler_output.logits_history
-            fixation_steps = sampler_output.fixation_steps
+                # Extract logits and fixation steps
+                logits_history = sampler_output.logits_history
+                fixation_steps = sampler_output.fixation_steps
 
-            if logits_history is None or len(logits_history) == 0:
-                logger.warning(f"Batch {batch_idx}: No logits_history returned from sampler")
-                continue
+                if logits_history is None or len(logits_history) == 0:
+                    logger.warning(f"Batch {batch_idx}: No logits_history returned from sampler")
+                    continue
         
-            if fixation_steps is None:
-                logger.warning(f"Batch {batch_idx}: No fixation_steps returned from sampler")
-                continue
+                if fixation_steps is None:
+                    logger.warning(f"Batch {batch_idx}: No fixation_steps returned from sampler")
+                    continue
 
-            # #region agent log
-            if batch_idx == 0 and torch.cuda.is_available():
-                _debug_log(
-                    "trajectory_metrics.py:after_sampler_sample",
-                    "after sampler.sample() batch 0 (raw logits_history in memory)",
-                    {
-                        "batch_idx": 0,
-                        "logits_history_len": len(logits_history),
-                        "first_step_shape": list(logits_history[0].shape),
-                        "cuda_allocated_mib": round(torch.cuda.memory_allocated() / (1024**2), 2),
-                        "cuda_max_allocated_mib": round(torch.cuda.max_memory_allocated() / (1024**2), 2),
-                    },
-                    hypothesis_id="B",
+                # #region agent log
+                if batch_idx == 0 and torch.cuda.is_available():
+                    _debug_log(
+                        "trajectory_metrics.py:after_sampler_sample",
+                        "after sampler.sample() batch 0 (raw logits_history in memory)",
+                        {
+                            "batch_idx": 0,
+                            "logits_history_len": len(logits_history),
+                            "first_step_shape": list(logits_history[0].shape),
+                            "cuda_allocated_mib": round(torch.cuda.memory_allocated() / (1024**2), 2),
+                            "cuda_max_allocated_mib": round(torch.cuda.max_memory_allocated() / (1024**2), 2),
+                        },
+                        hypothesis_id="B",
+                    )
+                _debug_log("trajectory_metrics.py:trajectories_from_logits:call", "calling trajectories_from_logits", {"return_trajectory_tensors": False, "batch_idx": batch_idx}, hypothesis_id="C")
+                # #endregion
+                out = trajectories_from_logits(
+                    logits_history, fixation_steps, prompt_lens, return_trajectory_tensors=False
                 )
-            _debug_log("trajectory_metrics.py:trajectories_from_logits:call", "calling trajectories_from_logits", {"return_trajectory_tensors": False, "batch_idx": batch_idx}, hypothesis_id="C")
-            # #endregion
-            out = trajectories_from_logits(
-                logits_history, fixation_steps, prompt_lens, return_trajectory_tensors=False
-            )
-            R, F, S, L = out["R"], out["F"], out["S"], out["L"]
-            gpu_set_phase("trajectory_after_trajectories", batch_idx=batch_idx)
-            # #region agent log
-            if batch_idx == 0:
-                _debug_log(
-                    "trajectory_metrics.py:after_trajectories_from_logits",
-                    "after trajectories_from_logits (batch 0)",
-                    {
-                        "R_shape": list(R.shape),
-                        "S": S,
-                        "L": L,
-                        "cuda_allocated_mib": round(torch.cuda.memory_allocated() / (1024**2), 2) if torch.cuda.is_available() else None,
-                        "cuda_max_allocated_mib": round(torch.cuda.max_memory_allocated() / (1024**2), 2) if torch.cuda.is_available() else None,
-                    },
-                    hypothesis_id="A,B",
-                )
-            # #endregion
+                R, F, S, L = out["R"], out["F"], out["S"], out["L"]
+                del logits_history # Release list of tensors immediately after stacking/slicing
+                gpu_set_phase("trajectory_after_trajectories", batch_idx=batch_idx)
+                # #region agent log
+                if batch_idx == 0:
+                    _debug_log(
+                        "trajectory_metrics.py:after_trajectories_from_logits",
+                        "after trajectories_from_logits (batch 0)",
+                        {
+                            "R_shape": list(R.shape),
+                            "S": S,
+                            "L": L,
+                            "cuda_allocated_mib": round(torch.cuda.memory_allocated() / (1024**2), 2) if torch.cuda.is_available() else None,
+                            "cuda_max_allocated_mib": round(torch.cuda.max_memory_allocated() / (1024**2), 2) if torch.cuda.is_available() else None,
+                        },
+                        hypothesis_id="A,B",
+                    )
+                # #endregion
 
-            # Process each sample in batch (each sample uses its own R, F; logits computed on-demand)
-            for sample_idx in range(B):
-                idx_str = str(indices[sample_idx].item() if torch.is_tensor(indices[sample_idx]) else indices[sample_idx])
-                sample_traj = {"R": R[sample_idx], "F": F[sample_idx], "S": S, "L": L}
+                # Process each sample in batch (each sample uses its own R, F; logits computed on-demand)
+                for sample_idx in range(B):
+                    idx_str = str(indices[sample_idx].item() if torch.is_tensor(indices[sample_idx]) else indices[sample_idx])
+                    sample_traj = {"R": R[sample_idx], "F": F[sample_idx], "S": S, "L": L}
 
-                # Get ground truth for this sample
-                sample_labels = labels[sample_idx] if labels is not None else None
-                sample_input_ids = input_ids[sample_idx]
-                sample_prompt_len = prompt_lens[sample_idx]
+                    # Get ground truth for this sample
+                    sample_labels = labels[sample_idx] if labels is not None else None
+                    sample_input_ids = input_ids[sample_idx]
+                    sample_prompt_len = prompt_lens[sample_idx]
 
-                # Extract only the generated portion of labels to match logits shape [V, L]
-            # Logits from trajectory only cover generated tokens (L), not the prompt
-            # evaluate_probability does: logits[..., :-1, :] and labels[..., 1:]
-            # So if logits are [1, L, V], after processing: logits [1, L-1, V], labels [1, L-1]
-                # This means we need labels of length L to get L-1 after shift
-                if sample_labels is not None:
-                    # Extract generated region: from prompt_end to prompt_end + L
-                    # L is now the generated length (not full sequence length)
-                    generated_labels = sample_labels[sample_prompt_len:sample_prompt_len + L]
-                    # Pad with IGNORE_INDEX if needed (shouldn't happen, but safety check)
-                    if generated_labels.shape[0] < L:
-                        padding = torch.full(
-                            (L - generated_labels.shape[0],),
-                            IGNORE_INDEX,
-                            dtype=generated_labels.dtype,
-                            device=generated_labels.device
-                        )
-                        generated_labels = torch.cat([generated_labels, padding])
-                else:
-                    generated_labels = None
-            
-                # Create batch template for logit metrics
-                # Use only generated portion to match logits shape
-                batch_template = {
-                    "input_ids": torch.zeros((1, L), dtype=torch.long, device=sample_input_ids.device),  # Dummy input_ids, not used by metrics
-                    "labels": generated_labels.unsqueeze(0) if generated_labels is not None else None,
-                    "attention_mask": torch.ones((1, L), dtype=torch.long, device=sample_input_ids.device),  # All positions valid
-                    "index": torch.tensor([int(idx_str)], dtype=torch.long, device=sample_input_ids.device),  # Required by run_batchwise_evals
-                }
-                # Add labels_correct/labels_wrong for truth_ratio pre_compute (dual-answer dataset)
-                for key in ("labels_correct", "labels_wrong"):
-                    if key in batch:
-                        sample_labels_alt = batch[key][sample_idx]
-                        gen_alt = sample_labels_alt[sample_prompt_len:sample_prompt_len + L]
-                        if gen_alt.shape[0] < L:
+                    # Extract only the generated portion of labels to match logits shape [V, L]
+                # Logits from trajectory only cover generated tokens (L), not the prompt
+                # evaluate_probability does: logits[..., :-1, :] and labels[..., 1:]
+                # So if logits are [1, L, V], after processing: logits [1, L-1, V], labels [1, L-1]
+                    # This means we need labels of length L to get L-1 after shift
+                    if sample_labels is not None:
+                        # Extract generated region: from prompt_end to prompt_end + L
+                        # L is now the generated length (not full sequence length)
+                        generated_labels = sample_labels[sample_prompt_len:sample_prompt_len + L]
+                        # Pad with IGNORE_INDEX if needed (shouldn't happen, but safety check)
+                        if generated_labels.shape[0] < L:
                             padding = torch.full(
-                                (L - gen_alt.shape[0],),
+                                (L - generated_labels.shape[0],),
                                 IGNORE_INDEX,
-                                dtype=gen_alt.dtype,
-                                device=gen_alt.device,
+                                dtype=generated_labels.dtype,
+                                device=generated_labels.device
                             )
-                            gen_alt = torch.cat([gen_alt, padding])
-                        batch_template[key] = gen_alt.unsqueeze(0)
+                            generated_labels = torch.cat([generated_labels, padding])
+                    else:
+                        generated_labels = None
             
-                # Compute metrics for each trajectory type and step, aggregate directly
-                for traj_name in trajectory_names:
-                    for step in range(S):
-                        # Initialize step_values[traj_name][step] if not exists
-                        if step not in step_values[traj_name]:
-                            step_values[traj_name][step] = {metric_name: [] for metric_name in loaded_metrics.keys()}
-
-                        # Get logits at this step (on-demand from R, F)
-                        logits = _get_logits_at_step(sample_traj, traj_name, step)  # [V, L]
-                        # #region agent log
-                        if batch_idx == 0 and sample_idx == 0 and traj_name == "steps" and (step == 0 or step == S - 1):
-                            _debug_log(
-                                "trajectory_metrics.py:after_get_logits_at_step",
-                                "after _get_logits_at_step",
-                                {
-                                    "logits_shape": list(logits.shape),
-                                    "traj_name": traj_name,
-                                    "step": step,
-                                    "cuda_allocated_mib": round(torch.cuda.memory_allocated() / (1024**2), 2) if torch.cuda.is_available() else None,
-                                    "cuda_max_allocated_mib": round(torch.cuda.max_memory_allocated() / (1024**2), 2) if torch.cuda.is_available() else None,
-                                },
-                                hypothesis_id="A,B",
-                            )
-                        # #endregion
-
-                        # Compute each requested metric
-                        for metric_name, metric_info in [(m, loaded_metrics[m]) for m in metrics_to_run]:
-                            try:
-                                metric = metric_info["metric"]
-                                metric_cfg = metric_info["config"]
-
-                                # Skip privleak in main loop when already computed via dual-trajectory flow
-                                if metric_name == "privleak" and trajectories_by_key is not None:
-                                    continue
-
-                                gpu_set_phase("trajectory_metric", metric=metric_name, batch_idx=batch_idx, step=step)
-
-                                # Call metric at this step
-                                # Remove tokenizer from kwargs if present to avoid duplicate argument
-                                kwargs_clean = {k: v for k, v in kwargs.items() if k != "tokenizer"}
-                                # Pass indexable data to metrics (rouge, etc.): use primary_data so DataLoader can index 0,1,2...
-                                if primary_data is not None:
-                                    kwargs_clean["data"] = primary_data
-                                result = _call_metric_at_step(
-                                    metric=metric,
-                                    logits=logits,
-                                    batch_template=batch_template,
-                                    tokenizer=tokenizer,
-                                    sample_labels=sample_labels,
-                                    sample_input_ids=sample_input_ids,
-                                    sample_prompt_len=sample_prompt_len,
-                                    metric_config=metric_cfg,
-                                    sample_idx=idx_str,
-                                    **kwargs_clean
+                    # Create batch template for logit metrics
+                    # Use only generated portion to match logits shape
+                    batch_template = {
+                        "input_ids": torch.zeros((1, L), dtype=torch.long, device=sample_input_ids.device),  # Dummy input_ids, not used by metrics
+                        "labels": generated_labels.unsqueeze(0) if generated_labels is not None else None,
+                        "attention_mask": torch.ones((1, L), dtype=torch.long, device=sample_input_ids.device),  # All positions valid
+                        "index": torch.tensor([int(idx_str)], dtype=torch.long, device=sample_input_ids.device),  # Required by run_batchwise_evals
+                    }
+                    # Add labels_correct/labels_wrong for truth_ratio pre_compute (dual-answer dataset)
+                    for key in ("labels_correct", "labels_wrong"):
+                        if key in batch:
+                            sample_labels_alt = batch[key][sample_idx]
+                            gen_alt = sample_labels_alt[sample_prompt_len:sample_prompt_len + L]
+                            if gen_alt.shape[0] < L:
+                                padding = torch.full(
+                                    (L - gen_alt.shape[0],),
+                                    IGNORE_INDEX,
+                                    dtype=gen_alt.dtype,
+                                    device=gen_alt.device,
                                 )
+                                gen_alt = torch.cat([gen_alt, padding])
+                            batch_template[key] = gen_alt.unsqueeze(0)
+            
+                    # Compute metrics for each trajectory type and step, aggregate directly
+                    for traj_name in trajectory_names:
+                        for step in range(S):
+                            # Initialize step_values[traj_name][step] if not exists
+                            if step not in step_values[traj_name]:
+                                step_values[traj_name][step] = {metric_name: [] for metric_name in loaded_metrics.keys()}
+
+                            # Get logits at this step (on-demand from R, F)
+                            logits = _get_logits_at_step(sample_traj, traj_name, step)  # [V, L]
+                            # #region agent log
+                            if batch_idx == 0 and sample_idx == 0 and traj_name == "steps" and (step == 0 or step == S - 1):
+                                _debug_log(
+                                    "trajectory_metrics.py:after_get_logits_at_step",
+                                    "after _get_logits_at_step",
+                                    {
+                                        "logits_shape": list(logits.shape),
+                                        "traj_name": traj_name,
+                                        "step": step,
+                                        "cuda_allocated_mib": round(torch.cuda.memory_allocated() / (1024**2), 2) if torch.cuda.is_available() else None,
+                                        "cuda_max_allocated_mib": round(torch.cuda.max_memory_allocated() / (1024**2), 2) if torch.cuda.is_available() else None,
+                                    },
+                                    hypothesis_id="A,B",
+                                )
+                            # #endregion
+
+                            # Compute each requested metric
+                            for metric_name, metric_info in [(m, loaded_metrics[m]) for m in metrics_to_run]:
+                                try:
+                                    metric = metric_info["metric"]
+                                    metric_cfg = metric_info["config"]
+
+                                    # Skip privleak in main loop when already computed via dual-trajectory flow
+                                    if metric_name == "privleak" and trajectories_by_key is not None:
+                                        continue
+
+                                    gpu_set_phase("trajectory_metric", metric=metric_name, batch_idx=batch_idx, step=step)
+
+                                    # Call metric at this step
+                                    # Remove tokenizer from kwargs if present to avoid duplicate argument
+                                    kwargs_clean = {k: v for k, v in kwargs.items() if k != "tokenizer"}
+                                    # Pass indexable data to metrics (rouge, etc.): use primary_data so DataLoader can index 0,1,2...
+                                    if primary_data is not None:
+                                        kwargs_clean["data"] = primary_data
+                                    result = _call_metric_at_step(
+                                        metric=metric,
+                                        logits=logits,
+                                        batch_template=batch_template,
+                                        tokenizer=tokenizer,
+                                        sample_labels=sample_labels,
+                                        sample_input_ids=sample_input_ids,
+                                        sample_prompt_len=sample_prompt_len,
+                                        metric_config=metric_cfg,
+                                        sample_idx=idx_str,
+                                        **kwargs_clean
+                                    )
                             
-                                # Extract metric value from result and append directly to step_values
-                                metric_value = None
-                                if isinstance(result, dict):
-                                    # Try common keys
-                                    if "agg_value" in result:
-                                        metric_value = result["agg_value"]
-                                    elif "value_by_index" in result:
-                                        # Extract value from first index
-                                        value_by_index = result["value_by_index"]
-                                        if value_by_index:
-                                            first_idx = list(value_by_index.keys())[0]
-                                            first_value = value_by_index[first_idx]
-                                            # Extract numeric value from first_value dict
-                                            if isinstance(first_value, dict):
-                                                for key in ["prob", "score", "value"]:
-                                                    if key in first_value:
-                                                        metric_value = first_value[key]
-                                                        break
-                                                if metric_value is None:
-                                                    # Use first numeric value
-                                                    for key, value in first_value.items():
-                                                        if isinstance(value, (int, float, np.number)):
-                                                            metric_value = float(value)
+                                    # Extract metric value from result and append directly to step_values
+                                    metric_value = None
+                                    if isinstance(result, dict):
+                                        # Try common keys
+                                        if "agg_value" in result:
+                                            metric_value = result["agg_value"]
+                                        elif "value_by_index" in result:
+                                            # Extract value from first index
+                                            value_by_index = result["value_by_index"]
+                                            if value_by_index:
+                                                first_idx = list(value_by_index.keys())[0]
+                                                first_value = value_by_index[first_idx]
+                                                # Extract numeric value from first_value dict
+                                                if isinstance(first_value, dict):
+                                                    for key in ["prob", "score", "value"]:
+                                                        if key in first_value:
+                                                            metric_value = first_value[key]
                                                             break
-                                    elif "prob" in result:
-                                        metric_value = result["prob"]
-                                    elif "score" in result:
-                                        metric_value = result["score"]
-                                    else:
-                                        # Use first numeric value
-                                        for key, value in result.items():
-                                            if isinstance(value, (int, float, np.number)):
-                                                metric_value = float(value)
-                                                break
-                                elif isinstance(result, list) and len(result) > 0:
-                                    # List of dicts (common format)
-                                    result_dict = result[0]
-                                    if isinstance(result_dict, dict):
-                                        if "prob" in result_dict:
-                                            metric_value = result_dict["prob"]
-                                        elif "score" in result_dict:
-                                            metric_value = result_dict["score"]
+                                                    if metric_value is None:
+                                                        # Use first numeric value
+                                                        for key, value in first_value.items():
+                                                            if isinstance(value, (int, float, np.number)):
+                                                                metric_value = float(value)
+                                                                break
+                                        elif "prob" in result:
+                                            metric_value = result["prob"]
+                                        elif "score" in result:
+                                            metric_value = result["score"]
                                         else:
                                             # Use first numeric value
-                                            for key, value in result_dict.items():
+                                            for key, value in result.items():
                                                 if isinstance(value, (int, float, np.number)):
                                                     metric_value = float(value)
                                                     break
-                                elif isinstance(result, (int, float, np.number)):
-                                    metric_value = float(result)
+                                    elif isinstance(result, list) and len(result) > 0:
+                                        # List of dicts (common format)
+                                        result_dict = result[0]
+                                        if isinstance(result_dict, dict):
+                                            if "prob" in result_dict:
+                                                metric_value = result_dict["prob"]
+                                            elif "score" in result_dict:
+                                                metric_value = result_dict["score"]
+                                            else:
+                                                # Use first numeric value
+                                                for key, value in result_dict.items():
+                                                    if isinstance(value, (int, float, np.number)):
+                                                        metric_value = float(value)
+                                                        break
+                                    elif isinstance(result, (int, float, np.number)):
+                                        metric_value = float(result)
                             
-                                # Debug: log extraction_strength at first/last step for verification
-                                if metric_name == "extraction_strength" and step in (0, S - 1) and metric_value is not None:
-                                    logger.debug(
-                                        f"extraction_strength step={step} sample={idx_str}: value={metric_value}"
+                                    # Debug: log extraction_strength at first/last step for verification
+                                    if metric_name == "extraction_strength" and step in (0, S - 1) and metric_value is not None:
+                                        logger.debug(
+                                            f"extraction_strength step={step} sample={idx_str}: value={metric_value}"
+                                        )
+
+                                    # Append to step_values for aggregation
+                                    if metric_value is not None:
+                                        step_values[traj_name][step][metric_name].append(metric_value)
+                        
+                                except Exception as e:
+                                    logger.warning(
+                                        f"Error computing {metric_name} at step {step} for {traj_name}: {e}",
+                                        exc_info=True
                                     )
 
-                                # Append to step_values for aggregation
-                                if metric_value is not None:
-                                    step_values[traj_name][step][metric_name].append(metric_value)
-                        
-                            except Exception as e:
-                                logger.warning(
-                                    f"Error computing {metric_name} at step {step} for {traj_name}: {e}",
-                                    exc_info=True
-                                )
+                gpu_set_phase("trajectory_batch_end", batch_idx=batch_idx)
+                # Release batch-sized GPU data before next batch to avoid holding two batches in memory (OOM with many samples).
+                # R and F are references to out["R"] and out["F"]; deleting only 'out' leaves R, F alive (see reports/oom-investigation-why-still-oom.md).
+                # logits_history already deleted earlier in the loop after trajectories_from_logits.
+                del out, R, F
+                if torch.cuda.is_available():
+                    torch.cuda.empty_cache()
 
-            gpu_set_phase("trajectory_batch_end", batch_idx=batch_idx)
-            # Release batch-sized GPU data before next batch to avoid holding two batches in memory (OOM with many samples).
-            # R and F are references to out["R"] and out["F"]; deleting only 'out' leaves R, F alive (see reports/oom-investigation-why-still-oom.md).
-            del logits_history, out, R, F
-            if torch.cuda.is_available():
-                torch.cuda.empty_cache()
-
-    # Multi-dataset: run privleak dual trajectory after per-key loops
-    if multi_dataset and "forget" in data and "holdout" in data and "privleak" in loaded_metrics and privleak_needs_dual:
-        primary_data = data["forget"]
-        secondary_data = data["holdout"]
-        dataloader = DataLoader(primary_data, batch_size=batch_size, collate_fn=collator)
-        holdout_dataloader = DataLoader(secondary_data, batch_size=batch_size, collate_fn=collator)
-        logger.info("Privleak with dual dataset: generating trajectories for forget and holdout")
-        forget_traj = _generate_trajectories_for_dataloader(sampler, dataloader, trajectory_config)
-        holdout_traj = _generate_trajectories_for_dataloader(sampler, holdout_dataloader, trajectory_config)
-        if forget_traj and holdout_traj:
-            trajectories_by_key = {"forget": forget_traj, "holdout": holdout_traj}
-            S_dual = next(iter(forget_traj.values()))["S"]
-            try:
-                device = getattr(model, "device", None) or next(model.parameters()).device
-            except (StopIteration, AttributeError):
-                device = torch.device("cpu")
-            privleak_cfg = loaded_metrics["privleak"]["config"]
-            for step in range(S_dual):
-                gpu_set_phase("privleak_dual_step", step=step)
-                logits_by_key = {}
-                for key, traj_by_idx in trajectories_by_key.items():
-                    logits_by_key[key] = {
-                        idx: _get_logits_at_step(traj, "steps", step)
-                        for idx, traj in traj_by_idx.items()
+        # Multi-dataset: run privleak dual trajectory after per-key loops
+        if multi_dataset and "forget" in data and "holdout" in data and "privleak" in loaded_metrics and privleak_needs_dual:
+            primary_data = data["forget"]
+            secondary_data = data["holdout"]
+            dataloader = DataLoader(primary_data, batch_size=batch_size, collate_fn=collator)
+            holdout_dataloader = DataLoader(secondary_data, batch_size=batch_size, collate_fn=collator)
+            logger.info("Privleak with dual dataset: generating trajectories for forget and holdout")
+            gpu_set_phase("privleak_dual_forget")
+            forget_traj = _generate_trajectories_for_dataloader(sampler, dataloader, trajectory_config)
+            gpu_set_phase("privleak_dual_holdout")
+            holdout_traj = _generate_trajectories_for_dataloader(sampler, holdout_dataloader, trajectory_config)
+            if forget_traj and holdout_traj:
+                trajectories_by_key = {"forget": forget_traj, "holdout": holdout_traj}
+                S_dual = next(iter(forget_traj.values()))["S"]
+                try:
+                    device = getattr(model, "device", None) or next(model.parameters()).device
+                except (StopIteration, AttributeError):
+                    device = torch.device("cpu")
+                privleak_cfg = loaded_metrics["privleak"]["config"]
+                for step in range(S_dual):
+                    gpu_set_phase("privleak_dual_step", step=step)
+                    logits_by_key = {}
+                    for key, traj_by_idx in trajectories_by_key.items():
+                        logits_by_key[key] = {
+                            idx: _get_logits_at_step(traj, "steps", step)
+                            for idx, traj in traj_by_idx.items()
+                        }
+                    dual_wrapper = DualLogitModelWrapper(logits_by_key, device)
+                    kwargs_priv = {
+                        "data": {"forget": primary_data, "holdout": secondary_data},
+                        "collators": collator,
+                        "batch_size": batch_size,
+                        **{k: v for k, v in kwargs.items() if k not in ("tokenizer", "model", "data", "collators")},
                     }
-                dual_wrapper = DualLogitModelWrapper(logits_by_key, device)
-                kwargs_priv = {
-                    "data": {"forget": primary_data, "holdout": secondary_data},
-                    "collators": collator,
-                    "batch_size": batch_size,
-                    **{k: v for k, v in kwargs.items() if k not in ("tokenizer", "model", "data", "collators")},
-                }
-                pre_result = _compute_pre_compute_metrics_at_step(
-                    pre_compute_config=privleak_cfg.get("pre_compute", {}),
-                    logits=next(iter(logits_by_key["forget"].values())),
-                    batch_template={},
-                    tokenizer=tokenizer,
-                    sample_labels=None,
-                    sample_input_ids=torch.zeros(1),
-                    sample_prompt_len=0,
-                    sample_idx="0",
-                    model_wrapper_override=dual_wrapper,
-                    **kwargs_priv,
-                )
-                privleak_result = _get_metric_from_registry("privleak")._metric_fn(
-                    model=dual_wrapper,
-                    pre_compute=pre_result,
-                    reference_logs=kwargs.get("reference_logs"),
-                    ref_value=privleak_cfg.get("ref_value", 0.5),
-                    **{k: v for k, v in kwargs.items() if k not in ("model", "tokenizer", "pre_compute")},
-                )
-                for traj_name in trajectory_names:
-                    if step not in step_values[traj_name]:
-                        step_values[traj_name][step] = {m: [] for m in loaded_metrics}
-                    step_values[traj_name][step]["privleak"].append(privleak_result.get("agg_value"))
-        else:
-            logger.warning("Privleak dual trajectories empty, skipping privleak")
-
-    # Aggregate results: compute mean across samples for each step (after all batches)
-    agg_value = {}
-    for traj_name in trajectory_names:
-        agg_value[traj_name] = {}
-        for metric_name in loaded_metrics.keys():
-            # Collect values per step
-            step_metric_values = {}  # {step: [values across samples]}
-            if traj_name in step_values:
-                for step, metrics_dict in step_values[traj_name].items():
-                    if metric_name in metrics_dict and len(metrics_dict[metric_name]) > 0:
-                        step_metric_values[step] = metrics_dict[metric_name]
-            
-            # Aggregate: mean across samples for each step
-            if step_metric_values:
-                max_step = max(step_metric_values.keys())
-                aggregated = []
-                for step in range(max_step + 1):
-                    if step in step_metric_values:
-                        vals = step_metric_values[step]
-                        vals_clean = [float(v) if v is not None else np.nan for v in vals]
-                        aggregated.append(np.nanmean(vals_clean) if vals_clean else np.nan)
-                    else:
-                        aggregated.append(np.nan)
-                agg_value[traj_name][metric_name] = np.array(aggregated)
+                    pre_result = _compute_pre_compute_metrics_at_step(
+                        pre_compute_config=privleak_cfg.get("pre_compute", {}),
+                        logits=next(iter(logits_by_key["forget"].values())),
+                        batch_template={},
+                        tokenizer=tokenizer,
+                        sample_labels=None,
+                        sample_input_ids=torch.zeros(1),
+                        sample_prompt_len=0,
+                        sample_idx="0",
+                        model_wrapper_override=dual_wrapper,
+                        **kwargs_priv,
+                    )
+                    privleak_result = _get_metric_from_registry("privleak")._metric_fn(
+                        model=dual_wrapper,
+                        pre_compute=pre_result,
+                        reference_logs=kwargs.get("reference_logs"),
+                        ref_value=privleak_cfg.get("ref_value", 0.5),
+                        **{k: v for k, v in kwargs.items() if k not in ("model", "tokenizer", "pre_compute")},
+                    )
+                    for traj_name in trajectory_names:
+                        if step not in step_values[traj_name]:
+                            step_values[traj_name][step] = {m: [] for m in loaded_metrics}
+                        step_values[traj_name][step]["privleak"].append(privleak_result.get("agg_value"))
             else:
-                agg_value[traj_name][metric_name] = np.array([])
+                logger.warning("Privleak dual trajectories empty, skipping privleak")
+
+        # Aggregate results: compute mean across samples for each step (after all batches)
+        agg_value = {}
+        for traj_name in trajectory_names:
+            agg_value[traj_name] = {}
+            for metric_name in loaded_metrics.keys():
+                # Collect values per step
+                step_metric_values = {}  # {step: [values across samples]}
+                if traj_name in step_values:
+                    for step, metrics_dict in step_values[traj_name].items():
+                        if metric_name in metrics_dict and len(metrics_dict[metric_name]) > 0:
+                            step_metric_values[step] = metrics_dict[metric_name]
+            
+                # Aggregate: mean across samples for each step
+                if step_metric_values:
+                    max_step = max(step_metric_values.keys())
+                    aggregated = []
+                    for step in range(max_step + 1):
+                        if step in step_metric_values:
+                            vals = step_metric_values[step]
+                            vals_clean = [float(v) if v is not None else np.nan for v in vals]
+                            aggregated.append(np.nanmean(vals_clean) if vals_clean else np.nan)
+                        else:
+                            aggregated.append(np.nan)
+                    agg_value[traj_name][metric_name] = np.array(aggregated)
+                else:
+                    agg_value[traj_name][metric_name] = np.array([])
     
-    # #region agent log
-    if torch.cuda.is_available():
-        _debug_log(
-            "trajectory_metrics.py:trajectory_metrics:exit",
-            "trajectory_metrics exit",
-            {
-                "cuda_allocated_mib": round(torch.cuda.memory_allocated() / (1024**2), 2),
-                "cuda_max_allocated_mib": round(torch.cuda.max_memory_allocated() / (1024**2), 2),
-            },
-            hypothesis_id="B",
-        )
-    # #endregion
-
-    # Single-pass: return one result per display name so evaluator merges into logs.
-    internal_names = list(loaded_metrics.keys())
-    if full_display_order and len(full_display_order) >= len(full_internal_order):
-        # Map each (filtered) internal name to its display name by original config order
-        try:
-            display_names = [
-                full_display_order[full_internal_order.index(k)]
-                for k in internal_names
-                if k in full_internal_order
-            ]
-        except ValueError:
-            display_names = full_display_order[: len(internal_names)]
-    else:
-        display_names = list(full_display_order)[: len(internal_names)] if full_display_order else []
-    if len(display_names) == len(internal_names) and len(internal_names) > 0:
-        out = {}
-        for display_name, internal_name in zip(display_names, internal_names):
-            out[display_name] = {
-                "agg_value": {
-                    traj: {internal_name: agg_value[traj][internal_name]}
-                    for traj in trajectory_names
+        # #region agent log
+        if torch.cuda.is_available():
+            _debug_log(
+                "trajectory_metrics.py:trajectory_metrics:exit",
+                "trajectory_metrics exit",
+                {
+                    "cuda_allocated_mib": round(torch.cuda.memory_allocated() / (1024**2), 2),
+                    "cuda_max_allocated_mib": round(torch.cuda.max_memory_allocated() / (1024**2), 2),
                 },
-                "value_by_index": {},
-            }
-        return out
+                hypothesis_id="B",
+            )
+        # #endregion
 
-    return {
-        "agg_value": agg_value,
-        "value_by_index": {},  # Empty since we don't store per-sample trajectories
-    }
+        # Single-pass: return one result per display name so evaluator merges into logs.
+        internal_names = list(loaded_metrics.keys())
+        if full_display_order and len(full_display_order) >= len(full_internal_order):
+            # Map each (filtered) internal name to its display name by original config order
+            try:
+                display_names = [
+                    full_display_order[full_internal_order.index(k)]
+                    for k in internal_names
+                    if k in full_internal_order
+                ]
+            except ValueError:
+                display_names = full_display_order[: len(internal_names)]
+        else:
+            display_names = list(full_display_order)[: len(internal_names)] if full_display_order else []
+        if len(display_names) == len(internal_names) and len(internal_names) > 0:
+            out = {}
+            for display_name, internal_name in zip(display_names, internal_names):
+                out[display_name] = {
+                    "agg_value": {
+                        traj: {internal_name: agg_value[traj][internal_name]}
+                        for traj in trajectory_names
+                    },
+                    "value_by_index": {},
+                }
+            return out
+
+        return {
+            "agg_value": agg_value,
+            "value_by_index": {},  # Empty since we don't store per-sample trajectories
+        }
+
+
