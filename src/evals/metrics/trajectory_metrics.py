@@ -1250,6 +1250,11 @@ def trajectory_metrics(model, **kwargs):
                                     exc_info=True
                                 )
 
+            # Release batch-sized GPU data before next batch to avoid holding two batches in memory (OOM with many samples).
+            del logits_history, out
+            if torch.cuda.is_available():
+                torch.cuda.empty_cache()
+
     # Multi-dataset: run privleak dual trajectory after per-key loops
     if multi_dataset and "forget" in data and "holdout" in data and "privleak" in loaded_metrics and privleak_needs_dual:
         primary_data = data["forget"]

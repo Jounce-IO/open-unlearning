@@ -755,6 +755,93 @@ class TestTrajectoryMetricsIntegration:
         except Exception as e:
             assert "shape" not in str(e).lower() or "mismatch" not in str(e).lower()
 
+    def test_trajectory_metrics_multi_batch_releases_memory(self):
+        """Run trajectory_metrics over multiple batches (batch_size=1); regression test for batch memory release.
+        Ensures we complete without OOM and aggregate over all samples (del logits_history, out between batches)."""
+        import numpy as np
+
+        V, L_gen, S = 50, 6, 4
+        full_len = 5 + L_gen
+        num_samples = 5
+
+        class MockSamplerOutput:
+            def __init__(self, sequences, histories, logits_history, fixation_steps):
+                self.sequences = sequences
+                self.histories = histories
+                self.logits_history = logits_history
+                self.fixation_steps = fixation_steps
+
+        # One sampler output per batch (each batch gets its own logits so we exercise the full loop + del path)
+        sampler = Mock()
+        outputs = []
+        for _ in range(num_samples):
+            lh = [torch.randn(1, full_len, V) for _ in range(S)]
+            fix = torch.randint(0, S, (1, full_len))
+            outputs.append(
+                MockSamplerOutput(
+                    sequences=torch.randint(0, V, (1, full_len)),
+                    histories=None,
+                    logits_history=lh,
+                    fixation_steps=fix,
+                )
+            )
+        sampler.sample.side_effect = outputs
+
+        model = Mock()
+        model.sampler = sampler
+
+        class MockDataset:
+            def __init__(self):
+                self.data = [
+                    {"input_ids": torch.randint(0, V, (full_len,)), "labels": torch.randint(0, V, (full_len,))}
+                    for _ in range(num_samples)
+                ]
+
+            def __len__(self):
+                return len(self.data)
+
+            def __getitem__(self, idx):
+                return self.data[idx]
+
+        def mock_collator(batch):
+            return {
+                "input_ids": torch.stack([b["input_ids"] for b in batch]),
+                "labels": torch.stack([b["labels"] for b in batch]),
+                "indices": torch.tensor(list(range(len(batch)))),
+            }
+
+        tokenizer = Mock()
+        tokenizer.decode = lambda x, **kwargs: "decoded text"
+
+        result = trajectory_metrics(
+            model,
+            metric_name="trajectory_metrics",
+            cache={},
+            metrics=["probability"],
+            data=MockDataset(),
+            collators=mock_collator,
+            tokenizer=tokenizer,
+            batch_size=1,
+            trajectory_config={
+                "return_logits": True,
+                "return_fixation_steps": True,
+                "sampler_kwargs": {"steps": S, "max_new_tokens": L_gen},
+            },
+        )
+        assert result is not None
+        assert "agg_value" in result
+        agg = result["agg_value"]
+        assert isinstance(agg, dict)
+        for traj_name, metrics_dict in agg.items():
+            assert isinstance(metrics_dict, dict)
+            for metric_name, arr in metrics_dict.items():
+                arr = np.asarray(arr)
+                assert arr.size > 0, f"traj={traj_name} metric={metric_name} should have aggregated values"
+                # We had num_samples batches of 1 sample each => aggregation over num_samples values per step
+                assert arr.shape[0] == S, f"expected S={S} steps, got {arr.shape[0]}"
+        # Sampler should have been called once per batch
+        assert sampler.sample.call_count == num_samples
+
 
 class TestDynamicMetricLoading:
     """Tests for dynamic metric loading from registry."""
