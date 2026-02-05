@@ -37,6 +37,7 @@ from evals.metrics.trajectory_adapters import (
     compute_logit_metric_at_step,
     compute_text_metric_at_step,
 )
+from evals.gpu_phase_logger import set_phase as gpu_set_phase
 
 logger = logging.getLogger("evaluator")
 
@@ -748,6 +749,7 @@ def trajectory_metrics(model, **kwargs):
         except Exception:
             pass
     # #endregion
+    gpu_set_phase("trajectory_entry")
     """
     Compute metrics along diffusion trajectories.
     
@@ -918,9 +920,11 @@ def trajectory_metrics(model, **kwargs):
     trajectories_by_key = None
     if privleak_needs_dual and not multi_dataset:
         logger.info("Privleak with dual dataset: generating trajectories for forget and holdout")
+        gpu_set_phase("privleak_dual_forget")
         forget_traj = _generate_trajectories_for_dataloader(
             sampler, dataloader, trajectory_config
         )
+        gpu_set_phase("privleak_dual_holdout")
         holdout_traj = _generate_trajectories_for_dataloader(
             sampler, holdout_dataloader, trajectory_config
         )
@@ -933,6 +937,7 @@ def trajectory_metrics(model, **kwargs):
                 device = torch.device("cpu")
             privleak_cfg = loaded_metrics["privleak"]["config"]
             for step in range(S_dual):
+                gpu_set_phase("privleak_dual_step", step=step)
                 logits_by_key = {}
                 for key, traj_by_idx in trajectories_by_key.items():
                     logits_by_key[key] = {
@@ -991,6 +996,7 @@ def trajectory_metrics(model, **kwargs):
 
     # Process each batch
         for batch_idx, batch in enumerate(dataloader):
+            gpu_set_phase("trajectory_batch_start", batch_idx=batch_idx)
             input_ids = batch["input_ids"]
             labels = batch.get("labels")
             attention_mask = batch.get("attention_mask")
@@ -1026,11 +1032,12 @@ def trajectory_metrics(model, **kwargs):
                 return_logits=True,
                 **trajectory_config.get("sampler_kwargs", {}),
             )
-        
+            gpu_set_phase("trajectory_after_sampler", batch_idx=batch_idx)
+
             # Extract logits and fixation steps
             logits_history = sampler_output.logits_history
             fixation_steps = sampler_output.fixation_steps
-        
+
             if logits_history is None or len(logits_history) == 0:
                 logger.warning(f"Batch {batch_idx}: No logits_history returned from sampler")
                 continue
@@ -1059,6 +1066,7 @@ def trajectory_metrics(model, **kwargs):
                 logits_history, fixation_steps, prompt_lens, return_trajectory_tensors=False
             )
             R, F, S, L = out["R"], out["F"], out["S"], out["L"]
+            gpu_set_phase("trajectory_after_trajectories", batch_idx=batch_idx)
             # #region agent log
             if batch_idx == 0:
                 _debug_log(
@@ -1159,10 +1167,12 @@ def trajectory_metrics(model, **kwargs):
                             try:
                                 metric = metric_info["metric"]
                                 metric_cfg = metric_info["config"]
-                            
+
                                 # Skip privleak in main loop when already computed via dual-trajectory flow
                                 if metric_name == "privleak" and trajectories_by_key is not None:
                                     continue
+
+                                gpu_set_phase("trajectory_metric", metric=metric_name, batch_idx=batch_idx, step=step)
 
                                 # Call metric at this step
                                 # Remove tokenizer from kwargs if present to avoid duplicate argument
@@ -1250,8 +1260,10 @@ def trajectory_metrics(model, **kwargs):
                                     exc_info=True
                                 )
 
+            gpu_set_phase("trajectory_batch_end", batch_idx=batch_idx)
             # Release batch-sized GPU data before next batch to avoid holding two batches in memory (OOM with many samples).
-            del logits_history, out
+            # R and F are references to out["R"] and out["F"]; deleting only 'out' leaves R, F alive (see reports/oom-investigation-why-still-oom.md).
+            del logits_history, out, R, F
             if torch.cuda.is_available():
                 torch.cuda.empty_cache()
 
@@ -1273,6 +1285,7 @@ def trajectory_metrics(model, **kwargs):
                 device = torch.device("cpu")
             privleak_cfg = loaded_metrics["privleak"]["config"]
             for step in range(S_dual):
+                gpu_set_phase("privleak_dual_step", step=step)
                 logits_by_key = {}
                 for key, traj_by_idx in trajectories_by_key.items():
                     logits_by_key[key] = {
