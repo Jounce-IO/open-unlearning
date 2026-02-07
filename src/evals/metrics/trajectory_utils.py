@@ -194,14 +194,23 @@ def trajectories_from_logits(
     a saved file (logits_history, fixation_steps, prompt_lens) to get deterministic
     trajectory tensors. Useful for testing and offline analysis.
 
+    Supports two contracts (detected by shape):
+
+    - **Full-sequence:** logits_history entries are [B, L_full, V] with L_full = prompt
+      + generated; fixation_steps is [B, L_full]. We slice to the generated region using
+      prompt_lens (R = stacked logits without prompt positions; F = fixation slice).
+    - **Generated-only:** logits_history entries are [B, L_gen, V] (generated region
+      only); fixation_steps is still [B, T_full] with T_full > L_gen. We use R = stack
+      as-is (no slice) and slice fixation_steps to the generated region for F.
+      Detection: when logits_history[0].shape[1] < fixation_steps.shape[1].
+
     Args:
-        logits_history: List of S tensors, each [B, L_full, V] (one per diffusion step).
+        logits_history: List of S tensors. Full-sequence: each [B, L_full, V].
+            Generated-only: each [B, L_gen, V].
         fixation_steps: [B, T_full] long tensor; step index where each position was fixed.
         prompt_lens: Length-B list (or 1-d tensor) of prompt lengths per sample.
-            Used to slice the generated region (after max(prompt_lens)).
-        return_trajectory_tensors: If True (default), call compute_trajectories and return
-            steps, fixation_start, fixation_end, fixation_ratio. If False, return only
-            R, F, S, L for on-demand step computation.
+        return_trajectory_tensors: If True (default), return trajectory tensors; if False,
+            return only R, F, S, L.
 
     Returns:
         If return_trajectory_tensors=True: dict with "steps", "fixation_start",
@@ -224,15 +233,17 @@ def trajectories_from_logits(
             f"prompt_lens length {len(prompt_lens)} must match batch size B={B}"
         )
 
+    L_logits = logits_history[0].shape[1]
+    T_fixation = fixation_steps.shape[1]
     max_prompt_len = max(prompt_lens)
-    generated_len = T_full - max_prompt_len
-    R = R_full[:, :, max_prompt_len : max_prompt_len + generated_len, :]  # [B, V, L, S]
-    _, _, L, _ = R.shape
 
-    F_list = []
-    for b in range(B):
-        F_full = fixation_steps[b]
-        if F_full.shape[0] > max_prompt_len:
+    if L_logits < T_fixation:
+        # Generated-only: logits are [B, L_gen, V]; fixation_steps is [B, T_full].
+        R = R_full
+        L = L_logits
+        F_list = []
+        for b in range(B):
+            F_full = fixation_steps[b]
             slice_F = F_full[max_prompt_len : max_prompt_len + L]
             if slice_F.shape[0] >= L:
                 F_b = slice_F[:L]
@@ -248,12 +259,39 @@ def trajectories_from_logits(
                         ),
                     ]
                 )
-        else:
-            F_b = torch.full(
-                (L,), S - 1, dtype=torch.long, device=F_full.device
-            )
-        F_list.append(F_b)
-    F = torch.stack(F_list, dim=0)  # [B, L]
+            F_list.append(F_b)
+        F = torch.stack(F_list, dim=0)  # [B, L]
+    else:
+        # Full-sequence: slice R and F to generated region.
+        generated_len = T_full - max_prompt_len
+        R = R_full[:, :, max_prompt_len : max_prompt_len + generated_len, :]  # [B, V, L, S]
+        _, _, L, _ = R.shape
+
+        F_list = []
+        for b in range(B):
+            F_full = fixation_steps[b]
+            if F_full.shape[0] > max_prompt_len:
+                slice_F = F_full[max_prompt_len : max_prompt_len + L]
+                if slice_F.shape[0] >= L:
+                    F_b = slice_F[:L]
+                else:
+                    F_b = torch.cat(
+                        [
+                            slice_F,
+                            torch.full(
+                                (L - slice_F.shape[0],),
+                                S - 1,
+                                dtype=torch.long,
+                                device=F_full.device,
+                            ),
+                        ]
+                    )
+            else:
+                F_b = torch.full(
+                    (L,), S - 1, dtype=torch.long, device=F_full.device
+                )
+            F_list.append(F_b)
+        F = torch.stack(F_list, dim=0)  # [B, L]
 
     if not return_trajectory_tensors:
         return {"R": R, "F": F, "S": S, "L": L}
