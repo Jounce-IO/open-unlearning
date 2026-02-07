@@ -152,6 +152,16 @@ def tokenwise_logprobs(model, batch, grad=False, return_labels=False):
 
     logits = output.logits
     bsz, seq_len, V = logits.shape
+    # Trim batch to logits length so next_tokens and log_probs align (avoids RuntimeError when
+    # caller passes longer sequences, e.g. trajectory step with full-length batch).
+    if batch["input_ids"].shape[1] > seq_len:
+        batch["input_ids"] = batch["input_ids"][:, :seq_len]
+    if batch.get("labels") is not None and isinstance(batch["labels"], torch.Tensor):
+        if batch["labels"].shape[1] > seq_len:
+            batch["labels"] = batch["labels"][:, :seq_len]
+    if batch.get("attention_mask") is not None and isinstance(batch["attention_mask"], torch.Tensor):
+        if batch["attention_mask"].shape[1] > seq_len:
+            batch["attention_mask"] = batch["attention_mask"][:, :seq_len]
     log_probs = torch.nn.functional.log_softmax(logits, dim=-1)[:, :-1, :]
     # ^ we don't predict next token for last token, bsz x seq_len-1 x V
     next_tokens = batch["input_ids"][:, 1:].unsqueeze(-1)  # bsz x seq_len-1 x 1

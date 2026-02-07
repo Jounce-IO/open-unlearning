@@ -44,11 +44,9 @@ logger = logging.getLogger("evaluator")
 # #region agent log
 _DEBUG_LOG_PATH = "/workspaces/dllm/.cursor/debug.log"
 
-def _debug_log(location: str, message: str, data: dict, hypothesis_id: Union[str, List[str]] = None):
+def _debug_log(location: str, message: str, data: dict):
     import json
-    payload = {"sessionId": "debug-session", "location": location, "message": message, "data": data, "timestamp": int(time.time() * 1000)}
-    if hypothesis_id is not None:
-        payload["hypothesisId"] = hypothesis_id if isinstance(hypothesis_id, str) else ",".join(hypothesis_id)
+    payload = {"location": location, "message": message, "data": data, "timestamp": int(time.time() * 1000)}
     line = json.dumps(payload) + "\n"
     try:
         with open(_DEBUG_LOG_PATH, "a") as f:
@@ -741,12 +739,11 @@ def trajectory_metrics(model, **kwargs):
                     )
                 ),
             },
-            hypothesis_id="C",
         )
         if torch.cuda.is_available():
             try:
                 stats = torch.cuda.memory_stats()
-                _debug_log("trajectory_metrics.py:trajectory_metrics:entry_stats", "cuda memory_stats at entry", {"allocator_stats_keys": list(stats.keys())[:20]}, hypothesis_id="B")
+                _debug_log("trajectory_metrics.py:trajectory_metrics:entry_stats", "cuda memory_stats at entry", {"allocator_stats_keys": list(stats.keys())[:20]})
             except Exception:
                 pass
         # #endregion
@@ -1059,9 +1056,8 @@ def trajectory_metrics(model, **kwargs):
                             "cuda_allocated_mib": round(torch.cuda.memory_allocated() / (1024**2), 2),
                             "cuda_max_allocated_mib": round(torch.cuda.max_memory_allocated() / (1024**2), 2),
                         },
-                        hypothesis_id="B",
                     )
-                _debug_log("trajectory_metrics.py:trajectories_from_logits:call", "calling trajectories_from_logits", {"return_trajectory_tensors": False, "batch_idx": batch_idx}, hypothesis_id="C")
+                _debug_log("trajectory_metrics.py:trajectories_from_logits:call", "calling trajectories_from_logits", {"return_trajectory_tensors": False, "batch_idx": batch_idx})
                 # #endregion
                 out = trajectories_from_logits(
                     logits_history, fixation_steps, prompt_lens, return_trajectory_tensors=False
@@ -1081,7 +1077,6 @@ def trajectory_metrics(model, **kwargs):
                             "cuda_allocated_mib": round(torch.cuda.memory_allocated() / (1024**2), 2) if torch.cuda.is_available() else None,
                             "cuda_max_allocated_mib": round(torch.cuda.max_memory_allocated() / (1024**2), 2) if torch.cuda.is_available() else None,
                         },
-                        hypothesis_id="A,B",
                     )
                 # #endregion
 
@@ -1117,9 +1112,18 @@ def trajectory_metrics(model, **kwargs):
                         generated_labels = None
             
                     # Create batch template for logit metrics
-                    # Use only generated portion to match logits shape
+                    # Use generated token IDs so metrics that use input_ids (e.g. mia_min_k via tokenwise_logprobs)
+                    # score log P(actual next token) at each position, not dummy zeros.
+                    generated_input_ids = sample_input_ids[sample_prompt_len : sample_prompt_len + L]
+                    if generated_input_ids.shape[0] < L:
+                        padding = torch.zeros(
+                            L - generated_input_ids.shape[0],
+                            dtype=generated_input_ids.dtype,
+                            device=sample_input_ids.device,
+                        )
+                        generated_input_ids = torch.cat([generated_input_ids, padding])
                     batch_template = {
-                        "input_ids": torch.zeros((1, L), dtype=torch.long, device=sample_input_ids.device),  # Dummy input_ids, not used by metrics
+                        "input_ids": generated_input_ids.unsqueeze(0),
                         "labels": generated_labels.unsqueeze(0) if generated_labels is not None else None,
                         "attention_mask": torch.ones((1, L), dtype=torch.long, device=sample_input_ids.device),  # All positions valid
                         "index": torch.tensor([int(idx_str)], dtype=torch.long, device=sample_input_ids.device),  # Required by run_batchwise_evals
@@ -1160,7 +1164,6 @@ def trajectory_metrics(model, **kwargs):
                                         "cuda_allocated_mib": round(torch.cuda.memory_allocated() / (1024**2), 2) if torch.cuda.is_available() else None,
                                         "cuda_max_allocated_mib": round(torch.cuda.max_memory_allocated() / (1024**2), 2) if torch.cuda.is_available() else None,
                                     },
-                                    hypothesis_id="A,B",
                                 )
                             # #endregion
 
@@ -1366,7 +1369,6 @@ def trajectory_metrics(model, **kwargs):
                     "cuda_allocated_mib": round(torch.cuda.memory_allocated() / (1024**2), 2),
                     "cuda_max_allocated_mib": round(torch.cuda.max_memory_allocated() / (1024**2), 2),
                 },
-                hypothesis_id="B",
             )
         # #endregion
 
