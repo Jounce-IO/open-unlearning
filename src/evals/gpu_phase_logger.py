@@ -1,9 +1,10 @@
 """
-Temporary GPU phase logger for OOM investigation.
+Optional GPU phase logger for correlation with the GPU monitor script.
 
-Writes current phase/metric/batch_idx/step to a file so the GPU monitor script
-can correlate nvidia-smi samples with exact eval phase. Set GPU_PHASE_FILE to
-enable (e.g. /tmp/gpu_phase.txt). This code will be removed after investigation.
+Writes current phase, metric, batch_idx, and step to a file so the monitor script
+(scripts/k8s/monitor_gpu_during_eval.sh) can correlate nvidia-smi samples with
+the exact eval phase. Set GPU_PHASE_FILE in the environment to enable
+(e.g. /tmp/gpu_phase.txt). When unset, set_phase is a no-op.
 """
 
 import os
@@ -19,7 +20,7 @@ def set_phase(
     batch_idx: int | None = None,
     step: int | None = None,
 ) -> None:
-    """Write current phase to GPU_PHASE_FILE for correlation with GPU monitor log."""
+    """Write current phase to GPU_PHASE_FILE for correlation with the GPU monitor log."""
     path = _phase_file_path()
     if not path:
         return
