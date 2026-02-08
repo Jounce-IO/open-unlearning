@@ -4,6 +4,7 @@ import logging
 import numpy as np
 from evals.metrics import get_metrics
 from evals.metrics.privacy import log_retain_logs_path_none_if_needed
+from data import get_datasets, get_collators
 
 logger = logging.getLogger("evaluator")
 
@@ -65,7 +66,8 @@ class Evaluator:
 
     def save_logs(self, logs, file):
         """Save the logs in a json file"""
-        logs = dict(sorted(logs.items()))
+        logs = {str(k): v for k, v in logs.items()}
+        logs = dict(sorted(logs.items(), key=lambda x: x[0]))
         # Remove value_by_index (used for calculations but not needed in final JSON)
         logs = self._remove_value_by_index(logs)
         # Convert numpy arrays to lists for JSON serialization
@@ -138,7 +140,121 @@ class Evaluator:
         )
         logger.info(f"Evaluations will be saved to: {logs_file_path}")
         logger.info(f"Evaluating {len(self.metrics)} metrics: {list(self.metrics.keys())}")
+
+        # Coalesce multiple trajectory_metrics into one call (one model pass, all sub-metrics)
+        from omegaconf import OmegaConf
+        trajectory_names = [
+            n for n, m in self.metrics.items()
+            if getattr(m, "name", None) == "trajectory_metrics"
+        ]
+        coalesced_done = set()
+        if len(trajectory_names) >= 2:
+            first_cfg = self.eval_cfg.metrics[trajectory_names[0]]
+            merged_metrics = {}
+            merged_display_names = []
+            for name in trajectory_names:
+                cfg = self.eval_cfg.metrics[name]
+                m = cfg.get("metrics")
+                d = cfg.get("metric_display_names")
+                if d is None:
+                    d = [name]
+                elif not isinstance(d, (list, tuple)):
+                    d = [d]
+                d = list(d)
+                if m is None:
+                    continue
+                try:
+                    from omegaconf import ListConfig, DictConfig
+                except ImportError:
+                    ListConfig = ()
+                    DictConfig = ()
+                if isinstance(m, (list, tuple, ListConfig)):
+                    m_list = list(m)
+                    m_cfg = cfg.get("metrics")
+                    m_cfg = OmegaConf.to_container(m_cfg, resolve=True) if m_cfg is not None else {}
+                    m_cfg = dict(m_cfg) if isinstance(m_cfg, dict) else {}
+                    for i, subm in enumerate(m_list):
+                        merged_metrics[subm] = m_cfg.get(subm, {})
+                        merged_display_names.append(d[i] if i < len(d) else name)
+                else:
+                    m_container = OmegaConf.to_container(m, resolve=True) if hasattr(m, "items") else m
+                    m_dict = dict(m_container) if isinstance(m_container, dict) else {}
+                    for i, (subm, subcfg) in enumerate(m_dict.items()):
+                        merged_metrics[subm] = dict(subcfg) if isinstance(subcfg, dict) else subcfg
+                        merged_display_names.append(d[i] if i < len(d) else name)
+
+            skip_coalesced = (
+                not overwrite
+                and merged_display_names
+                and all(disp in logs and logs.get(disp) for disp in merged_display_names)
+            )
+            if not skip_coalesced:
+                base_kwargs = {
+                    "tokenizer": kwargs.get("tokenizer", None),
+                    "template_args": kwargs.get("template_args", None),
+                }
+                if self.eval_cfg.get("samples") is not None:
+                    base_kwargs["samples"] = self.eval_cfg.samples
+
+                shared_data = None
+                shared_collators = None
+                if first_cfg.get("datasets") is not None and first_cfg.get("collators") is not None:
+                    try:
+                        shared_data = get_datasets(
+                            first_cfg.get("datasets"), **base_kwargs
+                        )
+                        shared_collators = get_collators(
+                            collator_cfgs=first_cfg.get("collators"),
+                            tokenizer=base_kwargs.get("tokenizer"),
+                        )
+                    except Exception as e:
+                        logger.warning(
+                            f"Could not pre-load shared data for coalesced trajectory metrics: {e}. "
+                            "Each metric will load its own data."
+                        )
+
+                merged_kwargs = {
+                    k: v for k, v in first_cfg.items()
+                    if k not in ("datasets", "collators")
+                }
+                merged_kwargs["metrics"] = merged_metrics
+                merged_kwargs["metric_display_names"] = merged_display_names
+                if shared_data is not None:
+                    merged_kwargs["data"] = shared_data
+                if shared_collators is not None:
+                    merged_kwargs["collators"] = shared_collators
+
+                if overwrite:
+                    for disp in merged_display_names:
+                        _ = logs.pop(disp, None)
+
+                log_retain_logs_path_none_if_needed(
+                    "start of coalesced trajectory metrics",
+                    {trajectory_names[0]: first_cfg},
+                    self.eval_cfg.get("retain_logs_path"),
+                )
+                first_metric_fn = self.metrics[trajectory_names[0]]
+                result = first_metric_fn(
+                    model,
+                    metric_name=trajectory_names[0],
+                    cache=logs,
+                    **base_kwargs,
+                    **merged_kwargs,
+                )
+                if isinstance(result, dict) and result and not any(
+                    k in result for k in ("agg_value", "value_by_index")
+                ):
+                    for disp in result:
+                        if isinstance(result.get(disp), dict) and "agg_value" in result[disp]:
+                            logger.info(
+                                f"Result for {disp}:\t{result[disp]['agg_value']}"
+                            )
+                self.save_logs(logs, logs_file_path)
+            coalesced_done = set(trajectory_names)
+
         for metric_name, metric_fn in self.metrics.items():
+            if metric_name in coalesced_done:
+                continue
             metric_cfg = self.eval_cfg.metrics[metric_name]
             metric_display_names = metric_cfg.get("metric_display_names", None)
             if metric_display_names is not None:

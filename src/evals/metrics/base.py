@@ -64,17 +64,19 @@ class UnlearningMetric:
         Returns:
             Dict: Updated kwargs with datasets, collators, pre_compute results loaded
         """
-        # Load datasets
-        dataset_cfgs = kwargs.pop("datasets", None)
-        if dataset_cfgs is not None:
-            data = self.get_datasets(dataset_cfgs=dataset_cfgs, **kwargs)
-            kwargs.update({"data": data})
+        # Load datasets only when not already provided (e.g. by Evaluator for coalesced trajectory run)
+        if kwargs.get("data") is None:
+            dataset_cfgs = kwargs.pop("datasets", None)
+            if dataset_cfgs is not None:
+                data = self.get_datasets(dataset_cfgs=dataset_cfgs, **kwargs)
+                kwargs.update({"data": data})
 
-        # Load collators
-        collator_cfgs = kwargs.pop("collators", None)
-        if collator_cfgs is not None:
-            collators = self.get_collators(collator_cfgs=collator_cfgs, **kwargs)
-            kwargs.update({"collators": collators})
+        # Load collators only when not already provided (e.g. by Evaluator for coalesced trajectory run)
+        if kwargs.get("collators") is None:
+            collator_cfgs = kwargs.pop("collators", None)
+            if collator_cfgs is not None:
+                collators = self.get_collators(collator_cfgs=collator_cfgs, **kwargs)
+                kwargs.update({"collators": collators})
 
         # Evaluate precompute and load results
         pre_compute_cfgs = kwargs.pop("pre_compute", {})
