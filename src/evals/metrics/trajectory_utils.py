@@ -293,6 +293,9 @@ def trajectories_from_logits(
             F_list.append(F_b)
         F = torch.stack(F_list, dim=0)  # [B, L]
 
+    # Ensure F is on same device as R (e.g. when R is on CPU from gpu_memory_light offload)
+    F = F.to(R.device)
+
     if not return_trajectory_tensors:
         return {"R": R, "F": F, "S": S, "L": L}
 
