@@ -1,0 +1,19 @@
+# @package eval.tofu_trajectory_multi
+# Two trajectory_metrics entries so evaluator coalesces into one model pass (single-model-pass feature).
+# Same structure as tofu_trajectory; metrics reference eval.tofu_trajectory.* (set via overrides).
+
+defaults:
+  - tofu_metrics_multi:
+    - trajectory_forget_Q_A_Prob
+    - trajectory_forget_Q_A_ROUGE
+
+handler: TOFUEvaluator
+output_dir: ${paths.output_dir}
+metrics: {}
+samples: null
+overwrite: false
+forget_split: forget10
+holdout_split: holdout10
+retain_logs_path: null
+question_key: "question"
+batch_size: 32
