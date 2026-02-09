@@ -135,6 +135,8 @@ class UnlearningMetric:
         metric_kwargs = self.prepare_kwargs_evaluate_metric(
             model, metric_name, cache, **kwargs
         )
+        metric_kwargs["metric_name"] = metric_name
+        metric_kwargs["cache"] = cache
         results = self.evaluate_metric(model, metric_name, **metric_kwargs)
         cache.update({metric_name: results})
         return results
