@@ -138,6 +138,98 @@ class Evaluator:
         )
         logger.info(f"Evaluations will be saved to: {logs_file_path}")
         logger.info(f"Evaluating {len(self.metrics)} metrics: {list(self.metrics.keys())}")
+
+        # Coalesced trajectory: one call to trajectory_metrics with all metrics (one sampler pass).
+        coalesce = self.eval_cfg.get("coalesce_trajectory_metrics", False)
+        metrics_cfg = self.eval_cfg.metrics
+        handlers = []
+        for m in self.metrics:
+            cfg = metrics_cfg.get(m)
+            handlers.append(cfg.get("handler") if cfg is not None and hasattr(cfg, "get") else None)
+        all_trajectory = (
+            coalesce
+            and len(self.metrics) >= 2
+            and all(h == "trajectory_metrics" for h in handlers if h is not None)
+        )
+        if all_trajectory:
+            already = [m for m in self.metrics if not overwrite and m in logs and logs[m]]
+            if len(already) == len(self.metrics):
+                for metric_name in self.metrics:
+                    logger.info(f"Skipping {metric_name}, already evaluated.")
+                    if logs.get(metric_name, {}).get("agg_value") is not None:
+                        logger.info(
+                            f"Result for metric {metric_name}:\t{logs[metric_name]['agg_value']}"
+                        )
+                return self.summarize(logs)
+            for m in self.metrics:
+                _ = logs.pop(m, None)
+            first_name = next(iter(self.metrics))
+            first_metric = self.metrics[first_name]
+            first_cfg = metrics_cfg[first_name]
+            base_kwargs = {
+                "tokenizer": kwargs.get("tokenizer"),
+                "template_args": kwargs.get("template_args"),
+            }
+            if self.eval_cfg.get("samples") is not None:
+                base_kwargs["samples"] = self.eval_cfg.samples
+            data = first_metric.get_datasets(
+                dataset_cfgs=first_cfg.get("datasets"), **base_kwargs
+            )
+            collators = first_metric.get_collators(
+                collator_cfgs=first_cfg.get("collators"), **base_kwargs
+            )
+            trajectory_config = first_cfg.get("trajectory_config") or {}
+            batch_size = first_cfg.get("batch_size", 1)
+            # Merge metrics config: trajectory_metrics expects metrics (list or dict) and metric_display_names.
+            merged_metrics = {}
+            for m in self.metrics:
+                cfg = metrics_cfg.get(m)
+                mc = cfg.get("metrics") if cfg is not None and hasattr(cfg, "get") else []
+                if mc is None:
+                    mc = []
+                if isinstance(mc, (list, tuple)):
+                    for name in mc:
+                        merged_metrics[name] = {}
+                elif hasattr(mc, "items"):
+                    merged_metrics.update(dict(mc))
+            for m in self.metrics:
+                mcfg = metrics_cfg.get(m)
+                if mcfg is not None and hasattr(mcfg, "get") and mcfg.get("rouge_type") is not None:
+                    if "rouge" in merged_metrics:
+                        merged_metrics["rouge"] = merged_metrics.get("rouge") or {}
+                        merged_metrics["rouge"]["rouge_type"] = mcfg.get("rouge_type", "rougeL_recall")
+                    break
+            if "rouge" in merged_metrics and not merged_metrics["rouge"]:
+                merged_metrics["rouge"] = {"rouge_type": "rougeL_recall"}
+            metric_display_names = list(self.metrics.keys())
+            merged_args = {
+                "data": data,
+                "collators": collators,
+                "trajectory_config": trajectory_config,
+                "batch_size": batch_size,
+                "metrics": merged_metrics,
+                "metric_display_names": metric_display_names,
+                **base_kwargs,
+            }
+            result = first_metric(
+                model,
+                metric_name=first_name,
+                cache=logs,
+                **merged_args,
+            )
+            if isinstance(result, dict) and all(
+                isinstance(v, dict) and "agg_value" in v for v in result.values()
+            ):
+                for k, v in result.items():
+                    logs[k] = v
+            else:
+                logs[first_name] = result
+            for metric_name in self.metrics:
+                if logs.get(metric_name, {}).get("agg_value") is not None:
+                    logger.info(f"Result for metric {metric_name}:\t{logs[metric_name]['agg_value']}")
+            self.save_logs(logs, logs_file_path)
+            return self.summarize(logs)
+
         for metric_name, metric_fn in self.metrics.items():
             metric_cfg = self.eval_cfg.metrics[metric_name]
             metric_display_names = metric_cfg.get("metric_display_names", None)
