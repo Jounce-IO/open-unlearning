@@ -1064,18 +1064,6 @@ def trajectory_metrics(model, **kwargs):
                 )
                 R, F, S, L = out["R"], out["F"], out["S"], out["L"]
                 del logits_history # Release list of tensors immediately after stacking/slicing
-                # When gpu_memory_light was used, R and F are on CPU; move to GPU for metric computation (faster than CPU path).
-                try:
-                    gpu_device = next(model.parameters()).device
-                except (StopIteration, AttributeError):
-                    gpu_device = None
-                if (
-                    gpu_device is not None
-                    and gpu_device.type == "cuda"
-                    and R.device.type == "cpu"
-                ):
-                    R = R.to(gpu_device)
-                    F = F.to(gpu_device)
                 gpu_set_phase("trajectory_after_trajectories", batch_idx=batch_idx)
                 # #region agent log
                 if batch_idx == 0:

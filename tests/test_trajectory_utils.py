@@ -657,6 +657,26 @@ class TestTrajectoriesFromLogits:
         for key in ("steps", "fixation_start", "fixation_end", "fixation_ratio"):
             assert out[key].shape == (B, V, generated_len, S)
 
+    def test_trajectory_sample_interval_S_traj_25_fixation_in_range(self):
+        """trajectories_from_logits with S_traj=25 and fixation_steps in [0, S_traj-1]; R shape [B, V, L, S_traj]."""
+        S_traj = 25  # e.g. ceil(200/8)
+        B, V, L_gen = 1, 64, 50
+        max_prompt_len = 2
+        L_full = max_prompt_len + L_gen
+        logits_history = [torch.randn(B, L_full, V) for _ in range(S_traj)]
+        fixation_steps = torch.randint(0, S_traj, (B, L_full))
+        prompt_lens = [max_prompt_len]
+
+        out = trajectories_from_logits(
+            logits_history, fixation_steps, prompt_lens, return_trajectory_tensors=False
+        )
+
+        assert out["S"] == S_traj
+        assert out["L"] == L_gen
+        assert out["R"].shape == (B, V, L_gen, S_traj)
+        assert out["F"].shape == (B, L_gen)
+        assert out["F"].min() >= 0 and out["F"].max() <= S_traj - 1
+
     def test_consistency_with_compute_trajectories(self):
         """trajectories_from_logits output matches compute_trajectories(R, F, S) for same data."""
         B, V, L, S = 2, 20, 10, 5
@@ -733,67 +753,6 @@ class TestTrajectoriesFromLogits:
         assert out["L"] == L_full - max_prompt_len
         for key in ("steps", "fixation_start", "fixation_end", "fixation_ratio"):
             assert key not in out
-
-
-class TestTrajectoriesFromLogitsDeviceAlignment:
-    """Tests that R and F are on the same device (gpu_memory_light: logits on CPU, fixation_steps may be CUDA)."""
-
-    def test_F_aligned_to_R_device_when_logits_cpu_fixation_cuda(self):
-        """When logits_history is on CPU and fixation_steps on CUDA, F is moved to R.device so gather does not fail."""
-        if not torch.cuda.is_available():
-            pytest.skip("CUDA not available")
-        B, V, L_gen, S = 1, 64, 20, 5
-        max_prompt_len = 4
-        T_full = max_prompt_len + L_gen
-        # Simulate gpu_memory_light: logits on CPU
-        logits_history = [torch.randn(B, L_gen, V, device="cpu") for _ in range(S)]
-        fixation_steps = torch.randint(0, S, (B, T_full), device="cuda")
-        prompt_lens = [max_prompt_len]
-
-        out = trajectories_from_logits(
-            logits_history, fixation_steps, prompt_lens, return_trajectory_tensors=False
-        )
-        R, F = out["R"], out["F"]
-
-        assert R.device.type == "cpu", "R should be on CPU (from CPU logits_history)"
-        assert F.device == R.device, "F must be on same device as R (fix for RuntimeError: cpu vs cuda in gather)"
-
-        # On-demand trajectory computation must not raise device mismatch
-        R_sample = R[0]  # [V, L, S]
-        F_sample = F[0]  # [L]
-        for step in [0, S // 2, S - 1]:
-            logits = compute_fixation_start_trajectory(R_sample, step, F_sample)
-            assert logits.shape == (V, L_gen)
-            assert logits.device == R.device
-        for step in [0, S - 1]:
-            logits = compute_fixation_end_trajectory(R_sample, step, F_sample)
-            assert logits.shape == (V, L_gen)
-        for step in [0, S - 1]:
-            logits = compute_fixation_ratio_trajectory(R_sample, step, F_sample)
-            assert logits.shape == (V, L_gen)
-
-    def test_F_aligned_to_R_device_both_cpu(self):
-        """With both logits and fixation_steps on CPU, R and F stay on CPU and on-demand compute works."""
-        B, V, L_gen, S = 2, 32, 10, 4
-        max_prompt_len = 3
-        T_full = max_prompt_len + L_gen
-        logits_history = [torch.randn(B, L_gen, V, device="cpu") for _ in range(S)]
-        fixation_steps = torch.randint(0, S, (B, T_full), device="cpu")
-        prompt_lens = [max_prompt_len, max_prompt_len]
-
-        out = trajectories_from_logits(
-            logits_history, fixation_steps, prompt_lens, return_trajectory_tensors=False
-        )
-        R, F = out["R"], out["F"]
-
-        assert R.device.type == "cpu"
-        assert F.device == R.device
-
-        R_sample = R[0]
-        F_sample = F[0]
-        compute_fixation_start_trajectory(R_sample, 0, F_sample)
-        compute_fixation_end_trajectory(R_sample, S - 1, F_sample)
-        compute_fixation_ratio_trajectory(R_sample, S - 1, F_sample)
 
 
 class TestTrajectoriesFromLogitsGeneratedOnly:

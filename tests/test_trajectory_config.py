@@ -57,6 +57,28 @@ class TestTrajectoryMetricsConfig:
         assert config.trajectory_config.sampler_kwargs.steps == 32
         assert config.trajectory_config.sampler_kwargs.max_new_tokens == 64
         assert config.trajectory_config.sampler_kwargs.temperature == 0.0
+
+    def test_config_sampler_kwargs_trajectory_sample_interval(self):
+        """trajectory_config.sampler_kwargs.trajectory_sample_interval can be 8, 4; merge preserves it."""
+        config = OmegaConf.create({
+            "handler": "trajectory_metrics",
+            "metrics": ["probability"],
+            "trajectory_config": {
+                "return_logits": True,
+                "sampler_kwargs": {
+                    "steps": 16,
+                    "max_new_tokens": 32,
+                    "trajectory_sample_interval": 8,
+                },
+            },
+        })
+        assert config.trajectory_config.sampler_kwargs.trajectory_sample_interval == 8
+        # Override preserves other keys
+        OmegaConf.update(
+            config, "trajectory_config.sampler_kwargs.trajectory_sample_interval", 4
+        )
+        assert config.trajectory_config.sampler_kwargs.trajectory_sample_interval == 4
+        assert config.trajectory_config.sampler_kwargs.steps == 16
     
     def test_config_with_datasets_and_collators(self):
         """Test config with datasets and collators (from defaults)."""
