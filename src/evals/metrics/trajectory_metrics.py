@@ -67,12 +67,21 @@ def _compute_prob_from_fixation_logits(
     device: torch.device,
     ignore_index: int,
 ) -> list[dict]:
-    """Compute per-sample probability from fixation logits and labels (same formula as evaluate_probability)."""
-    shifted_labels = labels[..., 1:].contiguous()
-    logits = fixation_logits[..., :-1, :].contiguous()
+    """Compute per-sample probability from fixation logits and labels (same formula as evaluate_probability).
+    Trims to min(fixation_logits length, labels length) so lengths always match (e.g. when sampler
+    returns shorter sequence than padded batch labels).
+    """
+    T_fl = fixation_logits.shape[1]
+    T_lab = labels.shape[1]
+    L = min(T_fl, T_lab)
+    if L <= 1:
+        B = fixation_logits.shape[0]
+        return [{"prob": 0.0, "avg_loss": float("inf")} for _ in range(B)]
+    shifted_labels = labels[..., 1:L].contiguous()
+    logits = fixation_logits[..., : L - 1, :].contiguous()
     loss_fn = nn.CrossEntropyLoss(ignore_index=ignore_index, reduction="none")
     losses = loss_fn(logits.transpose(-1, -2), shifted_labels).sum(dim=-1)
-    num_token_gt = (labels != ignore_index).sum(-1)
+    num_token_gt = (shifted_labels != ignore_index).sum(-1)
     avg_losses = losses / num_token_gt.clamp(min=1)
     normalized_probs = torch.exp(-avg_losses)
     probs = normalized_probs.cpu().numpy().tolist()
