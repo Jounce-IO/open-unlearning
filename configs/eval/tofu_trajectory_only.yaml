@@ -1,0 +1,16 @@
+# @package eval.tofu_trajectory
+# Custom TOFU config that only includes trajectory_metrics (1 metric vs 7 in full tofu_trajectory)
+
+defaults:
+  - tofu_metrics:
+    - trajectory_metrics
+
+handler: TOFUEvaluator
+output_dir: ${paths.output_dir}
+metrics: {}
+overwrite: false
+forget_split: forget10
+holdout_split: holdout10
+retain_logs_path: null
+question_key: "question"
+batch_size: 32

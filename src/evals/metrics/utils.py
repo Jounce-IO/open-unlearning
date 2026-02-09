@@ -1,3 +1,5 @@
+import os
+import sys
 from typing import List
 from tqdm import tqdm
 from rouge_score import rouge_scorer
@@ -41,11 +43,43 @@ def get_forget_quality(model_tr, reference_tr):
     return {"agg_value": test_res.pvalue}
 
 
+def _is_tty() -> bool:
+    """True if stderr is a TTY (interactive terminal). False for kubectl logs, Docker, etc."""
+    return hasattr(sys.stderr, "isatty") and sys.stderr.isatty()
+
+
+def _should_use_tqdm() -> bool:
+    """Use tqdm only when interactive. In K8s/CI, tqdm's timer-based refresh prints a new line
+    per refresh (kubectl logs don't handle \\r), producing thousands of duplicate lines."""
+    if not _is_tty():
+        return False
+    if os.environ.get("KUBERNETES_SERVICE_HOST"):
+        return False
+    if os.environ.get("CI", "").lower() in ("1", "true", "yes"):
+        return False
+    return True
+
+
 def run_batchwise_evals(model, dataloader, batch_eval_fn, batch_eval_fn_args, eval_msg):
     """Run batch-wise evaluations on a dataset using a specified evaluation function. Handles
     multi-answer datasets by organizing evaluations by answer indices and aggregating results."""
     evals = defaultdict(dict)
-    for batch in tqdm(dataloader, desc=eval_msg, total=len(dataloader)):
+    total = len(dataloader)
+    # In non-TTY / K8s / CI, avoid tqdm: each timer refresh becomes a new line in logs.
+    # Use explicit prints at batch boundaries instead.
+    if _should_use_tqdm():
+        iterator = tqdm(dataloader, desc=eval_msg, total=total)
+    else:
+        iterator = dataloader
+        # Log every 10% or at least every 10 batches, whichever is more frequent
+        log_interval = max(1, min(total // 10, 10))
+
+    for batch_idx, batch in enumerate(iterator):
+        if not _should_use_tqdm():
+            n = batch_idx + 1
+            if n % log_interval == 0 or n == total:
+                pct = 100 * n / total
+                print(f"{eval_msg}: {n}/{total} ({pct:.0f}%)", flush=True)
         # if data arrives in normal format we convert the batch to multiple answer-style
         # like in tofu_perturbed by adding a fake intra_item_index
         if "input_ids" in batch:
@@ -95,8 +129,9 @@ def evaluate_probability(model, batch):
     avg_losses = losses / num_token_gt
     normalized_probs = torch.exp(-avg_losses)
 
-    avg_losses = avg_losses.cpu().numpy().tolist()
-    normalized_probs = normalized_probs.cpu().numpy().tolist()
+    # Convert to float32 before numpy conversion (BFloat16 not supported by numpy)
+    avg_losses = avg_losses.float().cpu().numpy().tolist()
+    normalized_probs = normalized_probs.float().cpu().numpy().tolist()
     return [
         {"prob": prob, "avg_loss": avg_loss}
         for prob, avg_loss in zip(normalized_probs, avg_losses)
@@ -117,6 +152,16 @@ def tokenwise_logprobs(model, batch, grad=False, return_labels=False):
 
     logits = output.logits
     bsz, seq_len, V = logits.shape
+    # Trim batch to logits length so next_tokens and log_probs align (avoids RuntimeError when
+    # caller passes longer sequences, e.g. trajectory step with full-length batch).
+    if batch["input_ids"].shape[1] > seq_len:
+        batch["input_ids"] = batch["input_ids"][:, :seq_len]
+    if batch.get("labels") is not None and isinstance(batch["labels"], torch.Tensor):
+        if batch["labels"].shape[1] > seq_len:
+            batch["labels"] = batch["labels"][:, :seq_len]
+    if batch.get("attention_mask") is not None and isinstance(batch["attention_mask"], torch.Tensor):
+        if batch["attention_mask"].shape[1] > seq_len:
+            batch["attention_mask"] = batch["attention_mask"][:, :seq_len]
     log_probs = torch.nn.functional.log_softmax(logits, dim=-1)[:, :-1, :]
     # ^ we don't predict next token for last token, bsz x seq_len-1 x V
     next_tokens = batch["input_ids"][:, 1:].unsqueeze(-1)  # bsz x seq_len-1 x 1

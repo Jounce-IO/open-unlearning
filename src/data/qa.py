@@ -25,8 +25,9 @@ class QADataset(Dataset):
         if few_shot_dataset_hf_args is not None:
             raw_data = load_hf_dataset(**few_shot_dataset_hf_args)
             self.fs_data = {}
-            self.fs_data[question_key] = raw_data[question_key]
-            self.fs_data[answer_key] = raw_data[answer_key]
+            # Convert HuggingFace Column objects to lists for concatenation
+            self.fs_data[question_key] = list(raw_data[question_key])
+            self.fs_data[answer_key] = list(raw_data[answer_key])
         self.template_args = template_args
         self.question_key = question_key
         self.answer_key = answer_key
@@ -132,3 +133,48 @@ class QAwithAlternateDataset(QADataset):
                 return_item["alternate"] = alt_item
                 # return_item.append([sample_item, idk_item])
         return return_item if self.return_original else return_item["alternate"]
+
+
+class QAwithDualAnswersDataset(QADataset):
+    """Dataset yielding both labels_correct and labels_wrong for truth_ratio metrics.
+
+    Uses two answer keys from the same HF split (e.g., paraphrased_answer and
+    perturbed_answer in forget10_perturbed). Yields batches with both label
+    variants for computing probability(correct) and probability(wrong) from
+    the same model output.
+    """
+
+    def __init__(
+        self,
+        correct_answer_key: str,
+        wrong_answer_key: str,
+        *args,
+        **kwargs,
+    ):
+        self.correct_answer_key = correct_answer_key
+        self.wrong_answer_key = wrong_answer_key
+        # Parent uses answer_key for __len__ and data loading; use correct as default
+        kwargs.setdefault("answer_key", correct_answer_key)
+        super().__init__(*args, **kwargs)
+
+    def __getitem__(self, idx):
+        question = self.data[idx][self.question_key]
+        correct_answer = self.data[idx][self.correct_answer_key]
+        wrong_answer = self.data[idx][self.wrong_answer_key]
+        index = self.data[idx]["index"]
+
+        correct_item = self._process_sample(
+            question=question, answer=correct_answer, index=index
+        )
+        wrong_item = self._process_sample(
+            question=question, answer=wrong_answer, index=index
+        )
+
+        return {
+            "input_ids": correct_item["input_ids"],
+            "labels": correct_item["labels"],
+            "labels_correct": correct_item["labels"],
+            "labels_wrong": wrong_item["labels"],
+            "attention_mask": correct_item["attention_mask"],
+            "index": index,
+        }

@@ -1,7 +1,13 @@
+import re
 from typing import Dict, Any, Union
 from omegaconf import DictConfig
 
-from data.qa import QADataset, QAwithIdkDataset, QAwithAlternateDataset
+from data.qa import (
+    QADataset,
+    QAwithIdkDataset,
+    QAwithAlternateDataset,
+    QAwithDualAnswersDataset,
+)
 from data.collators import (
     DataCollatorForSupervisedDataset,
 )
@@ -30,8 +36,23 @@ def _load_single_dataset(dataset_name, dataset_cfg: DictConfig, **kwargs):
         raise NotImplementedError(
             f"{dataset_handler_name} not implemented or not registered"
         )
-    dataset_args = dataset_cfg.args
-    return dataset_handler(**dataset_args, **kwargs)
+    dataset_args = dict(dataset_cfg.args)
+    # QADataset expects split in hf_args (for load_hf_dataset); move top-level split if present
+    split_val = dataset_args.pop("split", None) or kwargs.pop("split", None)
+    # Apply samples limit: slice base split (e.g. train -> train[:2], forget_qa -> forget_qa[:2])
+    # Strip existing slice from config (e.g. forget_qa[:5] -> forget_qa) to avoid double-slicing
+    samples = kwargs.get("samples")
+    if samples is not None and "hf_args" in dataset_args:
+        base_split = dataset_args.get("hf_args", {}).get("split", "train")
+        base_name = re.sub(r"\[\d*:\d*\]", "", base_split) or "train"
+        split_val = f"{base_name}[:{samples}]"
+    if split_val is not None and "hf_args" in dataset_args:
+        dataset_args["hf_args"] = dict(dataset_args["hf_args"])
+        dataset_args["hf_args"]["split"] = split_val
+    # Only pass dataset-relevant kwargs; metric config keys (collators, metrics, etc.) are not valid
+    dataset_relevant_keys = {"tokenizer", "template_args", "split"}
+    handler_kwargs = {k: v for k, v in kwargs.items() if k in dataset_relevant_keys}
+    return dataset_handler(**dataset_args, **handler_kwargs)
 
 
 def get_datasets(dataset_cfgs: Union[Dict, DictConfig], **kwargs):
@@ -96,6 +117,7 @@ _register_data(QAwithIdkDataset)
 _register_data(PretrainingDataset)
 _register_data(CompletionDataset)
 _register_data(QAwithAlternateDataset)
+_register_data(QAwithDualAnswersDataset)
 
 # Register composite datasets used in unlearning
 # groups: unlearn

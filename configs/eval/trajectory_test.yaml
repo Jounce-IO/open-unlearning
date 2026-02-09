@@ -1,0 +1,13 @@
+# Test configuration for trajectory metrics evaluation - ONLY trajectory metrics
+# @package eval.trajectory_test
+
+defaults:
+  - muse_metrics:
+    - trajectory_metrics_minimal
+
+handler: MUSEEvaluator
+output_dir: saves/eval/trajectory_test
+# metrics: {} will be populated by defaults via @package directive
+overwrite: false
+data_split: News
+retain_logs_path: null

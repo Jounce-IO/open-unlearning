@@ -1,0 +1,132 @@
+# @package eval.muse_trajectory.metrics.trajectory_all
+# Single-pass: one trajectory_metrics run with all 5 sub-metrics (multi-dataset).
+# include_metrics set via CLI (dllm eval --metrics A B C).
+
+defaults:
+  - .@pre_compute.mia_min_k: mia_min_k
+  - ../../collator@collators: DataCollatorForSupervisedDatasetwithIndex
+
+reference_logs:
+  retain_model_logs:
+    path: ${eval.muse_trajectory.retain_logs_path}
+    include:
+      mia_min_k:
+        access_key: retain
+
+pre_compute:
+  mia_min_k:
+    access_key: forget
+
+handler: trajectory_metrics
+batch_size: 1
+include_metrics: null
+
+metrics:
+  forget_knowmem_rouge:
+    handler: rouge
+    dataset_key: forget_knowmem
+    rouge_type: rougeL_f1
+  retain_knowmem_rouge:
+    handler: rouge
+    dataset_key: retain_knowmem
+    rouge_type: rougeL_f1
+  forget_verbmem_rouge:
+    handler: rouge
+    dataset_key: forget_verbmem
+    rouge_type: rougeL_f1
+  extraction_strength:
+    dataset_key: forget_verbmem
+  privleak:
+    ref_value: 0.5
+    pre_compute:
+      mia_min_k:
+        access_key: forget
+        k: 0.4  # same as standalone mia_min_k.yaml; top-level default does not merge into this nested block
+
+metric_display_names:
+  - trajectory_forget_knowmem_ROUGE
+  - trajectory_retain_knowmem_ROUGE
+  - trajectory_forget_verbmem_ROUGE
+  - trajectory_extraction_strength
+  - trajectory_privleak
+
+trajectory_config:
+  logits_source: sampler
+  return_logits: true
+  return_fixation_steps: true
+  sampler_kwargs:
+    steps: 16
+    temperature: 0.0
+    max_new_tokens: 32
+
+datasets:
+  forget_knowmem:
+    access_key: forget_knowmem
+    handler: QADataset
+    args:
+      hf_args:
+        path: muse-bench/MUSE-${eval.muse_trajectory.data_split}
+        name: knowmem
+        split: "forget_qa[:5]"
+      few_shot_dataset_hf_args:
+        path: muse-bench/MUSE-${eval.muse_trajectory.data_split}
+        name: knowmem
+        split: "forget_qa_icl"
+      predict_with_generate: true
+  retain_knowmem:
+    access_key: retain_knowmem
+    handler: QADataset
+    args:
+      hf_args:
+        path: muse-bench/MUSE-${eval.muse_trajectory.data_split}
+        name: knowmem
+        split: "retain_qa[:5]"
+      few_shot_dataset_hf_args:
+        path: muse-bench/MUSE-${eval.muse_trajectory.data_split}
+        name: knowmem
+        split: "retain_qa_icl"
+      predict_with_generate: true
+  forget_verbmem:
+    access_key: forget_verbmem
+    handler: CompletionDataset
+    args:
+      hf_args:
+        path: muse-bench/MUSE-${eval.muse_trajectory.data_split}
+        name: verbmem
+        split: "forget[:5]"
+      prefix_key: "prompt"
+      text_key: "gt"
+      max_length: 2048
+      insert_space: true
+      predict_with_generate: true
+  forget:
+    access_key: forget
+    handler: CompletionDataset
+    args:
+      hf_args:
+        path: muse-bench/MUSE-${eval.muse_trajectory.data_split}
+        name: privleak
+        split: forget
+      prefix_key: prompt
+      text_key: text
+      max_length: 2048
+  holdout:
+    access_key: holdout
+    handler: CompletionDataset
+    args:
+      hf_args:
+        path: muse-bench/MUSE-${eval.muse_trajectory.data_split}
+        name: privleak
+        split: holdout
+      prefix_key: prompt
+      text_key: text
+      max_length: 2048
+
+collators:
+  DataCollatorForSupervisedDataset:
+    args:
+      padding_side: left
+
+generation_args:
+  max_new_tokens: 32
+  stopwords: ["\n\n", "\nQuestion", "Question:"]

@@ -25,6 +25,11 @@ def get_evaluator(name: str, eval_cfg: DictConfig, **kwargs):
 def get_evaluators(eval_cfgs: DictConfig, **kwargs):
     evaluators = {}
     for eval_name, eval_cfg in eval_cfgs.items():
+        # Skip parameter containers (e.g. eval.tofu, eval.muse) that lack a handler.
+        # These are added by experiments for interpolation (e.g. ${eval.tofu.forget_split})
+        # and are not evaluators to run.
+        if eval_cfg.get("handler") is None:
+            continue
         evaluators[eval_name] = get_evaluator(eval_name, eval_cfg, **kwargs)
     return evaluators
 

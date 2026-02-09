@@ -86,6 +86,35 @@ def privleak(model, **kwargs):
 > [!NOTE]
 `kwargs` contains many important attributes that are useful while computing metrics. It will contain all the metric-specific parameters defined in the metric's yaml file, and also contain the created objects corresponding to the other attributes mentioned in the metric config: such as the `"tokenizer"`, `"data"` (the preprocessed torch dataset), `"batch_size"`, `"collator"`, `"generation_args"`, `"pre_compute"` (prior metrics the current metric depends on), and `"reference_logs"` (evals from a reference model the current metric can use).
 
+#### retain_logs_path (for privleak and forget_quality)
+
+The metrics **privleak** and **forget_quality** compare the unlearned model to a **retain (baseline) model**. They require pre-computed evals from the retain model, loaded from a JSON file.
+
+**What it means:** The retain model is the model *before* unlearning—typically finetuned on the retain split. Its evals (e.g. MIA AUC for privleak, Truth Ratio for forget_quality) serve as the reference. Without them, privleak falls back to `ref_value` (0.5) and forget_quality returns None.
+
+**How to set it:**
+
+1. **Evaluate your retain model** and save results to JSON:
+   ```bash
+   python src/eval.py experiment=eval/tofu/default.yaml \
+     model.model_args.pretrained_model_name_or_path=saves/finetune/tofu_retain95 \
+     paths.output_dir=saves/eval/tofu_retain95
+   ```
+   This produces `saves/eval/tofu_retain95/TOFU_EVAL.json`.
+
+2. **Pass the path** via Hydra override when evaluating the unlearned model:
+   ```bash
+   # TOFU (standard or trajectory)
+   eval.tofu.retain_logs_path=saves/eval/tofu_retain95/TOFU_EVAL.json
+   eval.tofu_trajectory.retain_logs_path=saves/eval/tofu_retain95/TOFU_EVAL.json
+
+   # MUSE
+   eval.muse.retain_logs_path=saves/eval/muse_retain/MUSE_EVAL.json
+   eval.muse_trajectory.retain_logs_path=saves/eval/muse_retain/MUSE_EVAL.json
+   ```
+
+3. **When retain_logs_path is None:** The evaluator logs a warning at the start of the run, at the start of evaluation, and when the metric runs. The run continues; privleak uses the default and forget_quality returns None.
+
 #### 2. Register the metric handler
 Register the handler to link the class to the configs via the class name in [`METRIC_REGISTRY`](../src/evals/metrics/__init__.py).
 

@@ -1,0 +1,14 @@
+# @package eval.muse_trajectory
+# MUSE trajectory mode - single-pass (trajectory_all) for all 5 sub-metrics
+
+defaults:
+  - muse_metrics:
+    - trajectory_all
+
+handler: MUSEEvaluator
+output_dir: ${paths.output_dir}
+metrics: {}  # Populated by defaults (muse_metrics with @package eval.muse_trajectory.metrics.*)
+samples: null  # Limit dataset size; set via CLI (eval.muse_trajectory.samples=N)
+overwrite: false
+data_split: News
+retain_logs_path: null

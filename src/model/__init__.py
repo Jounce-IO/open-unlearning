@@ -1,10 +1,30 @@
 from transformers import AutoModelForCausalLM, AutoTokenizer
-from omegaconf import DictConfig, open_dict
+from omegaconf import DictConfig, open_dict, OmegaConf
 from typing import Dict, Any
 import os
 import torch
 import logging
 from model.probe import ProbedLlamaForCausalLM
+
+# Enable verbose logging for HuggingFace libraries
+os.environ.setdefault("TRANSFORMERS_VERBOSITY", "info")
+os.environ.setdefault("HF_HUB_VERBOSITY", "1")
+os.environ.setdefault("HF_HUB_DISABLE_PROGRESS_BARS", "0")  # Show progress bars
+
+# Set up logging for huggingface_hub
+logging.getLogger("huggingface_hub").setLevel(logging.INFO)
+logging.getLogger("transformers").setLevel(logging.INFO)
+
+# Try to import diffusion adapter from main repo (if available)
+try:
+    from dllm.integrations.open_unlearning_adapter import wrap_model_if_diffusion
+    _DIFFUSION_ADAPTER_AVAILABLE = True
+except ImportError:
+    _DIFFUSION_ADAPTER_AVAILABLE = False
+
+    def wrap_model_if_diffusion(model, tokenizer, config=None):
+        """Fallback if adapter not available."""
+        return model
 
 hf_home = os.getenv("HF_HOME", default=None)
 
@@ -39,29 +59,96 @@ def get_dtype(model_args):
 
 
 def get_model(model_cfg: DictConfig):
-    assert model_cfg is not None and model_cfg.model_args is not None, ValueError(
-        "Model config not found or model_args absent in configs/model."
-    )
-    model_args = model_cfg.model_args
-    tokenizer_args = model_cfg.tokenizer_args
-    torch_dtype = get_dtype(model_args)
-    model_handler = model_cfg.get("model_handler", "AutoModelForCausalLM")
-    model_cls = MODEL_REGISTRY[model_handler]
+    assert model_cfg is not None, ValueError("Model config not found.")
+    logger.info("=== Starting model loading ===")
+    with open_dict(model_cfg):
+        model_args_dict = model_cfg.get("model_args", None)
+        assert model_args_dict is not None, ValueError("model_args absent in configs/model.")
+        tokenizer_args = model_cfg.get("tokenizer_args", None)
+        model_handler = model_cfg.get("model_handler", "AutoModelForCausalLM")
+    # Keep as DictConfig for get_dtype, but extract path first
+    model_args = model_args_dict
     with open_dict(model_args):
-        model_path = model_args.pop("pretrained_model_name_or_path", None)
+        # Try direct access first, then fallback to get()
+        try:
+            model_path = model_args.pretrained_model_name_or_path
+            del model_args["pretrained_model_name_or_path"]
+        except (AttributeError, KeyError):
+            model_path = model_args.get("pretrained_model_name_or_path", None)
+            if model_path is not None:
+                del model_args["pretrained_model_name_or_path"]
+    logger.info(f"Model path: {model_path}")
+    logger.info(f"Model handler: {model_handler}")
+    torch_dtype = get_dtype(model_args)
+    logger.info(f"Torch dtype: {torch_dtype}")
+    model_cls = MODEL_REGISTRY[model_handler]
+    # Convert to regular dict for **model_args unpacking
+    model_args_dict_final = OmegaConf.to_container(model_args, resolve=True) if isinstance(model_args, DictConfig) else model_args
+    logger.info(f"Calling {model_handler}.from_pretrained()...")
+    logger.info(f"Model args: {list(model_args_dict_final.keys())}")
+    logger.info(f"Cache dir: {hf_home if hf_home else 'default (~/.cache/huggingface)'}")
     try:
+        import time
+        start_time = time.time()
+        logger.info("Starting model download/loading (this may take several minutes)...")
+        logger.info("HuggingFace will download model weights if not cached")
+        
+        # Check cache before loading
+        from pathlib import Path
+        if hf_home:
+            cache_path = Path(hf_home) / "hub" / f"models--{model_path.replace('/', '--')}"
+            if cache_path.exists():
+                logger.info(f"Model cache directory exists: {cache_path}")
+            else:
+                logger.info(f"Model cache directory does not exist, will download")
+        
         model = model_cls.from_pretrained(
             pretrained_model_name_or_path=model_path,
-            torch_dtype=torch_dtype,
-            **model_args,
+            dtype=torch_dtype,  # Use dtype instead of deprecated torch_dtype
+            **model_args_dict_final,
             cache_dir=hf_home,
         )
+        elapsed = time.time() - start_time
+        logger.info(f"Model loaded successfully in {elapsed:.2f} seconds")
     except Exception as e:
-        logger.warning(f"Model {model_path} requested with {model_cfg.model_args}")
+        logger.error(f"Model {model_path} requested with {model_cfg.model_args}")
+        logger.error(f"Error details: {type(e).__name__}: {str(e)}")
+        import traceback
+        logger.error(traceback.format_exc())
         raise ValueError(
             f"Error {e} while fetching model using {model_handler}.from_pretrained()."
         )
+    logger.info("Loading tokenizer...")
     tokenizer = get_tokenizer(tokenizer_args)
+    logger.info("Tokenizer loaded successfully")
+    
+    # Auto-wrap diffusion models to be compatible with AR-based metrics
+    # (only if adapter is available from main dllm repo)
+    if _DIFFUSION_ADAPTER_AVAILABLE:
+        # Add mask token for diffusion models (required by samplers)
+        from dllm.integrations.open_unlearning_adapter import is_diffusion_model
+        if is_diffusion_model(model):
+            if tokenizer.mask_token_id is None:
+                # Detect model type to use correct mask token
+                model_name = type(model).__name__.lower()
+                if 'llada' in model_name:
+                    tokenizer.add_special_tokens({"mask_token": "<|mdm_mask|>"})
+                    logger.info("Added mask_token '<|mdm_mask|>' for LLaDA model")
+                else:
+                    # Default mask token for other diffusion models
+                    tokenizer.add_special_tokens({"mask_token": "<|mask|>"})
+                    logger.info("Added default mask_token '<|mask|>' for diffusion model")
+        diffusion_config = model_cfg.get("diffusion_adapter", None)
+        model = wrap_model_if_diffusion(model, tokenizer, config=diffusion_config)
+    else:
+        # Adapter not available - check if this looks like a diffusion model (will fail trajectory metrics)
+        model_type = type(model).__name__.lower()
+        if any(x in model_type for x in ("llada", "dream", "diffusion", "mdlm", "bd3lm")):
+            logger.warning(
+                "DiffusionModelAdapter not available (dllm.integrations import failed). "
+                "Trajectory metrics will fail. Ensure PYTHONPATH includes the repo root (e.g. export PYTHONPATH=/app)."
+            )
+
     return model, tokenizer
 
 

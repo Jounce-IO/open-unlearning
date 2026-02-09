@@ -23,17 +23,17 @@ class UnlearningMetric:
         """Load the datasets from config"""
         if self.data:
             return self.data
-        data = get_datasets(
-            tokenizer=kwargs.get("tokenizer", None),
-            template_args=kwargs.get("template_args", None),
-            dataset_cfgs=dataset_cfgs,
-        )
+        data = get_datasets(dataset_cfgs=dataset_cfgs, **kwargs)
         return data
 
     def get_collators(self, collator_cfgs=None, **kwargs):
         """Load the collators from config"""
         if self.collators:
             return self.collators
+        # If collator_cfgs is already a collator instance (callable), use it
+        # DictConfig from Hydra is not a dict, so don't treat it as "instance"
+        if collator_cfgs is not None and callable(collator_cfgs):
+            return collator_cfgs
         collators = get_collators(
             tokenizer=kwargs.get("tokenizer", None), collator_cfgs=collator_cfgs
         )
@@ -64,17 +64,19 @@ class UnlearningMetric:
         Returns:
             Dict: Updated kwargs with datasets, collators, pre_compute results loaded
         """
-        # Load datasets
-        dataset_cfgs = kwargs.pop("datasets", None)
-        if dataset_cfgs is not None:
-            data = self.get_datasets(dataset_cfgs=dataset_cfgs, **kwargs)
-            kwargs.update({"data": data})
+        # Load datasets only when not already provided (e.g. by Evaluator for coalesced trajectory run)
+        if kwargs.get("data") is None:
+            dataset_cfgs = kwargs.pop("datasets", None)
+            if dataset_cfgs is not None:
+                data = self.get_datasets(dataset_cfgs=dataset_cfgs, **kwargs)
+                kwargs.update({"data": data})
 
-        # Load collators
-        collator_cfgs = kwargs.pop("collators", None)
-        if collator_cfgs is not None:
-            collators = self.get_collators(collator_cfgs=collator_cfgs, **kwargs)
-            kwargs.update({"collators": collators})
+        # Load collators only when not already provided (e.g. by Evaluator for coalesced trajectory run)
+        if kwargs.get("collators") is None:
+            collator_cfgs = kwargs.pop("collators", None)
+            if collator_cfgs is not None:
+                collators = self.get_collators(collator_cfgs=collator_cfgs, **kwargs)
+                kwargs.update({"collators": collators})
 
         # Evaluate precompute and load results
         pre_compute_cfgs = kwargs.pop("pre_compute", {})
@@ -136,7 +138,17 @@ class UnlearningMetric:
             model, metric_name, cache, **kwargs
         )
         results = self.evaluate_metric(model, metric_name, **metric_kwargs)
-        cache.update({metric_name: results})
+        # Single-pass trajectory: result can be dict of sub-results keyed by display name.
+        if (
+            isinstance(results, dict)
+            and len(results) > 0
+            and all(
+                isinstance(v, dict) and "agg_value" in v for v in results.values()
+            )
+        ):
+            cache.update(results)
+        else:
+            cache.update({metric_name: results})
         return results
 
     def __call__(self, model, **kwargs):

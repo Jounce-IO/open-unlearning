@@ -1,0 +1,42 @@
+# @package eval.muse_trajectory.metrics.trajectory_metrics_minimal
+# Minimal trajectory metrics config - only ROUGE, 5 samples
+
+defaults:
+  - ../../data/datasets@datasets: MUSE_forget_knowmem
+  - ../../collator@collators: DataCollatorForSupervisedDatasetwithIndex
+
+handler: trajectory_metrics
+batch_size: 1  # Minimal batch size for memory efficiency
+
+# Only ROUGE metric
+metrics:
+  - rouge
+
+trajectory_config:
+  logits_source: sampler
+  return_logits: true
+  return_fixation_steps: true
+  sampler_kwargs:
+    steps: 16  # Reduced for testing
+    temperature: 0.0
+    max_new_tokens: 32  # Reduced for testing
+
+# path uses ${data_split} for News/Books; data_split is set at root by experiment/dllm eval
+# split must be in hf_args (QADataset passes hf_args to load_dataset); slice for samples
+datasets:
+  MUSE_forget_knowmem:
+    args:
+      hf_args:
+        path: muse-bench/MUSE-${data_split}
+        name: knowmem
+        split: "forget_qa[:5]"  # Default 5 samples; override via hf_args.split
+      few_shot_dataset_hf_args:
+        path: muse-bench/MUSE-${data_split}
+        name: knowmem
+        split: "forget_qa_icl"
+      predict_with_generate: True
+
+collators:
+  DataCollatorForSupervisedDataset:
+    args:
+      padding_side: left

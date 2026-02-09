@@ -51,10 +51,14 @@ def mia_auc(attack_cls, model, data, collator, batch_size, **kwargs):
     }
     attack_args.update(kwargs)
 
+    if hasattr(model, "set_dataset_key"):
+        model.set_dataset_key("forget")
     output = {
         "forget": attack_cls(data=data["forget"], **attack_args).attack(),
-        "holdout": attack_cls(data=data["holdout"], **attack_args).attack(),
     }
+    if hasattr(model, "set_dataset_key"):
+        model.set_dataset_key("holdout")
+    output["holdout"] = attack_cls(data=data["holdout"], **attack_args).attack()
     forget_scores = [
         elem["score"] for elem in output["forget"]["value_by_index"].values()
     ]

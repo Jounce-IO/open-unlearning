@@ -19,11 +19,22 @@ class LMEvalEvaluator(Evaluator):
             self.eval_cfg.tasks, resolve=True, throw_on_missing=True
         )
         self.task_manager = TaskManager()
-        self.simple_evaluate_args = dict(kwargs.get("simple_evaluate_args", {}))
+        cfg_args = OmegaConf.to_container(
+            eval_cfg.get("simple_evaluate_args", {}), resolve=True
+        ) or {}
+        kw_args = kwargs.get("simple_evaluate_args", {}) or {}
+        self.simple_evaluate_args = dict(cfg_args, **kw_args)
 
     def prepare_model(self, model, **kwargs):
         """Prepare model for evaluation"""
         model.eval()
+        # lm_eval expects standard forward(input_ids); DiffusionModelAdapter has __call__(**batch)
+        try:
+            from dllm.integrations.open_unlearning_adapter import DiffusionModelAdapter
+            if isinstance(model, DiffusionModelAdapter):
+                model = model.model
+        except ImportError:
+            pass
         return HFLM(model)
 
     def summarize(self, eval_results: dict, task_name: str) -> dict:
@@ -84,17 +95,17 @@ class LMEvalEvaluator(Evaluator):
         # Set output_dir and file to store results
         output_dir = output_dir if output_dir else self.eval_cfg.output_dir
         logs_file_path = self.get_logs_file_path(output_dir)
-        summary_file_path = self.get_logs_file_path(output_dir, suffix="SUMMARY")
 
         # Load existing results from file if any.
         logs = self.load_logs_from_file(logs_file_path) if not overwrite else {}
-        summary = self.load_logs_from_file(summary_file_path) if not overwrite else {}
+        # Rebuild flat summary from EVAL (task_name -> task_summary) for return value.
+        summary = {}
+        for task_name, task_summary in logs.items():
+            if task_name != "config" and isinstance(task_summary, dict):
+                summary.update(task_summary)
 
         logger.info(f"***** Running {self.name} evaluation suite *****")
-        logger.info(f"Fine-grained evaluations will be saved to: {logs_file_path}")
-        logger.info(
-            f"Aggregated evaluations will be summarised in: {summary_file_path}"
-        )
+        logger.info(f"Evaluations will be saved to: {logs_file_path}")
 
         for task in self.tasks:
             task_name = self.get_task_name(task)
@@ -108,8 +119,10 @@ class LMEvalEvaluator(Evaluator):
                 task_manager=self.task_manager,
                 **self.simple_evaluate_args,
             )
-            logs.update({task_name: results["samples"]})
-            summary.update(self.summarize(results, task_name))
+            # Store only aggregated metrics, not sample-wise data
+            task_summary = self.summarize(results, task_name)
+            summary.update(task_summary)
+            # Store aggregated metrics for this task (no sample-wise data)
+            logs[task_name] = task_summary
             self.save_logs(logs, logs_file_path)
-            self.save_logs(summary, summary_file_path)
         return summary

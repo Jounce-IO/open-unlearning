@@ -1,0 +1,19 @@
+# @package eval.tofu_trajectory
+# TOFU trajectory mode - all 7 metrics computed at each diffusion step
+# Note: eval.tofu.forget_split etc come from experiment eval/tofu/default
+
+# Single-pass: one metric entry (trajectory_all) runs trajectory_metrics once for all 7 sub-metrics.
+defaults:
+  - tofu_metrics:
+    - trajectory_all
+
+handler: TOFUEvaluator
+output_dir: ${paths.output_dir}
+metrics: {}  # Populated by defaults (tofu_metrics with @package eval.tofu_trajectory.metrics.*)
+samples: null  # Limit dataset size; set via CLI (eval.tofu_trajectory.samples=N)
+overwrite: false
+forget_split: forget10
+holdout_split: holdout10
+retain_logs_path: null
+question_key: "question"
+batch_size: 32
