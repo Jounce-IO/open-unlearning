@@ -42,7 +42,8 @@ class UnlearningMetric:
     def set_pre_compute_metrics(self, metrics: Dict[str, Callable]):
         self.pre_compute_metrics.update(metrics)
 
-    def evaluate_metric(self, model, metric_name, **kwargs):
+    def evaluate_metric(self, model, **kwargs):
+        metric_name = kwargs.get("metric_name", "unknown")
         logger.info(f"Evaluating {metric_name}")
         results = self._metric_fn(model, **kwargs)
         return results
@@ -137,7 +138,7 @@ class UnlearningMetric:
         )
         metric_kwargs["metric_name"] = metric_name
         metric_kwargs["cache"] = cache
-        results = self.evaluate_metric(model, metric_name, **metric_kwargs)
+        results = self.evaluate_metric(model, **metric_kwargs)
         cache.update({metric_name: results})
         return results
 
