@@ -343,6 +343,7 @@ class TestTrajectoryMetricsMainCoverage:
                 )
                 
                 assert "agg_value" in result
+                assert "step_distribution" in result
     
     def test_empty_logits_history_continue(self):
         """Test lines 703-704: empty logits_history continues."""

@@ -617,6 +617,14 @@ class TestTrajectoryMetricsIntegration:
             },
         )
         assert result_single is not None and "agg_value" in result_single
+        assert "step_distribution" in result_single
+        for traj_name in result_single["agg_value"]:
+            for metric_name in result_single["agg_value"][traj_name]:
+                dist = result_single["step_distribution"][traj_name][metric_name]
+                agg = np.asarray(result_single["agg_value"][traj_name][metric_name])
+                assert set(dist.keys()) == {"mean", "std", "median", "p25", "p75", "min", "max", "ci_low", "ci_high"}
+                assert len(dist["mean"]) == len(agg)
+                np.testing.assert_allclose(dist["mean"], agg, rtol=1e-5, atol=1e-8)
 
         # Run 2: batch_size=2, two different samples -> result_b2
         sampler2 = Mock()
@@ -665,6 +673,7 @@ class TestTrajectoryMetricsIntegration:
             },
         )
         assert result_b2 is not None and "agg_value" in result_b2
+        assert "step_distribution" in result_b2
 
         # If only the first sample were used in B=2, agg would match B=1. Different logits => different values.
         agg1 = result_single["agg_value"]
@@ -686,6 +695,85 @@ class TestTrajectoryMetricsIntegration:
             else:
                 continue
             break
+
+    def test_step_distribution_single_sample_per_step(self):
+        """With one sample, each step has one value: std=0, ci_low=ci_high=mean, min=max=median=mean."""
+        import numpy as np
+
+        V, L_gen, S = 20, 4, 3
+        full_len = 5 + L_gen
+        sampler = Mock()
+        logits_history = [torch.randn(1, full_len, V) for _ in range(S)]
+        fixation_steps = torch.randint(0, S, (1, full_len))
+
+        class MockSamplerOutput:
+            def __init__(self, sequences, histories, logits_history, fixation_steps):
+                self.sequences = sequences
+                self.histories = histories
+                self.logits_history = logits_history
+                self.fixation_steps = fixation_steps
+
+        sampler.sample.return_value = MockSamplerOutput(
+            sequences=torch.randint(0, V, (1, full_len)),
+            histories=None,
+            logits_history=logits_history,
+            fixation_steps=fixation_steps,
+        )
+        model = Mock()
+        model.sampler = sampler
+
+        class MockDataset:
+            def __init__(self):
+                # Use 1D (full_len,) so batch stack gives (1, full_len); 2D would give (1, 1, full_len)
+                self.data = [{"input_ids": torch.zeros(full_len), "labels": torch.zeros(full_len)}]
+
+            def __len__(self):
+                return 1
+
+            def __getitem__(self, idx):
+                return self.data[idx]
+
+        def mock_collator(batch):
+            return {
+                "input_ids": torch.stack([b["input_ids"] for b in batch]),
+                "labels": torch.stack([b["labels"] for b in batch]),
+                "indices": torch.tensor([0]),
+            }
+
+        tokenizer = Mock()
+        tokenizer.decode = lambda x, **kwargs: "decoded"
+
+        result = trajectory_metrics(
+            model,
+            metric_name="trajectory_metrics",
+            cache={},
+            metrics=["probability"],
+            data=MockDataset(),
+            collators=mock_collator,
+            tokenizer=tokenizer,
+            batch_size=1,
+            trajectory_config={
+                "return_logits": True,
+                "return_fixation_steps": True,
+                "sampler_kwargs": {"steps": S, "max_new_tokens": L_gen},
+            },
+        )
+        assert "step_distribution" in result
+        for traj_name in result["step_distribution"]:
+            for metric_name in result["step_distribution"][traj_name]:
+                d = result["step_distribution"][traj_name][metric_name]
+                mean_arr = np.asarray(d["mean"])
+                std_arr = np.asarray(d["std"])
+                ci_low_arr = np.asarray(d["ci_low"])
+                ci_high_arr = np.asarray(d["ci_high"])
+                min_arr = np.asarray(d["min"])
+                max_arr = np.asarray(d["max"])
+                # Single sample per step => std=0, ci_low=ci_high=mean, min=max=mean
+                np.testing.assert_allclose(std_arr, 0.0, rtol=0, atol=1e-10)
+                np.testing.assert_allclose(ci_low_arr, mean_arr, rtol=0, atol=1e-10)
+                np.testing.assert_allclose(ci_high_arr, mean_arr, rtol=0, atol=1e-10)
+                np.testing.assert_allclose(min_arr, mean_arr, rtol=0, atol=1e-10)
+                np.testing.assert_allclose(max_arr, mean_arr, rtol=0, atol=1e-10)
 
     def test_trajectory_metrics_batch_size_4_runs(self):
         """trajectory_metrics with batch_size=4 runs without shape errors."""
