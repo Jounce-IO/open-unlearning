@@ -140,6 +140,7 @@ def _generate_trajectories_for_dataloader(
                 "S": S,
                 "L": L,
             }
+        del logits_history, out
     return trajectories_by_idx
 
 
