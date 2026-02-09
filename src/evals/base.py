@@ -181,26 +181,35 @@ class Evaluator:
             trajectory_config = first_cfg.get("trajectory_config") or {}
             batch_size = first_cfg.get("batch_size", 1)
             # Merge metrics config: trajectory_metrics expects metrics (list or dict) and metric_display_names.
+            # Use OmegaConf.to_container so we get plain Python types (OmegaConf ListConfig/DictConfig can behave differently in cluster).
+            try:
+                from omegaconf import OmegaConf
+                _metrics_cfg = OmegaConf.to_container(metrics_cfg, resolve=True) or {}
+            except Exception:
+                _metrics_cfg = dict(metrics_cfg) if hasattr(metrics_cfg, "items") else {}
             merged_metrics = {}
             for m in self.metrics:
-                cfg = metrics_cfg.get(m)
-                mc = cfg.get("metrics") if cfg is not None and hasattr(cfg, "get") else []
+                cfg = _metrics_cfg.get(m) if isinstance(_metrics_cfg, dict) else None
+                mc = cfg.get("metrics") if cfg is not None and isinstance(cfg, dict) else None
                 if mc is None:
                     mc = []
                 if isinstance(mc, (list, tuple)):
                     for name in mc:
                         merged_metrics[name] = {}
-                elif hasattr(mc, "items"):
-                    merged_metrics.update(dict(mc))
+                elif isinstance(mc, dict):
+                    merged_metrics.update(mc)
             for m in self.metrics:
-                mcfg = metrics_cfg.get(m)
-                if mcfg is not None and hasattr(mcfg, "get") and mcfg.get("rouge_type") is not None:
+                cfg = _metrics_cfg.get(m) if isinstance(_metrics_cfg, dict) else None
+                if isinstance(cfg, dict) and cfg.get("rouge_type") is not None:
                     if "rouge" in merged_metrics:
                         merged_metrics["rouge"] = merged_metrics.get("rouge") or {}
-                        merged_metrics["rouge"]["rouge_type"] = mcfg.get("rouge_type", "rougeL_recall")
+                        merged_metrics["rouge"]["rouge_type"] = cfg.get("rouge_type", "rougeL_recall")
                     break
             if "rouge" in merged_metrics and not merged_metrics["rouge"]:
                 merged_metrics["rouge"] = {"rouge_type": "rougeL_recall"}
+            if not merged_metrics and len(self.metrics) >= 2:
+                # Fallback when config structure differs (e.g. in cluster): tofu_trajectory_multi has Prob + ROUGE.
+                merged_metrics = {"probability": {}, "rouge": {"rouge_type": "rougeL_recall"}}
             metric_display_names = list(self.metrics.keys())
             merged_args = {
                 "data": data,
