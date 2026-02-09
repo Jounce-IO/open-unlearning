@@ -64,6 +64,42 @@ def _debug_log(location: str, message: str, data: dict):
 IGNORE_INDEX = -100
 
 
+def _compute_prob_from_fixation_logits(
+    fixation_logits: torch.Tensor,
+    labels: torch.Tensor,
+    device: torch.device,
+    ignore_index: int = IGNORE_INDEX,
+) -> List[Dict[str, float]]:
+    """Compute per-sample probability (exp(-avg_loss)) from fixation logits and labels.
+
+    Handles length mismatch (e.g. sampler returns shorter sequence than padded batch labels)
+    by trimming to min length so cross_entropy does not raise. Counts num_token_gt only
+    over used (non-ignore) positions.
+    """
+    fixation_logits = fixation_logits.to(device)
+    labels = labels.to(device)
+    B, T_fl, V = fixation_logits.shape
+    T_lab = labels.shape[1]
+    T = min(T_fl, T_lab)
+    fixation_logits = fixation_logits[:, :T, :].contiguous()
+    labels = labels[:, :T].contiguous()
+    shifted_logits = fixation_logits[..., :-1, :].contiguous()
+    shifted_labels = labels[..., 1:].contiguous()
+    if shifted_logits.dtype in (torch.bfloat16, torch.float16):
+        shifted_logits = shifted_logits.float()
+    loss_fn = torch.nn.CrossEntropyLoss(ignore_index=ignore_index, reduction="none")
+    losses = loss_fn(shifted_logits.transpose(-1, -2), shifted_labels).sum(dim=-1)
+    num_token_gt = (shifted_labels != ignore_index).sum(dim=-1).clamp(min=1)
+    avg_losses = losses / num_token_gt
+    normalized_probs = torch.exp(-avg_losses)
+    avg_losses = avg_losses.float().cpu().numpy().tolist()
+    normalized_probs = normalized_probs.float().cpu().numpy().tolist()
+    return [
+        {"prob": prob, "avg_loss": avg_loss}
+        for prob, avg_loss in zip(normalized_probs, avg_losses)
+    ]
+
+
 def _get_sampler_from_model(model) -> Optional[Any]:
     """Extract sampler from model (handles adapter wrapping)."""
     # Check if model is wrapped with DiffusionModelAdapter
