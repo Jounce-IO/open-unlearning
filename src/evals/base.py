@@ -133,7 +133,7 @@ class Evaluator:
                 batch_size=batch_size,
                 trajectory_config=trajectory_config,
                 rouge_type=rouge_type,
-                **base_kwargs,
+                **{k: v for k, v in base_kwargs.items() if k != "tokenizer"},
             )
             for metric_name, result in coalesced_results.items():
                 logs[metric_name] = result
