@@ -2,6 +2,7 @@ import os
 import json
 import logging
 from evals.metrics import get_metrics
+from evals.metrics.trajectory_metrics import run_coalesced_trajectory_metrics
 
 logger = logging.getLogger("evaluator")
 
@@ -83,6 +84,65 @@ class Evaluator:
         logger.info(
             f"Aggregated evaluations will be summarised in: {summary_file_path}"
         )
+
+        # When coalesce=True and all metrics use handler "trajectory_metrics", one sampler pass per item for all.
+        metrics_cfg = self.eval_cfg.metrics
+        handlers = [metrics_cfg.get(m) and metrics_cfg[m].get("handler") for m in self.metrics]
+        all_trajectory = (
+            coalesce
+            and len(self.metrics) >= 2
+            and all(h == "trajectory_metrics" for h in handlers if h is not None)
+        )
+        if all_trajectory:
+            already = [m for m in self.metrics if not overwrite and m in logs and logs[m]]
+            if len(already) == len(self.metrics):
+                for metric_name in self.metrics:
+                    logger.info(f"Skipping {metric_name}, already evaluated.")
+                    if logs[metric_name].get("agg_value") is not None:
+                        logger.info(f"Result for metric {metric_name}:\t{logs[metric_name]['agg_value']}")
+                self.save_logs(self.summarize(logs), summary_file_path)
+                return self.summarize(logs)
+            for m in self.metrics:
+                _ = logs.pop(m, None)
+            first_name = next(iter(self.metrics))
+            first_metric = self.metrics[first_name]
+            first_cfg = metrics_cfg[first_name]
+            base_kwargs = {
+                "tokenizer": kwargs.get("tokenizer"),
+                "template_args": kwargs.get("template_args"),
+            }
+            data = first_metric.get_datasets(dataset_cfgs=first_cfg.get("datasets"), **base_kwargs)
+            collators = first_metric.get_collators(collator_cfgs=first_cfg.get("collators"), **base_kwargs)
+            trajectory_config = first_cfg.get("trajectory_config") or {}
+            batch_size = first_cfg.get("batch_size", 1)
+            rouge_type = "rougeL_recall"
+            for m in self.metrics:
+                cfg = metrics_cfg.get(m)
+                if cfg is not None and getattr(cfg, "get", None) and cfg.get("rouge_type"):
+                    rouge_type = cfg.get("rouge_type")
+                    break
+            metrics_to_run = [(m, metrics_cfg[m]) for m in self.metrics]
+            coalesced_results = run_coalesced_trajectory_metrics(
+                model,
+                metrics_to_run,
+                self.eval_cfg,
+                logs,
+                data=data,
+                collators=collators,
+                tokenizer=base_kwargs["tokenizer"],
+                batch_size=batch_size,
+                trajectory_config=trajectory_config,
+                rouge_type=rouge_type,
+                **base_kwargs,
+            )
+            for metric_name, result in coalesced_results.items():
+                logs[metric_name] = result
+                if result.get("agg_value") is not None:
+                    logger.info(f"Result for metric {metric_name}:\t{result['agg_value']}")
+            self.save_logs(logs, logs_file_path)
+            self.save_logs(self.summarize(logs), summary_file_path)
+            return self.summarize(logs)
+
         for metric_name, metric_fn in self.metrics.items():
             if not overwrite and metric_name in logs and logs[metric_name]:
                 logger.info(f"Skipping {metric_name}, already evaluated.")

@@ -22,6 +22,7 @@ from evals.metrics.utility import (
     hm_aggregate,
     classifier_prob,
 )
+from evals.metrics.trajectory_metrics import _trajectory_metric
 
 METRICS_REGISTRY: Dict[str, UnlearningMetric] = {}
 
@@ -73,3 +74,6 @@ _register_metric(mia_reference)
 
 # Register Utility metrics
 _register_metric(classifier_prob)
+
+# Register trajectory metrics (one sampler pass per batch; probability/rouge from trajectory)
+_register_metric(_trajectory_metric)
