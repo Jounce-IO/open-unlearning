@@ -1,0 +1,15 @@
+# @package eval.muse_trajectory
+# MUSE trajectory eval: single trajectory_all metric (like tofu_trajectory_multi structure).
+# Used by dllm eval when benchmark=muse and not --no-trajectory.
+
+defaults:
+  - muse_trajectory_metrics:
+    - trajectory_all
+
+handler: MUSEEvaluator
+output_dir: ${paths.output_dir}
+metrics: {}
+overwrite: false
+data_split: News
+retain_logs_path: null
+samples: null

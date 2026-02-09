@@ -64,6 +64,8 @@ class Evaluator:
     def evaluate(self, model, output_dir=None, overwrite=None, **kwargs):
         # set flag to overwrite metrics
         overwrite = self.eval_cfg.overwrite if overwrite is None else overwrite
+        # When False: run each trajectory_metrics entry separately (baseline). When True: coalesce into one pass (if implemented).
+        coalesce = getattr(self.eval_cfg, "coalesce_trajectory_metrics", True)
 
         # Prepare model for evaluation
         model = self.prepare_model(model)

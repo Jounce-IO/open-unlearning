@@ -18,3 +18,5 @@ holdout_split: holdout10
 retain_logs_path: null
 question_key: "question"
 batch_size: 32
+# If false, run each trajectory_metrics entry separately (baseline). If true, coalesce into one model pass.
+coalesce_trajectory_metrics: true

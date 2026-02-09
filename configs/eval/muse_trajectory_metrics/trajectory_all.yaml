@@ -1,0 +1,29 @@
+# @package eval.muse_trajectory.metrics.trajectory_all
+# Single trajectory_all metric for muse_trajectory (used by dllm eval).
+
+handler: trajectory_metrics
+batch_size: 16
+# Overridable by dllm eval --metrics (eval.muse_trajectory.metrics.trajectory_all.include_metrics)
+include_metrics: null
+metrics:
+  - forget_knowmem_ROUGE
+  - retain_knowmem_ROUGE
+  - forget_verbmem_ROUGE
+  - extraction_strength
+  - privleak
+
+datasets:
+  forget_knowmem:
+    handler: QADataset
+    args:
+      hf_args:
+        path: muse-bench/MUSE-${eval.muse_trajectory.data_split}
+        name: knowmem
+        split: forget_qa
+      few_shot_dataset_hf_args:
+        path: muse-bench/MUSE-${eval.muse_trajectory.data_split}
+        name: knowmem
+        split: forget_qa_icl
+      question_key: question
+      answer_key: answer
+      max_length: 512
