@@ -1387,12 +1387,26 @@ def trajectory_metrics(model, **kwargs):
             if trajectory_sample_interval is not None and trajectory_sample_interval > 0
             else "diffusion_step"
         )
+        # Actual step values: when interval set, step index k → unmasked_tokens (0, 8, 16, ..., max_new_tokens)
+        step_values = None
+        if (
+            step_meaning == "unmasked_tokens_approx"
+            and trajectory_sample_interval is not None
+            and max_new_tokens is not None
+            and num_trajectory_steps > 0
+        ):
+            step_values = [
+                min(k * trajectory_sample_interval, max_new_tokens)
+                for k in range(num_trajectory_steps)
+            ]
         trajectory_step_metadata = {
             "num_trajectory_steps": num_trajectory_steps,
             "trajectory_sample_interval": trajectory_sample_interval,
             "max_new_tokens": max_new_tokens,
             "step_meaning": step_meaning,
         }
+        if step_values is not None:
+            trajectory_step_metadata["step_values"] = step_values
 
         # Single-pass: return one result per display name so evaluator merges into logs.
         internal_names = list(loaded_metrics.keys())
