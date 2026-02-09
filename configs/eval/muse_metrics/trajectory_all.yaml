@@ -58,6 +58,7 @@ trajectory_config:
     steps: 16
     temperature: 0.0
     max_new_tokens: 32
+    trajectory_sample_interval: null  # optional; set via CLI (e.g. --trajectory-sample-interval 8)
 
 datasets:
   forget_knowmem:
