@@ -79,6 +79,8 @@ def _compute_prob_from_fixation_logits(
         return [{"prob": 0.0, "avg_loss": float("inf")} for _ in range(B)]
     shifted_labels = labels[..., 1:L].contiguous()
     logits = fixation_logits[..., : L - 1, :].contiguous()
+    # CrossEntropyLoss and .numpy() require float32; sampler may return bfloat16
+    logits = logits.float()
     loss_fn = nn.CrossEntropyLoss(ignore_index=ignore_index, reduction="none")
     losses = loss_fn(logits.transpose(-1, -2), shifted_labels).sum(dim=-1)
     num_token_gt = (shifted_labels != ignore_index).sum(-1)
