@@ -4,6 +4,7 @@ from omegaconf import DictConfig
 from trainer.utils import seed_everything
 from model import get_model
 from evals import get_evaluators
+from evals.model_prep import prepare_model_for_eval
 
 
 @hydra.main(version_base=None, config_path="../configs", config_name="eval.yaml")
@@ -17,6 +18,7 @@ def main(cfg: DictConfig):
     template_args = model_cfg.template_args
     assert model_cfg is not None, "Invalid model yaml passed in train config."
     model, tokenizer = get_model(model_cfg)
+    model = prepare_model_for_eval(cfg, model, tokenizer)
 
     eval_cfgs = cfg.eval
     evaluators = get_evaluators(eval_cfgs)

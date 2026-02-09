@@ -1,4 +1,6 @@
 model_handler: AutoModelForCausalLM
+# When true and eval uses trajectory_metrics, model is wrapped with DiffusionModelAdapter (dllm) so .sampler exists.
+use_diffusion_adapter: true
 model_args:
   pretrained_model_name_or_path: "GSAI-ML/LLaDA-8B-Instruct"
   device_map: cuda
