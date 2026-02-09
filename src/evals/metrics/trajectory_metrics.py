@@ -136,7 +136,8 @@ def _run_sampler_once(
     max_new_tokens = T_batch - min_prompt_len
     if max_new_tokens <= 0:
         return None, None
-    sampler_kwargs = trajectory_config.get("sampler_kwargs", {}) or {}
+    sampler_kwargs = dict(trajectory_config.get("sampler_kwargs", {}) or {})
+    sampler_kwargs.pop("max_new_tokens", None)  # use batch-derived max_new_tokens only
     with torch.no_grad():
         out = sampler.sample(
             inputs=prompts,
