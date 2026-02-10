@@ -176,6 +176,7 @@ def _generate_trajectories_for_dataloader(
                 "S": S,
                 "L": L,
             }
+        del logits_history, out
     return trajectories_by_idx
 
 
@@ -1408,6 +1409,41 @@ def trajectory_metrics(model, **kwargs):
             )
         # #endregion
 
+        # Build trajectory step metadata so results can interpret step indices (which diffusion/unmasked-token step each index is).
+        sampler_kwargs = trajectory_config.get("sampler_kwargs", {})
+        num_trajectory_steps = 0
+        if agg_value and "steps" in agg_value and agg_value["steps"]:
+            first_metric_arr = next(iter(agg_value["steps"].values()), None)
+            if first_metric_arr is not None and len(first_metric_arr) > 0:
+                num_trajectory_steps = int(len(first_metric_arr))
+        trajectory_sample_interval = sampler_kwargs.get("trajectory_sample_interval")
+        max_new_tokens = sampler_kwargs.get("max_new_tokens")
+        step_meaning = (
+            "unmasked_tokens_approx"
+            if trajectory_sample_interval is not None and trajectory_sample_interval > 0
+            else "diffusion_step"
+        )
+        # Actual step values: when interval set, step index k → unmasked_tokens (0, 8, 16, ..., max_new_tokens)
+        step_values = None
+        if (
+            step_meaning == "unmasked_tokens_approx"
+            and trajectory_sample_interval is not None
+            and max_new_tokens is not None
+            and num_trajectory_steps > 0
+        ):
+            step_values = [
+                min(k * trajectory_sample_interval, max_new_tokens)
+                for k in range(num_trajectory_steps)
+            ]
+        trajectory_step_metadata = {
+            "num_trajectory_steps": num_trajectory_steps,
+            "trajectory_sample_interval": trajectory_sample_interval,
+            "max_new_tokens": max_new_tokens,
+            "step_meaning": step_meaning,
+        }
+        if step_values is not None:
+            trajectory_step_metadata["step_values"] = step_values
+
         # Single-pass: return one result per display name so evaluator merges into logs.
         internal_names = list(loaded_metrics.keys())
         if full_display_order and len(full_display_order) >= len(full_internal_order):
@@ -1432,11 +1468,16 @@ def trajectory_metrics(model, **kwargs):
                     },
                     "value_by_index": {},
                 }
+            out["trajectory_step_metadata"] = {
+                "agg_value": None,
+                "trajectory_step_metadata": trajectory_step_metadata,
+            }
             return out
 
         return {
             "agg_value": agg_value,
             "value_by_index": {},  # Empty since we don't store per-sample trajectories
+            "trajectory_step_metadata": trajectory_step_metadata,
         }
 
 

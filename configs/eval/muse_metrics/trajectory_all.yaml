@@ -58,6 +58,8 @@ trajectory_config:
     steps: 16
     temperature: 0.0
     max_new_tokens: 32
+    # Tokens between trajectory captures; larger = fewer logits stored, less memory.
+    trajectory_sample_interval: 8
 
 datasets:
   forget_knowmem:

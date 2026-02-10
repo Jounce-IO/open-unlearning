@@ -657,6 +657,26 @@ class TestTrajectoriesFromLogits:
         for key in ("steps", "fixation_start", "fixation_end", "fixation_ratio"):
             assert out[key].shape == (B, V, generated_len, S)
 
+    def test_trajectory_sample_interval_S_traj_25_fixation_in_range(self):
+        """trajectories_from_logits with S_traj=25 and fixation_steps in [0, S_traj-1]; R shape [B, V, L, S_traj]."""
+        S_traj = 25  # e.g. ceil(200/8)
+        B, V, L_gen = 1, 64, 50
+        max_prompt_len = 2
+        L_full = max_prompt_len + L_gen
+        logits_history = [torch.randn(B, L_full, V) for _ in range(S_traj)]
+        fixation_steps = torch.randint(0, S_traj, (B, L_full))
+        prompt_lens = [max_prompt_len]
+
+        out = trajectories_from_logits(
+            logits_history, fixation_steps, prompt_lens, return_trajectory_tensors=False
+        )
+
+        assert out["S"] == S_traj
+        assert out["L"] == L_gen
+        assert out["R"].shape == (B, V, L_gen, S_traj)
+        assert out["F"].shape == (B, L_gen)
+        assert out["F"].min() >= 0 and out["F"].max() <= S_traj - 1
+
     def test_consistency_with_compute_trajectories(self):
         """trajectories_from_logits output matches compute_trajectories(R, F, S) for same data."""
         B, V, L, S = 2, 20, 10, 5
