@@ -2,6 +2,8 @@ import os
 import json
 import logging
 from typing import Callable, Any, Dict
+
+import torch
 from data import get_datasets, get_collators
 
 logger = logging.getLogger("metrics")
@@ -135,6 +137,13 @@ class UnlearningMetric:
         metric_kwargs = self.prepare_kwargs_evaluate_metric(
             model, metric_name, cache, **kwargs
         )
+        # Free GPU cache after pre_compute so the main metric (e.g. trajectory_metrics)
+        # has maximal contiguous memory. Pre_compute (e.g. mia_min_k) runs over the
+        # full dataset; many forwards can fragment memory and cause OOM in the
+        # subsequent trajectory loop even when batch_size=1 and step count match
+        # a previously successful run (see docs/oom-investigation-llada-jobs-2026-02-10.md).
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache()
         results = self.evaluate_metric(model, metric_name, **metric_kwargs)
         # Single-pass trajectory: result can be dict of sub-results keyed by display name.
         if (
