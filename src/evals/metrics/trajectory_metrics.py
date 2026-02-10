@@ -1269,6 +1269,12 @@ def trajectory_metrics(model, **kwargs):
                 # Release batch-sized GPU data before next batch to avoid holding two batches in memory (OOM with many samples).
                 # R and F are references to out["R"] and out["F"]; deleting only 'out' leaves R, F alive (see reports/oom-investigation-why-still-oom.md).
                 # logits_history already deleted earlier in the loop after trajectories_from_logits.
+                # CRITICAL: sample_traj holds views R[sample_idx], F[sample_idx]; logits (last from inner loop) is a view of R.
+                # So long as these exist, R and F storage cannot be freed. Delete them first (fixes GPU memory leak across batches).
+                try:
+                    del sample_traj, batch_template, logits
+                except NameError:
+                    pass
                 del out, R, F
                 if torch.cuda.is_available():
                     torch.cuda.synchronize()
