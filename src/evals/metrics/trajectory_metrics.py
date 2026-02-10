@@ -5,6 +5,7 @@ This module computes metrics at each diffusion step across three trajectory type
 (steps, fixation, ratio), supporting any metric from the open-unlearning framework.
 """
 
+import gc
 import logging
 import os
 import subprocess
@@ -1276,6 +1277,7 @@ def trajectory_metrics(model, **kwargs):
                 except NameError:
                     pass
                 del out, R, F
+                gc.collect()
                 if torch.cuda.is_available():
                     torch.cuda.synchronize()
                     torch.cuda.empty_cache()
