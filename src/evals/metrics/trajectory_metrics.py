@@ -1271,6 +1271,7 @@ def trajectory_metrics(model, **kwargs):
                 # logits_history already deleted earlier in the loop after trajectories_from_logits.
                 del out, R, F
                 if torch.cuda.is_available():
+                    torch.cuda.synchronize()
                     torch.cuda.empty_cache()
 
         # Multi-dataset: run privleak dual trajectory after per-key loops
