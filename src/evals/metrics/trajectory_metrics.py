@@ -5,6 +5,7 @@ This module computes metrics at each diffusion step across three trajectory type
 (steps, fixation, ratio), supporting any metric from the open-unlearning framework.
 """
 
+import gc
 import logging
 import os
 import subprocess
@@ -1306,8 +1307,16 @@ def trajectory_metrics(model, **kwargs):
                 # Release batch-sized GPU data before next batch to avoid holding two batches in memory (OOM with many samples).
                 # R and F are references to out["R"] and out["F"]; deleting only 'out' leaves R, F alive (see reports/oom-investigation-why-still-oom.md).
                 # logits_history already deleted earlier in the loop after trajectories_from_logits.
+                # CRITICAL: sample_traj holds views R[sample_idx], F[sample_idx]; logits (last from inner loop) is a view of R.
+                # So long as these exist, R and F storage cannot be freed. Delete them first (fixes GPU memory leak across batches).
+                try:
+                    del sample_traj, batch_template, logits
+                except NameError:
+                    pass
                 del out, R, F
+                gc.collect()
                 if torch.cuda.is_available():
+                    torch.cuda.synchronize()
                     torch.cuda.empty_cache()
 
         # Multi-dataset: run privleak dual trajectory after per-key loops
@@ -1370,10 +1379,49 @@ def trajectory_metrics(model, **kwargs):
             else:
                 logger.warning("Privleak dual trajectories empty, skipping privleak")
 
-        # Aggregate results: compute mean across samples for each step (after all batches)
+        def _distribution_for_step(vals_clean: list) -> dict:
+            """Per-step distribution: mean, std, median, p25, p75, min, max, 95% CI."""
+            arr = np.array(vals_clean, dtype=np.float64)
+            n = int(np.sum(~np.isnan(arr)))
+            nan = np.nan
+            if n == 0:
+                return {
+                    "mean": nan,
+                    "std": nan,
+                    "median": nan,
+                    "p25": nan,
+                    "p75": nan,
+                    "min": nan,
+                    "max": nan,
+                    "ci_low": nan,
+                    "ci_high": nan,
+                }
+            mean = float(np.nanmean(arr))
+            if n == 1:
+                std = 0.0
+                ci_low = ci_high = mean
+            else:
+                std = float(np.nanstd(arr))
+                se = std / np.sqrt(n)
+                ci_low = mean - 1.96 * se
+                ci_high = mean + 1.96 * se
+            return {
+                "mean": mean,
+                "std": std,
+                "median": float(np.nanpercentile(arr, 50)),
+                "p25": float(np.nanpercentile(arr, 25)),
+                "p75": float(np.nanpercentile(arr, 75)),
+                "min": float(np.nanmin(arr)),
+                "max": float(np.nanmax(arr)),
+                "ci_low": ci_low,
+                "ci_high": ci_high,
+            }
+        # Aggregate results: compute mean and per-step distribution for each step (after all batches)
         agg_value = {}
+        step_distribution = {}
         for traj_name in trajectory_names:
             agg_value[traj_name] = {}
+            step_distribution[traj_name] = {}
             for metric_name in loaded_metrics.keys():
                 # Collect values per step
                 step_metric_values = {}  # {step: [values across samples]}
@@ -1382,20 +1430,64 @@ def trajectory_metrics(model, **kwargs):
                         if metric_name in metrics_dict and len(metrics_dict[metric_name]) > 0:
                             step_metric_values[step] = metrics_dict[metric_name]
             
-                # Aggregate: mean across samples for each step
+                # Aggregate: mean and full distribution per step
                 if step_metric_values:
                     max_step = max(step_metric_values.keys())
                     aggregated = []
+                    dist_means, dist_stds, dist_medians = [], [], []
+                    dist_p25, dist_p75, dist_mins, dist_maxs = [], [], [], []
+                    dist_ci_low, dist_ci_high = [], []
                     for step in range(max_step + 1):
                         if step in step_metric_values:
                             vals = step_metric_values[step]
                             vals_clean = [float(v) if v is not None else np.nan for v in vals]
                             aggregated.append(np.nanmean(vals_clean) if vals_clean else np.nan)
+                            d = _distribution_for_step(vals_clean)
+                            dist_means.append(d["mean"])
+                            dist_stds.append(d["std"])
+                            dist_medians.append(d["median"])
+                            dist_p25.append(d["p25"])
+                            dist_p75.append(d["p75"])
+                            dist_mins.append(d["min"])
+                            dist_maxs.append(d["max"])
+                            dist_ci_low.append(d["ci_low"])
+                            dist_ci_high.append(d["ci_high"])
                         else:
                             aggregated.append(np.nan)
+                            dist_means.append(np.nan)
+                            dist_stds.append(np.nan)
+                            dist_medians.append(np.nan)
+                            dist_p25.append(np.nan)
+                            dist_p75.append(np.nan)
+                            dist_mins.append(np.nan)
+                            dist_maxs.append(np.nan)
+                            dist_ci_low.append(np.nan)
+                            dist_ci_high.append(np.nan)
                     agg_value[traj_name][metric_name] = np.array(aggregated)
+                    step_distribution[traj_name][metric_name] = {
+                        "mean": np.array(dist_means),
+                        "std": np.array(dist_stds),
+                        "median": np.array(dist_medians),
+                        "p25": np.array(dist_p25),
+                        "p75": np.array(dist_p75),
+                        "min": np.array(dist_mins),
+                        "max": np.array(dist_maxs),
+                        "ci_low": np.array(dist_ci_low),
+                        "ci_high": np.array(dist_ci_high),
+                    }
                 else:
                     agg_value[traj_name][metric_name] = np.array([])
+                    step_distribution[traj_name][metric_name] = {
+                        "mean": np.array([]),
+                        "std": np.array([]),
+                        "median": np.array([]),
+                        "p25": np.array([]),
+                        "p75": np.array([]),
+                        "min": np.array([]),
+                        "max": np.array([]),
+                        "ci_low": np.array([]),
+                        "ci_high": np.array([]),
+                    }
     
         # #region agent log
         if torch.cuda.is_available():
@@ -1467,6 +1559,10 @@ def trajectory_metrics(model, **kwargs):
                         for traj in trajectory_names
                     },
                     "value_by_index": {},
+                    "step_distribution": {
+                        traj: {internal_name: step_distribution[traj][internal_name]}
+                        for traj in trajectory_names
+                    },
                 }
             out["trajectory_step_metadata"] = {
                 "agg_value": None,
@@ -1477,7 +1573,7 @@ def trajectory_metrics(model, **kwargs):
         return {
             "agg_value": agg_value,
             "value_by_index": {},  # Empty since we don't store per-sample trajectories
-            "trajectory_step_metadata": trajectory_step_metadata,
+            "step_distribution": step_distribution,
         }
 
 

@@ -259,9 +259,31 @@ The `trajectory_metrics` function returns a dictionary following the standard me
         "fixation_end": {...},      # Same structure
         "fixation_ratio": {...}     # Same structure
     },
-    "value_by_index": {}  # Empty - per-sample trajectories not stored (memory optimization)
+    "value_by_index": {},  # Empty - per-sample trajectories not stored (memory optimization)
+    "step_distribution": {
+        # Per-step distribution stats (same nesting as agg_value) for box-and-whisker / interval plots
+        "steps": {
+            "probability": {
+                "mean": np.array([...]),   # [S] - same as agg_value for this metric
+                "std": np.array([...]),   # [S]
+                "median": np.array([...]),
+                "p25": np.array([...]),
+                "p75": np.array([...]),
+                "min": np.array([...]),
+                "max": np.array([...]),
+                "ci_low": np.array([...]),   # 95% CI (mean - 1.96*SE)
+                "ci_high": np.array([...]),  # 95% CI (mean + 1.96*SE)
+            },
+            ...
+        },
+        "fixation_start": {...},    # Same structure
+        "fixation_end": {...},
+        "fixation_ratio": {...}
+    }
 }
 ```
+
+Use `step_distribution` for visualizations: box-and-whisker (p25, median, p75, min, max per step) or line + shaded interval (mean with ci_low/ci_high or mean ± std).
 
 ## Implementation Details
 
