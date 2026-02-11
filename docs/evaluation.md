@@ -104,7 +104,7 @@ $$
 
 **Implementation.** Handler: `probability_confidence_ordered` ([`src/evals/metrics/memorization.py`](../src/evals/metrics/memorization.py)); core: `evaluate_probability_confidence_ordered` in [`src/evals/metrics/utils.py`](../src/evals/metrics/utils.py). Use the same dataset config as forget probability (e.g. forget split) and select the `probability_confidence_ordered` handler. See [Diffusion LLM Support](diffusion_support.md) for using this metric with diffusion models.
 
-Some metrics are reported as both individual points and aggregated values (averaged): probability scores, ROUGE scores, MIA attack statistics, Truth Ratio scores etc. They return a dictionary which is structured as `{"agg_value": ..., "values_by_index": {"0":..., "1":..., ...}}`.
+Some metrics are reported as both individual points and aggregated values (averaged): probability scores, ROUGE scores, MIA attack statistics, Truth Ratio scores etc. They return a dictionary which is structured as `{"agg_value": ..., "value_by_index": {"0":..., "1":..., ...}}`.
 
 Other metrics like TOFU's Forget Quality (which is a single score computed over forget v/s retain distributions of Truth Ratio) and MUSE's PrivLeak (which is a single score computed over forget v/s holdout distributions of MIA attack values) aggregate the former metrics into a single score. They return a dictionary which contains `{"agg_value": ...}`.
 
