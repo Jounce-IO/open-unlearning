@@ -138,6 +138,53 @@ def evaluate_probability(model, batch):
     ]
 
 
+def evaluate_probability_confidence_ordered(model, batch):
+    """Evaluate forget probability in confidence order (for diffusion LLMs).
+
+    Instead of aggregating in causal order, we use the model's probability for the
+    true label at each position (confidence), sort positions by confidence
+    (highest first), then take the geometric mean in that order. This mirrors
+    diffusion behavior where "top confidence labels" are set first.
+
+    Returns per-sample prob and avg_loss (same semantics as evaluate_probability)
+    plus optional confidence_ordered_probs: list of probs in descending confidence order.
+    """
+    batch = {k: v.to(model.device) for k, v in batch.items()}
+    with torch.no_grad():
+        output = model(**batch)
+    logits = output.logits
+    labels = batch["labels"]
+    shifted_labels = labels[..., 1:].contiguous()
+    logits = logits[..., :-1, :].contiguous()
+    bsz, seq_len, V = logits.shape
+    log_probs = torch.nn.functional.log_softmax(logits.float(), dim=-1)
+
+    results = []
+    for i in range(bsz):
+        # Per-position probability of the true token (confidence for the label at that position)
+        pos_probs = []
+        for pos in range(seq_len):
+            if shifted_labels[i, pos].item() == IGNORE_INDEX:
+                continue
+            y = shifted_labels[i, pos].item()
+            lp = log_probs[i, pos, y].item()
+            pos_probs.append(np.exp(lp))
+        if not pos_probs:
+            results.append({"prob": None, "avg_loss": None})
+            continue
+        pos_probs = np.array(pos_probs)
+        # Sort by confidence (descending): set top confidence labels first
+        pos_probs_sorted = np.sort(pos_probs)[::-1]
+        geom_mean = float(np.exp(np.mean(np.log(pos_probs_sorted + 1e-12))))
+        avg_loss = float(-np.log(geom_mean + 1e-12))
+        results.append({
+            "prob": geom_mean,
+            "avg_loss": avg_loss,
+            "confidence_ordered_probs": pos_probs_sorted.tolist(),
+        })
+    return results
+
+
 def tokenwise_logprobs(model, batch, grad=False, return_labels=False):
     """
     Compute token-wise next token prediction logprobs for all labeled tokens for each sample in a batch.

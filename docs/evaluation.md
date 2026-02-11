@@ -40,6 +40,70 @@ python src/eval.py --config-name=eval.yaml \
 
 A metric takes a model and a dataset and computes statistics of the model over the datapoints (or) takes other metrics and computes an aggregated score over the dataset.
 
+### Forget probability (formal definition)
+
+**Forget probability** is the probability metric evaluated on the **forget set** $\mathcal{D}_f$ (e.g. TOFU’s forget Q&A split). It measures how likely the model is to assign high probability to the *answer* tokens of forget-set examples; lower values indicate better unlearning.
+
+**Per-example score.** For a single example $i$ with input_ids $\mathbf{x}_i$ and labels $\mathbf{y}_i$, only positions where the label is not ignored (e.g. answer tokens) are used. Let $T_i$ be the set of sequence positions $t$ with non-ignored labels. The model’s next-token distribution at each position is $p_\theta(\cdot \mid \mathbf{x}_i, \mathbf{y}_{i,<t})$. The per-example average cross-entropy over the target tokens is
+
+$$
+\bar{L}_i = \frac{1}{|T_i|} \sum_{t \in T_i} \bigl( -\log p_\theta(y_{i,t} \mid \mathbf{x}_i, \mathbf{y}_{i,<t}) \bigr).
+$$
+
+The **per-example (normalized) probability** is
+
+$$
+P_i = \exp(-\bar{L}_i) = \left( \prod_{t \in T_i} p_\theta(y_{i,t} \mid \mathbf{x}_i, \mathbf{y}_{i,<t}) \right)^{1/|T_i|},
+$$
+
+i.e. the **geometric mean** of the model’s next-token probabilities over the labeled (answer) positions.
+
+**Aggregate (forget probability).** The **forget probability** reported by the evaluator is the mean of these per-example scores over the forget set:
+
+$$
+\text{ForgetProb}(\theta; \mathcal{D}_f) = \frac{1}{|\mathcal{D}_f|} \sum_{i \in \mathcal{D}_f} P_i.
+$$
+
+**Implementation.** The handler is the `probability` metric ([`src/evals/metrics/memorization.py`](../src/evals/metrics/memorization.py)); the core per-batch computation is `evaluate_probability` in [`src/evals/metrics/utils.py`](../src/evals/metrics/utils.py). When the dataset is the forget split (e.g. via [`configs/eval/tofu_metrics/forget_Q_A_Prob.yaml`](../configs/eval/tofu_metrics/forget_Q_A_Prob.yaml)), the reported `agg_value` is the forget probability above; `value_by_index` gives the per-example $P_i$.
+
+### Confidence-ordered forget probability (diffusion LLMs)
+
+For **diffusion language models (dLLMs)**, tokens are not generated in causal order; the model predicts (and “fixes”) positions bidirectionally, often **setting the top-confidence labels first**. The **confidence-ordered forget probability** is the forget-probability analogue defined by ordering positions by the model’s **confidence in the true label** at each position, then aggregating in that order.
+
+**Confidence (per position).** For a single example $i$ with input $\mathbf{x}_i$ and labels $\mathbf{y}_i$, let $T_i$ be the set of labeled (non-ignored) positions. At each position $t \in T_i$, the model (in one forward pass) produces a distribution over the vocabulary. The **confidence** for the true label $y_{i,t}$ at position $t$ is
+
+$$
+c_{i,t} = p_\theta(y_{i,t} \mid \mathbf{x}_i, \mathbf{y}_i),
+$$
+
+i.e. the probability the model assigns to the correct token at $t$. For a bidirectional/diffusion model this uses full-sequence context (no causal masking).
+
+**Confidence ordering.** Sort the labeled positions by confidence (descending): $t_{(1)}, t_{(2)}, \ldots, t_{(n)}$ so that
+
+$$
+c_{i,t_{(1)}} \geq c_{i,t_{(2)}} \geq \cdots \geq c_{i,t_{(n)}}.
+$$
+
+We interpret this as “setting the top confidence labels first.”
+
+**Per-example score (confidence-ordered).** The **confidence-ordered forget probability** for example $i$ is the geometric mean of the model’s probabilities for the true labels, **taken in confidence order** (highest-confidence position first):
+
+$$
+P_i^{\mathrm{co}} = \left( \prod_{j=1}^{n} p_\theta(y_{i,t_{(j)}} \mid \mathbf{x}_i, \mathbf{y}_i) \right)^{1/n}.
+$$
+
+Since the model’s distribution at each position in one forward pass does not depend on the order we write the product, this equals $\bigl( \prod_{t \in T_i} p_\theta(y_{i,t} \mid \mathbf{x}_i, \mathbf{y}_i) \bigr)^{1/n}$ — the same scalar as the (causal) forget probability when using the same per-position probabilities. The difference is **conceptual**: for AR we condition causally ($\mathbf{y}_{<t}$); for dLLMs we use the model’s (bidirectional) probability at each $t$ and **order** the product by confidence to mirror “set top confidence labels first.”
+
+**Aggregate.** The **confidence-ordered forget probability** over the forget set $\mathcal{D}_f$ is
+
+$$
+\text{ForgetProb}^{\mathrm{co}}(\theta; \mathcal{D}_f) = \frac{1}{|\mathcal{D}_f|} \sum_{i \in \mathcal{D}_f} P_i^{\mathrm{co}}.
+$$
+
+**Optional output.** The implementation can also return the **confidence-ordered sequence** $(p_{t_{(1)}}, p_{t_{(2)}}, \ldots, p_{t_{(n)}})$ per example (in `value_by_index` under `confidence_ordered_probs`) for analysis, e.g. plotting probability vs. confidence rank.
+
+**Implementation.** Handler: `probability_confidence_ordered` ([`src/evals/metrics/memorization.py`](../src/evals/metrics/memorization.py)); core: `evaluate_probability_confidence_ordered` in [`src/evals/metrics/utils.py`](../src/evals/metrics/utils.py). Use the same dataset config as forget probability (e.g. forget split) and select the `probability_confidence_ordered` handler. See [Diffusion LLM Support](diffusion_support.md) for using this metric with diffusion models.
+
 Some metrics are reported as both individual points and aggregated values (averaged): probability scores, ROUGE scores, MIA attack statistics, Truth Ratio scores etc. They return a dictionary which is structured as `{"agg_value": ..., "values_by_index": {"0":..., "1":..., ...}}`.
 
 Other metrics like TOFU's Forget Quality (which is a single score computed over forget v/s retain distributions of Truth Ratio) and MUSE's PrivLeak (which is a single score computed over forget v/s holdout distributions of MIA attack values) aggregate the former metrics into a single score. They return a dictionary which contains `{"agg_value": ...}`.
