@@ -208,7 +208,7 @@ class Evaluator:
             if "rouge" in merged_metrics and not merged_metrics["rouge"]:
                 merged_metrics["rouge"] = {"rouge_type": "rougeL_recall"}
             if not merged_metrics and len(self.metrics) >= 2:
-                # Fallback when config structure differs (e.g. in cluster): tofu_trajectory_multi has Prob + ROUGE.
+                # Fallback when config structure differs (e.g. in cluster): use Prob + ROUGE.
                 merged_metrics = {"probability": {}, "rouge": {"rouge_type": "rougeL_recall"}}
             metric_display_names = list(self.metrics.keys())
             merged_args = {
