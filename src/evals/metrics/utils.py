@@ -1,6 +1,6 @@
 import os
 import sys
-from typing import List
+from typing import Dict, List, Optional
 from tqdm import tqdm
 from rouge_score import rouge_scorer
 from collections import defaultdict
@@ -12,6 +12,16 @@ import torch
 from transformers import StoppingCriteria, StoppingCriteriaList, PreTrainedTokenizer
 from data.utils import IGNORE_INDEX
 import warnings
+
+
+def _tensor_to_list_of_floats(tensor: torch.Tensor) -> list:
+    """Convert 1D tensor to list of Python floats with a single GPU→CPU transfer.
+
+    Avoids repeated syncs; do not keep tensors on GPU after conversion (no GPU cache).
+    """
+    t = tensor.float().cpu()
+    arr = t.numpy()
+    return arr.tolist()
 
 
 def dict_transpose(evals):
@@ -129,12 +139,12 @@ def evaluate_probability(model, batch):
     avg_losses = losses / num_token_gt
     normalized_probs = torch.exp(-avg_losses)
 
-    # Convert to float32 before numpy conversion (BFloat16 not supported by numpy)
-    avg_losses = avg_losses.float().cpu().numpy().tolist()
-    normalized_probs = normalized_probs.float().cpu().numpy().tolist()
+    # Single GPU→CPU transfer per tensor; no GPU-side cache
+    avg_losses_list = _tensor_to_list_of_floats(avg_losses)
+    normalized_probs_list = _tensor_to_list_of_floats(normalized_probs)
     return [
         {"prob": prob, "avg_loss": avg_loss}
-        for prob, avg_loss in zip(normalized_probs, avg_losses)
+        for prob, avg_loss in zip(normalized_probs_list, avg_losses_list)
     ]
 
 
@@ -340,23 +350,38 @@ def stop_sequences_criteria(
     )
 
 
+def eval_rouge_recall_batch(
+    gen_outputs: List[str],
+    ground_truths: List[str],
+    use_stemmer: bool = True,
+    scorer: Optional[rouge_scorer.RougeScorer] = None,
+) -> List[Dict[str, float]]:
+    """Compute ROUGE recall/F1 for (gen, gt) pairs. One scorer per batch (reused for all pairs).
+
+    If scorer is None, creates one RougeScorer with use_stemmer. Pass scorer from caller
+    to reuse one scorer per eval_text_similarity call (avoids creating scorer per call).
+    No GPU: all data is text; cache only on CPU or disk if needed.
+    """
+    if scorer is None:
+        scorer = rouge_scorer.RougeScorer(["rouge1", "rougeL"], use_stemmer=use_stemmer)
+    evals = []
+    for gen, gt in zip(gen_outputs, ground_truths):
+        rouge_scores = scorer.score(gt, gen)
+        evals.append(
+            {
+                "rouge1_recall": rouge_scores["rouge1"].recall,
+                "rougeL_f1": rouge_scores["rougeL"].fmeasure,
+                "rougeL_recall": rouge_scores["rougeL"].recall,
+            }
+        )
+    return evals
+
+
 def eval_text_similarity(model, tokenizer, batch, generation_args):
-    """Evaluate text similarity between model-generated outputs and ground truth using ROUGE scores."""
+    """Evaluate text similarity between model-generated outputs and ground truth using ROUGE scores.
 
-    def eval_rouge_recall_batch(gen_outputs, ground_truths):
-        scorer = rouge_scorer.RougeScorer(["rouge1", "rougeL"], use_stemmer=True)
-        evals = []
-        for gen, gt in zip(gen_outputs, ground_truths):
-            rouge_scores = scorer.score(gt, gen)
-            evals.append(
-                {
-                    "rouge1_recall": rouge_scores["rouge1"].recall,
-                    "rougeL_f1": rouge_scores["rougeL"].fmeasure,
-                    "rougeL_recall": rouge_scores["rougeL"].recall,
-                }
-            )
-        return evals
-
+    Decoding is intentionally batched (batch_decode only); no GPU cache for decoded text.
+    """
     batch = {k: v.to(model.device) for k, v in batch.items()}
     input_ids = batch["input_ids"]
     labels = batch["labels"]
@@ -407,7 +432,9 @@ def eval_text_similarity(model, tokenizer, batch, generation_args):
         raw_text = raw_text.strip()
         gen_texts[i] = raw_text
 
-    scores = eval_rouge_recall_batch(gen_texts, ground_truths)
+    # One scorer per eval_text_similarity call; reuse for all pairs (no GPU cache)
+    _scorer = rouge_scorer.RougeScorer(["rouge1", "rougeL"], use_stemmer=True)
+    scores = eval_rouge_recall_batch(gen_texts, ground_truths, scorer=_scorer)
     scores = [
         {
             **rouge_evals,
