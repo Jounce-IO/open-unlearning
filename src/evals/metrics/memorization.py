@@ -6,6 +6,7 @@ from torch.utils.data import DataLoader
 from evals.metrics.utils import (
     aggregate_to_1D,
     evaluate_probability,
+    evaluate_probability_confidence_ordered,
     eval_text_similarity,
     run_batchwise_evals,
     tokenwise_vocab_logprobs,
@@ -29,6 +30,39 @@ def probability(model, **kwargs):
     fun_args = {}
     scores_by_index = run_batchwise_evals(
         model, dataloader, evaluate_probability, fun_args, "Calculating loss"
+    )
+    prob_values = np.array(
+        [
+            evals["prob"]
+            for evals in scores_by_index.values()
+            if evals["prob"] is not None
+        ]
+    )
+    prob_values = aggregate_to_1D(prob_values)
+    return {"agg_value": np.mean(prob_values), "value_by_index": scores_by_index}
+
+
+@unlearning_metric(name="probability_confidence_ordered")
+def probability_confidence_ordered(model, **kwargs):
+    """Compute forget probability in confidence order (for diffusion LLMs).
+
+    Positions are ordered by the model's confidence in the true label at each
+    position (highest first); the per-example score is the geometric mean of
+    those probabilities in that order. See evaluation.md for the formal definition.
+    """
+    data = kwargs["data"]
+    collator = kwargs["collators"]
+    batch_size = kwargs["batch_size"]
+
+    dataloader = DataLoader(data, batch_size=batch_size, collate_fn=collator)
+
+    fun_args = {}
+    scores_by_index = run_batchwise_evals(
+        model,
+        dataloader,
+        evaluate_probability_confidence_ordered,
+        fun_args,
+        "Calculating confidence-ordered probability",
     )
     prob_values = np.array(
         [

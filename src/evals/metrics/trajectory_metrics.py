@@ -19,6 +19,7 @@ from omegaconf import ListConfig, DictConfig
 from evals.metrics.base import unlearning_metric
 from evals.metrics.utils import (
     evaluate_probability,
+    evaluate_probability_confidence_ordered,
     tokenwise_vocab_logprobs,
     IGNORE_INDEX,
 )
@@ -643,6 +644,7 @@ def _call_metric_at_step(
 
     batch_function_map = {
         "probability": evaluate_probability,
+        "probability_confidence_ordered": evaluate_probability_confidence_ordered,
         "exact_memorization": _exact_memorization_batch_fn,
         "extraction_strength": _extraction_strength_batch_fn,
     }

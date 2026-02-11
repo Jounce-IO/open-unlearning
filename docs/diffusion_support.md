@@ -139,7 +139,9 @@ To properly capture fixation logits:
 
 ### Diffusion-Specific Metrics
 
-Consider adding metrics that leverage diffusion-specific properties:
+**Confidence-ordered forget probability.** The **confidence-ordered forget probability** metric is the forget-probability analogue for diffusion LLMs. Instead of aggregating in causal order, it orders labeled positions by the model’s **confidence in the true label** at each position (highest first), then takes the geometric mean in that order — mirroring “set the top confidence labels first.” Use the `probability_confidence_ordered` handler with the forget split; see [evaluation.md – Confidence-ordered forget probability](evaluation.md#confidence-ordered-forget-probability-diffusion-llms) for the formal definition.
+
+Other metrics that leverage diffusion-specific properties:
 - **Denoising trajectory analysis**: Track how tokens evolve during denoising
 - **Masking ratio effects**: Analyze how different masking ratios affect unlearning
 - **Bidirectional attention patterns**: Probe attention patterns in diffusion models
