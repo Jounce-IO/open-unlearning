@@ -22,6 +22,7 @@ from evals.metrics.utils import (
     evaluate_probability_confidence_ordered,
     tokenwise_vocab_logprobs,
     IGNORE_INDEX,
+    _tensor_to_list_of_floats,
 )
 from rouge_score import rouge_scorer
 from evals.metrics.trajectory_utils import (
@@ -94,11 +95,12 @@ def _compute_prob_from_fixation_logits(
     num_token_gt = (shifted_labels != ignore_index).sum(dim=-1).clamp(min=1)
     avg_losses = losses / num_token_gt
     normalized_probs = torch.exp(-avg_losses)
-    avg_losses = avg_losses.float().cpu().numpy().tolist()
-    normalized_probs = normalized_probs.float().cpu().numpy().tolist()
+    # Single GPU→CPU transfer per tensor; release GPU tensors promptly
+    avg_losses_list = _tensor_to_list_of_floats(avg_losses)
+    normalized_probs_list = _tensor_to_list_of_floats(normalized_probs)
     return [
         {"prob": prob, "avg_loss": avg_loss}
-        for prob, avg_loss in zip(normalized_probs, avg_losses)
+        for prob, avg_loss in zip(normalized_probs_list, avg_losses_list)
     ]
 
 
