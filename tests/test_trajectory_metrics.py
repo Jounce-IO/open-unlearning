@@ -25,6 +25,7 @@ from evals.metrics.trajectory_metrics import (
     _get_metric_from_registry,
     _call_metric_at_step,
     _compute_pre_compute_metrics_at_step,
+    _derive_steps_to_use,
     trajectory_metrics,
 )
 from evals.metrics.trajectory_utils import stack_logits_history
@@ -263,6 +264,64 @@ class TestTrajectoryMetricsShapeValidation:
         assert batch_template["input_ids"].shape == (1, generated_len)
         assert batch_template["labels"].shape == (1, generated_len)
         assert batch_template["attention_mask"].shape == (1, generated_len)
+
+
+class TestDeriveStepsToUse:
+    """Tests for _derive_steps_to_use (step subsampling for report)."""
+
+    def test_trajectory_sample_interval_set_uses_all_s_steps(self):
+        """When trajectory_sample_interval=8, use all S steps; metadata = [8, 16, ..., 8*S]."""
+        S = 25
+        trajectory_config = {
+            "sampler_kwargs": {
+                "trajectory_sample_interval": 8,
+                "max_new_tokens": 200,
+            },
+        }
+        steps_to_use, step_values_metadata = _derive_steps_to_use(S, trajectory_config)
+        assert len(steps_to_use) == S
+        assert steps_to_use == list(range(S))
+        assert len(step_values_metadata) == S
+        assert step_values_metadata[0] == 8
+        assert step_values_metadata[-1] == min(8 * S, 200)
+
+    def test_trajectory_sample_interval_unset_subsamples_to_report_steps(self):
+        """When trajectory_sample_interval unset, max_new_tokens=200, steps=50: subsample to 0,8,16,..."""
+        S = 50
+        trajectory_config = {
+            "sampler_kwargs": {
+                "max_new_tokens": 200,
+                "steps": 50,
+            },
+        }
+        steps_to_use, step_values_metadata = _derive_steps_to_use(S, trajectory_config)
+        assert len(steps_to_use) <= S
+        assert len(step_values_metadata) == len(steps_to_use)
+        assert step_values_metadata == sorted(set(step_values_metadata))
+        for t in step_values_metadata:
+            assert t % 8 == 0 or t == 0
+        assert 0 in step_values_metadata or step_values_metadata[0] == 0
+        assert steps_to_use == sorted(set(steps_to_use))
+
+    def test_trajectory_sample_interval_8_max_new_tokens_200_s_25(self):
+        """trajectory_sample_interval=8, max_new_tokens=200, S=25: never allocate beyond step 24."""
+        S = 25
+        trajectory_config = {
+            "sampler_kwargs": {
+                "trajectory_sample_interval": 8,
+                "max_new_tokens": 200,
+            },
+        }
+        steps_to_use, step_values_metadata = _derive_steps_to_use(S, trajectory_config)
+        assert all(0 <= s < S for s in steps_to_use)
+        assert max(steps_to_use) == 24
+        assert len(step_values_metadata) == 25
+
+    def test_derive_steps_empty_s_returns_empty(self):
+        """S=0 returns empty lists."""
+        steps_to_use, step_values_metadata = _derive_steps_to_use(0, {})
+        assert steps_to_use == []
+        assert step_values_metadata == []
 
 
 class TestTrajectoryMetricsErrorHandling:
@@ -913,7 +972,11 @@ class TestTrajectoryMetricsIntegration:
             trajectory_config={
                 "return_logits": True,
                 "return_fixation_steps": True,
-                "sampler_kwargs": {"steps": S, "max_new_tokens": L_gen},
+                "sampler_kwargs": {
+                    "steps": S,
+                    "max_new_tokens": L_gen,
+                    "trajectory_sample_interval": 8,
+                },
             },
         )
         assert result is not None
@@ -925,7 +988,7 @@ class TestTrajectoryMetricsIntegration:
             for metric_name, arr in metrics_dict.items():
                 arr = np.asarray(arr)
                 assert arr.size > 0, f"traj={traj_name} metric={metric_name} should have aggregated values"
-                # We had num_samples batches of 1 sample each => aggregation over num_samples values per step
+                # With trajectory_sample_interval=8 we use all S steps; num_steps = S
                 assert arr.shape[0] == S, f"expected S={S} steps, got {arr.shape[0]}"
         # Sampler should have been called once per batch
         assert sampler.sample.call_count == num_samples

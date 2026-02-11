@@ -328,7 +328,11 @@ class TestTrajectoryMetricsWithTwoMetrics:
                 "trajectory_config": {
                     "return_logits": True,
                     "return_fixation_steps": True,
-                    "sampler_kwargs": {"steps": S, "max_new_tokens": L_gen},
+                    "sampler_kwargs": {
+                        "steps": S,
+                        "max_new_tokens": L_gen,
+                        "trajectory_sample_interval": 8,
+                    },
                 },
             }
             
@@ -349,11 +353,172 @@ class TestTrajectoryMetricsWithTwoMetrics:
                 assert "fixation_end" in agg
                 assert "fixation_ratio" in agg
                 
-                # Check that both metrics are present
+                # With trajectory_sample_interval=8 we use all S steps
                 if "probability" in agg["steps"]:
                     assert len(agg["steps"]["probability"]) == S
                 if "rouge" in agg["steps"]:
                     assert len(agg["steps"]["rouge"]) == S
+
+
+class TestRougeOnlyPath:
+    """TDD tests for ROUGE-only path: no eval_text_similarity when ground_truth and rouge_scorer provided."""
+
+    def test_rouge_only_path_does_not_call_eval_text_similarity(self):
+        """When ground_truth and rouge_scorer are passed, use eval_rouge_recall_batch; eval_text_similarity not called."""
+        from rouge_score import rouge_scorer
+
+        V, L = 100, 5
+        logits = torch.randn(V, L)
+        tokenizer = Mock()
+        tokenizer.decode = Mock(return_value="generated text")
+        scorer = rouge_scorer.RougeScorer(["rouge1", "rougeL"], use_stemmer=True)
+
+        with patch("evals.metrics.utils.eval_text_similarity") as mock_eval_text:
+            with patch("evals.metrics.utils.eval_rouge_recall_batch") as mock_rouge_batch:
+                mock_rouge_batch.return_value = [
+                    {"rouge1_recall": 0.5, "rougeL_f1": 0.6, "rougeL_recall": 0.7}
+                ]
+                result = _handle_text_based_metric(
+                    logits=logits,
+                    tokenizer=tokenizer,
+                    sample_labels=torch.zeros(L),
+                    sample_input_ids=torch.zeros(L),
+                    sample_prompt_len=0,
+                    metric_name="rouge",
+                    metric_config={"rouge_type": "rougeL_f1"},
+                    ground_truth="ground truth text",
+                    rouge_scorer=scorer,
+                )
+                mock_eval_text.assert_not_called()
+                mock_rouge_batch.assert_called_once()
+                call_args = mock_rouge_batch.call_args
+                assert call_args[0][0] == ["generated text"]
+                assert call_args[0][1] == ["ground truth text"]
+                assert result[0]["score"] == 0.6
+
+    def test_rouge_only_path_returns_same_shape_as_full_path(self):
+        """ROUGE-only path returns [{"score": x}] same as full path."""
+        from rouge_score import rouge_scorer
+
+        V, L = 50, 4
+        logits = torch.randn(V, L)
+        tokenizer = Mock()
+        tokenizer.decode = Mock(return_value="gen")
+        scorer = rouge_scorer.RougeScorer(["rouge1", "rougeL"], use_stemmer=True)
+        with patch("evals.metrics.utils.eval_rouge_recall_batch") as mock_rouge:
+            mock_rouge.return_value = [
+                {"rouge1_recall": 0.1, "rougeL_f1": 0.2, "rougeL_recall": 0.3}
+            ]
+            result = _handle_text_based_metric(
+                logits=logits,
+                tokenizer=tokenizer,
+                sample_labels=None,
+                sample_input_ids=torch.zeros(L),
+                sample_prompt_len=0,
+                metric_name="rouge",
+                metric_config={"rouge_type": "rougeL_f1"},
+                ground_truth="gt",
+                rouge_scorer=scorer,
+            )
+            assert isinstance(result, list)
+            assert len(result) == 1
+            assert isinstance(result[0], dict)
+            assert "score" in result[0]
+            assert result[0]["score"] == 0.2
+
+
+class TestBatchAcrossSteps:
+    """TDD tests for batch metric computation across steps."""
+
+    def test_trajectory_metrics_rouge_called_once_per_sample_per_traj_type(self):
+        """For one sample and one traj_type, eval_rouge_recall_batch is called once with list length S."""
+        from evals.metrics.trajectory_metrics import trajectory_metrics
+
+        S = 4
+        L_gen = 10
+        V = 100
+        full_len = 5 + L_gen
+        logits_history = [torch.randn(1, full_len, V) for _ in range(S)]
+        fixation_steps = torch.randint(0, S, (1, full_len))
+
+        class MockSamplerOutput:
+            def __init__(self, sequences, histories, logits_history, fixation_steps):
+                self.sequences = sequences
+                self.histories = histories
+                self.logits_history = logits_history
+                self.fixation_steps = fixation_steps
+
+        sampler = Mock()
+        sampler.sample = Mock(
+            return_value=MockSamplerOutput(
+                sequences=torch.randint(0, V, (1, full_len)),
+                histories=None,
+                logits_history=logits_history,
+                fixation_steps=fixation_steps,
+            )
+        )
+        model = Mock()
+        model.sampler = sampler
+        tokenizer = Mock()
+        tokenizer.decode = Mock(return_value="decoded")
+        tokenizer.eos_token_id = 2
+
+        class MockDataset:
+            def __init__(self):
+                self.data = [
+                    {
+                        "input_ids": torch.randint(0, V, (full_len,)),
+                        "labels": torch.randint(0, V, (full_len,)),
+                    }
+                ]
+
+            def __len__(self):
+                return len(self.data)
+
+            def __getitem__(self, idx):
+                return self.data[idx]
+
+        def mock_collator(batch):
+            return {
+                "input_ids": torch.stack([b["input_ids"] for b in batch]),
+                "labels": torch.stack([b["labels"] for b in batch]),
+                "indices": torch.tensor([0]),
+            }
+
+        raw_fn = (
+            trajectory_metrics._metric_fn
+            if hasattr(trajectory_metrics, "_metric_fn")
+            else trajectory_metrics
+        )
+        with patch("evals.metrics.trajectory_metrics.eval_rouge_recall_batch") as mock_rouge_batch:
+            mock_rouge_batch.return_value = [
+                {"rouge1_recall": 0.5, "rougeL_f1": 0.6, "rougeL_recall": 0.7}
+                for _ in range(S)
+            ]
+            raw_fn(
+                model,
+                metric_name="trajectory_metrics",
+                cache={},
+                metrics=["rouge"],
+                data=MockDataset(),
+                collators=mock_collator,
+                tokenizer=tokenizer,
+                batch_size=1,
+                trajectory_config={
+                    "return_logits": True,
+                    "return_fixation_steps": True,
+                    "sampler_kwargs": {
+                        "steps": S,
+                        "max_new_tokens": L_gen,
+                        "trajectory_sample_interval": 8,
+                    },
+                },
+            )
+            assert mock_rouge_batch.call_count >= 1
+            for call in mock_rouge_batch.call_args_list:
+                gen_texts, ground_truths = call[0][0], call[0][1]
+                assert len(gen_texts) == S
+                assert len(ground_truths) == S
 
 
 class TestRougeVerification:

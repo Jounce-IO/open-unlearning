@@ -20,6 +20,7 @@ from evals.metrics.base import unlearning_metric
 from evals.metrics.utils import (
     evaluate_probability,
     evaluate_probability_confidence_ordered,
+    eval_rouge_recall_batch,
     tokenwise_vocab_logprobs,
     IGNORE_INDEX,
     _tensor_to_list_of_floats,
@@ -102,6 +103,64 @@ def _compute_prob_from_fixation_logits(
         {"prob": prob, "avg_loss": avg_loss}
         for prob, avg_loss in zip(normalized_probs_list, avg_losses_list)
     ]
+
+
+def _derive_steps_to_use(
+    S: int,
+    trajectory_config: Union[Dict, DictConfig],
+) -> tuple:
+    """Derive which step indices to compute/store and token positions for report metadata.
+
+    Report interval is fixed at 8 tokens. When trajectory_sample_interval is set, the
+    sampler already returns subsampled steps (every 8 tokens); use all S steps and
+    build metadata as token positions [interval*1, interval*2, ..., min(max_new_tokens, interval*S)].
+    When trajectory_sample_interval is not set, the sampler returned every diffusion step;
+    subsample to steps where token position is 0, 8, 16, ... and return those step indices
+    and corresponding token positions.
+
+    Returns:
+        (steps_to_use, step_values_metadata): steps_to_use is list of step indices (into R);
+        step_values_metadata is list of token positions for report (same length).
+    """
+    if S <= 0:
+        return ([], [])
+    sampler_kwargs = trajectory_config.get("sampler_kwargs", {}) or {}
+    trajectory_sample_interval = sampler_kwargs.get("trajectory_sample_interval")
+    max_new_tokens = sampler_kwargs.get("max_new_tokens")
+    steps = sampler_kwargs.get("steps") or 50
+
+    if trajectory_sample_interval is not None and trajectory_sample_interval > 0:
+        steps_to_use = list(range(S))
+        interval = int(trajectory_sample_interval)
+        if max_new_tokens is not None:
+            step_values_metadata = [
+                min(interval * (k + 1), int(max_new_tokens)) for k in range(S)
+            ]
+        else:
+            step_values_metadata = [interval * (k + 1) for k in range(S)]
+        return (steps_to_use, step_values_metadata)
+
+    if max_new_tokens is None or steps is None or steps <= 0:
+        steps_to_use = list(range(S))
+        step_values_metadata = list(range(S))
+        return (steps_to_use, step_values_metadata)
+
+    tokens_per_step_approx = float(max_new_tokens) / float(steps)
+    report_interval = 8
+    seen = set()
+    steps_to_use = []
+    step_values_metadata = []
+    for t in range(0, int(max_new_tokens) + 1, report_interval):
+        s = round(t / tokens_per_step_approx)
+        s = max(0, min(S - 1, s))
+        if s not in seen:
+            seen.add(s)
+            steps_to_use.append(s)
+            step_values_metadata.append(min(t, int(max_new_tokens)))
+    if not steps_to_use:
+        steps_to_use = [0]
+        step_values_metadata = [0]
+    return (steps_to_use, step_values_metadata)
 
 
 def _get_sampler_from_model(model) -> Optional[Any]:
@@ -411,17 +470,21 @@ def _handle_text_based_metric(logits, tokenizer, sample_labels, sample_input_ids
     """
     Generic handler for text-based metrics that require model.generate().
     Decodes logits to text and computes text similarity metrics.
-    
+
+    When ground_truth and rouge_scorer are provided (trajectory path), uses ROUGE-only path:
+    calls eval_rouge_recall_batch(gen_text, ground_truth) directly instead of eval_text_similarity,
+    avoiding redundant decodes and fake model.generate().
+
     Args:
         logits: [V, L] logits tensor
         tokenizer: Tokenizer for decoding
-        sample_labels: Labels for ground truth extraction
+        sample_labels: Labels for ground truth extraction (used when ground_truth not in kwargs)
         sample_input_ids: Input IDs for the sample
         sample_prompt_len: Length of prompt
         metric_name: Name of the metric (e.g., "rouge")
         metric_config: Config for this metric
-        **kwargs: Additional kwargs including generation_args
-    
+        **kwargs: Additional kwargs including generation_args, ground_truth, rouge_scorer
+
     Returns:
         Metric result (list of dicts)
     """
@@ -430,39 +493,68 @@ def _handle_text_based_metric(logits, tokenizer, sample_labels, sample_input_ids
         logits = logits[0]  # [L, V]
     predicted_tokens = torch.argmax(logits, dim=-1)  # [L]
     gen_text = tokenizer.decode(predicted_tokens.tolist(), skip_special_tokens=True)
-    
-    # Extract ground truth text from labels
-    if sample_labels is not None:
-        valid_labels = sample_labels[sample_labels != IGNORE_INDEX]
-        if len(valid_labels) > 0:
-            ground_truth = tokenizer.decode(valid_labels.tolist(), skip_special_tokens=True)
+
+    ground_truth = kwargs.get("ground_truth")
+    rouge_scorer_instance = kwargs.get("rouge_scorer")
+    use_rouge_only = (
+        metric_name == "rouge"
+        and ground_truth is not None
+        and rouge_scorer_instance is not None
+    )
+
+    if use_rouge_only:
+        from evals.metrics.utils import eval_rouge_recall_batch
+
+        result = eval_rouge_recall_batch(
+            [gen_text],
+            [ground_truth],
+            use_stemmer=True,
+            scorer=rouge_scorer_instance,
+        )
+        rouge_type = metric_config.get("rouge_type") or kwargs.get("rouge_type", "rougeL_f1")
+        if isinstance(result, list) and len(result) > 0:
+            result_dict = result[0]
+            if isinstance(result_dict, dict) and rouge_type in result_dict:
+                score = result_dict[rouge_type]
+                logger.debug(
+                    f"ROUGE {rouge_type} (rouge-only path): gen_len={len(gen_text)}, gt_len={len(ground_truth)}, score={score}"
+                )
+                return [{"score": score}]
+        return result
+
+    # Fallback: extract ground truth from labels if not provided
+    if ground_truth is None:
+        if sample_labels is not None:
+            valid_labels = sample_labels[sample_labels != IGNORE_INDEX]
+            if len(valid_labels) > 0:
+                ground_truth = tokenizer.decode(valid_labels.tolist(), skip_special_tokens=True)
+            else:
+                ground_truth = ""
         else:
             ground_truth = ""
-    else:
-        ground_truth = ""
-    
+
     # Create a model that returns our decoded text when generate() is called
     class TextFromLogitsModel:
         def __init__(self, gen_text, tokenizer):
             self.gen_text = gen_text
             self.tokenizer = tokenizer
             self.device = "cpu"
-        
+
         def generate(self, input_ids, attention_mask=None, **kwargs):
             # Return tokens that decode to our generated text
             gen_tokens = self.tokenizer.encode(self.gen_text, return_tensors="pt", add_special_tokens=False)
             # Concatenate with input_ids to match expected format
             return torch.cat([input_ids, gen_tokens], dim=1)
-    
+
     text_model = TextFromLogitsModel(gen_text, tokenizer)
-    
+
     # Create batch in format expected by eval_text_similarity
     text_batch = {
         "input_ids": sample_input_ids.unsqueeze(0) if sample_input_ids is not None else torch.zeros(1, 1, dtype=torch.long, device=logits.device),
         "labels": sample_labels.unsqueeze(0) if sample_labels is not None else None,
         "attention_mask": torch.ones(1, sample_input_ids.shape[0] if sample_input_ids is not None else 1, dtype=torch.long, device=logits.device),
     }
-    
+
     # Call eval_text_similarity which is used by most text-based metrics
     from evals.metrics.utils import eval_text_similarity
     from omegaconf import OmegaConf
@@ -471,7 +563,7 @@ def _handle_text_based_metric(logits, tokenizer, sample_labels, sample_input_ids
     if isinstance(generation_args, dict) and not isinstance(generation_args, DictConfig):
         generation_args = OmegaConf.create(generation_args)
     result = eval_text_similarity(text_model, tokenizer, text_batch, generation_args)
-    
+
     # Post-process result based on metric type
     if metric_name == "rouge":
         rouge_type = metric_config.get("rouge_type") or kwargs.get("rouge_type", "rougeL_f1")
@@ -483,7 +575,7 @@ def _handle_text_based_metric(logits, tokenizer, sample_labels, sample_input_ids
                     f"ROUGE {rouge_type}: gen_len={len(gen_text)}, gt_len={len(ground_truth)}, score={score}"
                 )
                 return [{"score": score}]
-    
+
     return result
 
 
@@ -971,12 +1063,13 @@ def trajectory_metrics(model, **kwargs):
             if forget_traj and holdout_traj:
                 trajectories_by_key = {"forget": forget_traj, "holdout": holdout_traj}
                 S_dual = next(iter(forget_traj.values()))["S"]
+                steps_to_use_dual, _ = _derive_steps_to_use(S_dual, trajectory_config)
                 try:
                     device = getattr(model, "device", None) or next(model.parameters()).device
                 except (StopIteration, AttributeError):
                     device = torch.device("cpu")
                 privleak_cfg = loaded_metrics["privleak"]["config"]
-                for step in range(S_dual):
+                for step in steps_to_use_dual:
                     gpu_set_phase("privleak_dual_step", step=step)
                     logits_by_key = {}
                     for key, traj_by_idx in trajectories_by_key.items():
@@ -1016,6 +1109,9 @@ def trajectory_metrics(model, **kwargs):
                         step_values[traj_name][step]["privleak"].append(privleak_result.get("agg_value"))
             else:
                 logger.warning("Privleak dual trajectories empty, skipping privleak")
+
+        run_steps_to_use = None
+        run_step_values_metadata = None
 
         keys_to_process = [None] if not multi_dataset else single_dataset_keys
         for _key in keys_to_process:
@@ -1106,6 +1202,11 @@ def trajectory_metrics(model, **kwargs):
                 )
                 R, F, S, L = out["R"], out["F"], out["S"], out["L"]
                 del logits_history # Release list of tensors immediately after stacking/slicing
+                if run_steps_to_use is None:
+                    run_steps_to_use, run_step_values_metadata = _derive_steps_to_use(
+                        S, trajectory_config
+                    )
+                steps_to_use = run_steps_to_use
                 gpu_set_phase("trajectory_after_trajectories", batch_idx=batch_idx)
                 # #region agent log
                 if batch_idx == 0:
@@ -1185,13 +1286,73 @@ def trajectory_metrics(model, **kwargs):
                                 gen_alt = torch.cat([gen_alt, padding])
                             batch_template[key] = gen_alt.unsqueeze(0)
             
-                    # Compute metrics for each trajectory type and step, aggregate directly
+                    # Decode ground truth once per sample for ROUGE-only path (reuse across steps and trajectory types)
+                    if generated_labels is not None:
+                        valid_labels_gt = generated_labels[generated_labels != IGNORE_INDEX]
+                        ground_truth_str = (
+                            tokenizer.decode(valid_labels_gt.tolist(), skip_special_tokens=True)
+                            if len(valid_labels_gt) > 0
+                            else ""
+                        )
+                    else:
+                        ground_truth_str = ""
+                    rouge_scorer_instance = rouge_scorer.RougeScorer(["rouge1", "rougeL"], use_stemmer=True)
+            
+                    # Compute metrics for each trajectory type and step (only report steps)
                     for traj_name in trajectory_names:
-                        for step in range(S):
-                            # Initialize step_values[traj_name][step] if not exists
+                        for step in steps_to_use:
                             if step not in step_values[traj_name]:
                                 step_values[traj_name][step] = {metric_name: [] for metric_name in loaded_metrics.keys()}
 
+                        rouge_metrics_in_run = [
+                            m for m in metrics_to_run
+                            if loaded_metrics[m]["metric"].name == "rouge"
+                        ]
+                        if rouge_metrics_in_run:
+                            gen_texts = []
+                            for step in steps_to_use:
+                                logits_s = _get_logits_at_step(sample_traj, traj_name, step)
+                                if logits_s.dim() == 3:
+                                    logits_s = logits_s[0]
+                                pred_tokens = torch.argmax(logits_s, dim=-1)
+                                gen_texts.append(
+                                    tokenizer.decode(pred_tokens.tolist(), skip_special_tokens=True)
+                                )
+                            rouge_scores = eval_rouge_recall_batch(
+                                gen_texts,
+                                [ground_truth_str] * len(steps_to_use),
+                                use_stemmer=True,
+                                scorer=rouge_scorer_instance,
+                            )
+                            for metric_name in rouge_metrics_in_run:
+                                metric_cfg = loaded_metrics[metric_name]["config"]
+                                rouge_type = metric_cfg.get("rouge_type") or kwargs.get("rouge_type", "rougeL_f1")
+                                for i, step in enumerate(steps_to_use):
+                                    if i < len(rouge_scores) and isinstance(rouge_scores[i], dict) and rouge_type in rouge_scores[i]:
+                                        step_values[traj_name][step][metric_name].append(rouge_scores[i][rouge_type])
+
+                        if "probability" in metrics_to_run and generated_labels is not None:
+                            logits_list = [
+                                _get_logits_at_step(sample_traj, traj_name, step)
+                                for step in steps_to_use
+                            ]
+                            device = logits_list[0].device
+                            logits_stacked = torch.stack(
+                                [l.t() for l in logits_list], dim=0
+                            )
+                            labels_batch = generated_labels.unsqueeze(0).expand(
+                                len(steps_to_use), -1
+                            ).to(device=device, dtype=torch.long)
+                            prob_results = _compute_prob_from_fixation_logits(
+                                logits_stacked, labels_batch, device, IGNORE_INDEX
+                            )
+                            for i, step in enumerate(steps_to_use):
+                                if i < len(prob_results) and "prob" in prob_results[i]:
+                                    step_values[traj_name][step]["probability"].append(
+                                        prob_results[i]["prob"]
+                                    )
+
+                        for step in steps_to_use:
                             # Get logits at this step (on-demand from R, F)
                             logits = _get_logits_at_step(sample_traj, traj_name, step)  # [V, L]
                             # #region agent log
@@ -1209,14 +1370,15 @@ def trajectory_metrics(model, **kwargs):
                                 )
                             # #endregion
 
-                            # Compute each requested metric
+                            # Compute each requested metric (skip rouge and probability; already batched above)
                             for metric_name, metric_info in [(m, loaded_metrics[m]) for m in metrics_to_run]:
                                 try:
                                     metric = metric_info["metric"]
                                     metric_cfg = metric_info["config"]
 
-                                    # Skip privleak in main loop when already computed via dual-trajectory flow
                                     if metric_name == "privleak" and trajectories_by_key is not None:
+                                        continue
+                                    if metric_name in rouge_metrics_in_run or metric_name == "probability":
                                         continue
 
                                     gpu_set_phase("trajectory_metric", metric=metric_name, batch_idx=batch_idx, step=step)
@@ -1227,6 +1389,8 @@ def trajectory_metrics(model, **kwargs):
                                     # Pass indexable data to metrics (rouge, etc.): use primary_data so DataLoader can index 0,1,2...
                                     if primary_data is not None:
                                         kwargs_clean["data"] = primary_data
+                                    kwargs_clean["ground_truth"] = ground_truth_str
+                                    kwargs_clean["rouge_scorer"] = rouge_scorer_instance
                                     result = _call_metric_at_step(
                                         metric=metric,
                                         logits=logits,
@@ -1292,7 +1456,7 @@ def trajectory_metrics(model, **kwargs):
                                         metric_value = float(result)
                             
                                     # Debug: log extraction_strength at first/last step for verification
-                                    if metric_name == "extraction_strength" and step in (0, S - 1) and metric_value is not None:
+                                    if metric_name == "extraction_strength" and step in (steps_to_use[0], steps_to_use[-1]) and metric_value is not None:
                                         logger.debug(
                                             f"extraction_strength step={step} sample={idx_str}: value={metric_value}"
                                         )
@@ -1337,12 +1501,13 @@ def trajectory_metrics(model, **kwargs):
             if forget_traj and holdout_traj:
                 trajectories_by_key = {"forget": forget_traj, "holdout": holdout_traj}
                 S_dual = next(iter(forget_traj.values()))["S"]
+                steps_to_use_dual, _ = _derive_steps_to_use(S_dual, trajectory_config)
                 try:
                     device = getattr(model, "device", None) or next(model.parameters()).device
                 except (StopIteration, AttributeError):
                     device = torch.device("cpu")
                 privleak_cfg = loaded_metrics["privleak"]["config"]
-                for step in range(S_dual):
+                for step in steps_to_use_dual:
                     gpu_set_phase("privleak_dual_step", step=step)
                     logits_by_key = {}
                     for key, traj_by_idx in trajectories_by_key.items():
@@ -1436,12 +1601,16 @@ def trajectory_metrics(model, **kwargs):
             
                 # Aggregate: mean and full distribution per step
                 if step_metric_values:
-                    max_step = max(step_metric_values.keys())
+                    ordered_steps = (
+                        run_steps_to_use
+                        if run_steps_to_use is not None
+                        else sorted(step_metric_values.keys())
+                    )
                     aggregated = []
                     dist_means, dist_stds, dist_medians = [], [], []
                     dist_p25, dist_p75, dist_mins, dist_maxs = [], [], [], []
                     dist_ci_low, dist_ci_high = [], []
-                    for step in range(max_step + 1):
+                    for step in ordered_steps:
                         if step in step_metric_values:
                             vals = step_metric_values[step]
                             vals_clean = [float(v) if v is not None else np.nan for v in vals]
@@ -1519,9 +1688,11 @@ def trajectory_metrics(model, **kwargs):
             if trajectory_sample_interval is not None and trajectory_sample_interval > 0
             else "diffusion_step"
         )
-        # Actual step values: when interval set, step index k → unmasked_tokens (0, 8, 16, ..., max_new_tokens)
+        # Actual step values: use run_step_values_metadata when step subsampling was used; else derive from interval
         step_values = None
-        if (
+        if run_step_values_metadata is not None and len(run_step_values_metadata) > 0:
+            step_values = list(run_step_values_metadata)
+        elif (
             step_meaning == "unmasked_tokens_approx"
             and trajectory_sample_interval is not None
             and max_new_tokens is not None
