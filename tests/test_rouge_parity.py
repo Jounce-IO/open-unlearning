@@ -164,3 +164,81 @@ class TestRougeBackendNoStemmer:
         assert len(actual) == len(reference)
         for a, r in zip(actual, reference):
             assert_rouge_close(a, r)
+
+
+class TestRougeBackendGpuTorchRouge1LcsCpu:
+    """Parity test for gpu_torch_rouge1_lcs_cpu (hybrid). Skips when no CUDA."""
+
+    def test_rouge_backend_gpu_torch_rouge1_lcs_cpu_matches_reference(self):
+        """gpu_torch_rouge1_lcs_cpu output matches baseline within 0.001%."""
+        try:
+            import torch
+            if not torch.cuda.is_available():
+                pytest.skip("CUDA not available")
+            from evals.metrics.rouge_impl import rouge_backends
+            backend_fn = rouge_backends.get_backend("gpu_torch_rouge1_lcs_cpu")
+        except (ImportError, RuntimeError):
+            pytest.skip("PyTorch/CUDA or rouge_impl not available")
+        gen_list, gt_list = _golden_gen_gt_lists()
+        reference = get_baseline_reference(gen_list, gt_list, use_stemmer=True)
+        actual = backend_fn(gen_list, gt_list, use_stemmer=True, scorer=None)
+        assert len(actual) == len(reference)
+        for a, r in zip(actual, reference):
+            assert_rouge_close(a, r)
+
+
+class TestRougeBackendGpuTorchBatch:
+    """Parity test for gpu_torch_batch (full GPU). Skips when no CUDA."""
+
+    def test_rouge_backend_gpu_torch_batch_matches_reference(self):
+        """gpu_torch_batch output matches baseline within 0.001%."""
+        try:
+            import torch
+            if not torch.cuda.is_available():
+                pytest.skip("CUDA not available")
+            from evals.metrics.rouge_impl import rouge_backends
+            backend_fn = rouge_backends.get_backend("gpu_torch_batch")
+        except (ImportError, RuntimeError):
+            pytest.skip("PyTorch/CUDA or rouge_impl not available")
+        gen_list, gt_list = _golden_gen_gt_lists()
+        reference = get_baseline_reference(gen_list, gt_list, use_stemmer=True)
+        actual = backend_fn(gen_list, gt_list, use_stemmer=True, scorer=None)
+        assert len(actual) == len(reference)
+        for a, r in zip(actual, reference):
+            assert_rouge_close(a, r)
+
+
+class TestRougeBackendMultiprocessBatch:
+    """Parity test for multiprocess_batch."""
+
+    def test_rouge_backend_multiprocess_batch_matches_reference(self):
+        """multiprocess_batch output matches baseline within 0.001%."""
+        try:
+            from evals.metrics.rouge_impl import rouge_backends
+            backend_fn = rouge_backends.get_backend("multiprocess_batch")
+        except ImportError:
+            pytest.skip("rouge_impl not yet implemented")
+        gen_list, gt_list = _golden_gen_gt_lists()
+        reference = get_baseline_reference(gen_list, gt_list, use_stemmer=True)
+        actual = backend_fn(gen_list, gt_list, use_stemmer=True, scorer=None)
+        assert len(actual) == len(reference)
+        for a, r in zip(actual, reference):
+            assert_rouge_close(a, r)
+
+
+class TestRougeBackendFusedCpu:
+    """Parity test for fused_cpu."""
+
+    def test_rouge_backend_fused_cpu_matches_reference(self):
+        """fused_cpu output matches baseline within 0.001%."""
+        try:
+            from evals.metrics.rouge_impl import rouge_backends
+            backend_fn = rouge_backends.get_backend("fused_cpu")
+        except ImportError:
+            pytest.skip("rouge_impl not yet implemented")
+        gen_list, gt_list = _golden_gen_gt_lists()
+        reference = get_baseline_reference(gen_list, gt_list, use_stemmer=True)
+        actual = backend_fn(gen_list, gt_list, use_stemmer=True, scorer=None)
+        assert len(actual) == len(reference)
+        for a, r in zip(actual, reference):
+            assert_rouge_close(a, r)

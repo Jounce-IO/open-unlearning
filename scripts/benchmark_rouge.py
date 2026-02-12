@@ -35,9 +35,21 @@ def _gen_gt_lists():
 
 
 # Backends that are drop-in replacements (parity with stemmer baseline)
-DROP_IN_BACKENDS = {"baseline", "minimal_python", "two_row_lcs", "batch_cached", "numpy_lcs"}
+DROP_IN_BACKENDS = {
+    "baseline",
+    "minimal_python",
+    "two_row_lcs",
+    "batch_cached",
+    "numpy_lcs",
+    "gpu_torch_rouge1_lcs_cpu",
+    "gpu_torch_batch",
+    "multiprocess_batch",
+    "fused_cpu",
+}
 # Backends that are benchmark-only (different scores)
 BENCHMARK_ONLY_BACKENDS = {"no_stemmer"}
+# Backends that require CUDA; benchmark skips with "skipped (no CUDA)" when they raise
+GPU_BACKENDS = {"gpu_torch_rouge1_lcs_cpu", "gpu_torch_batch"}
 
 
 def run_benchmark(
@@ -59,15 +71,28 @@ def run_benchmark(
             except ImportError:
                 results.append((name, -1.0, True, "skipped (numpy not available)"))
                 continue
-        # Warmup
-        for _ in range(warmup):
-            fn(gen_list, gt_list, use_stemmer=True, scorer=None)
-        # Timed runs
-        start = time.perf_counter()
-        for _ in range(iterations):
-            fn(gen_list, gt_list, use_stemmer=True, scorer=None)
-        elapsed = time.perf_counter() - start
-        mean_time = elapsed / iterations
+        if name in GPU_BACKENDS:
+            try:
+                for _ in range(warmup):
+                    fn(gen_list, gt_list, use_stemmer=True, scorer=None)
+                start = time.perf_counter()
+                for _ in range(iterations):
+                    fn(gen_list, gt_list, use_stemmer=True, scorer=None)
+                elapsed = time.perf_counter() - start
+            except RuntimeError:
+                results.append((name, -1.0, True, "skipped (no CUDA)"))
+                continue
+            mean_time = elapsed / iterations
+        else:
+            # Warmup
+            for _ in range(warmup):
+                fn(gen_list, gt_list, use_stemmer=True, scorer=None)
+            # Timed runs
+            start = time.perf_counter()
+            for _ in range(iterations):
+                fn(gen_list, gt_list, use_stemmer=True, scorer=None)
+            elapsed = time.perf_counter() - start
+            mean_time = elapsed / iterations
         if baseline_time is None and name == "baseline":
             baseline_time = mean_time
         drop_in = name in DROP_IN_BACKENDS
