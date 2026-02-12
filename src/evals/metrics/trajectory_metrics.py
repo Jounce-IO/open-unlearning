@@ -10,6 +10,8 @@ import logging
 import os
 import subprocess
 import time
+from concurrent.futures import ProcessPoolExecutor
+
 import numpy as np
 import torch
 from typing import Dict, List, Any, Optional, Union
@@ -21,6 +23,7 @@ from evals.metrics.utils import (
     evaluate_probability,
     evaluate_probability_confidence_ordered,
     eval_rouge_recall_batch,
+    eval_rouge_recall_batch_worker,
     tokenwise_vocab_logprobs,
     IGNORE_INDEX,
     _tensor_to_list_of_floats,
@@ -915,6 +918,12 @@ def trajectory_metrics(model, **kwargs):
         # Extract config
         metrics_config = kwargs.get("metrics", [])
         trajectory_config = kwargs.get("trajectory_config", {})
+        metric_worker_pool_size = trajectory_config.get("metric_worker_pool_size", 0)
+        executor = (
+            ProcessPoolExecutor(max_workers=metric_worker_pool_size)
+            if metric_worker_pool_size > 0
+            else None
+        )
         logits_source = trajectory_config.get("logits_source", "sampler")
         data = kwargs.get("data")
         collator = kwargs.get("collators")
@@ -1297,7 +1306,8 @@ def trajectory_metrics(model, **kwargs):
                     else:
                         ground_truth_str = ""
                     rouge_scorer_instance = rouge_scorer.RougeScorer(["rouge1", "rougeL"], use_stemmer=True)
-            
+                    rouge_futures_this_sample = []
+
                     # Compute metrics for each trajectory type and step (only report steps)
                     for traj_name in trajectory_names:
                         for step in steps_to_use:
@@ -1318,18 +1328,29 @@ def trajectory_metrics(model, **kwargs):
                                 gen_texts.append(
                                     tokenizer.decode(pred_tokens.tolist(), skip_special_tokens=True)
                                 )
-                            rouge_scores = eval_rouge_recall_batch(
-                                gen_texts,
-                                [ground_truth_str] * len(steps_to_use),
-                                use_stemmer=True,
-                                scorer=rouge_scorer_instance,
-                            )
-                            for metric_name in rouge_metrics_in_run:
-                                metric_cfg = loaded_metrics[metric_name]["config"]
-                                rouge_type = metric_cfg.get("rouge_type") or kwargs.get("rouge_type", "rougeL_f1")
-                                for i, step in enumerate(steps_to_use):
-                                    if i < len(rouge_scores) and isinstance(rouge_scores[i], dict) and rouge_type in rouge_scores[i]:
-                                        step_values[traj_name][step][metric_name].append(rouge_scores[i][rouge_type])
+                            if executor is None:
+                                rouge_scores = eval_rouge_recall_batch(
+                                    gen_texts,
+                                    [ground_truth_str] * len(steps_to_use),
+                                    use_stemmer=True,
+                                    scorer=rouge_scorer_instance,
+                                )
+                                for metric_name in rouge_metrics_in_run:
+                                    metric_cfg = loaded_metrics[metric_name]["config"]
+                                    rouge_type = metric_cfg.get("rouge_type") or kwargs.get("rouge_type", "rougeL_f1")
+                                    for i, step in enumerate(steps_to_use):
+                                        if i < len(rouge_scores) and isinstance(rouge_scores[i], dict) and rouge_type in rouge_scores[i]:
+                                            step_values[traj_name][step][metric_name].append(rouge_scores[i][rouge_type])
+                            else:
+                                future = executor.submit(
+                                    eval_rouge_recall_batch_worker,
+                                    gen_texts,
+                                    [ground_truth_str] * len(steps_to_use),
+                                    True,
+                                )
+                                rouge_futures_this_sample.append(
+                                    (future, traj_name, rouge_metrics_in_run, steps_to_use)
+                                )
 
                         if "probability" in metrics_to_run and generated_labels is not None:
                             logits_list = [
@@ -1470,6 +1491,16 @@ def trajectory_metrics(model, **kwargs):
                                         f"Error computing {metric_name} at step {step} for {traj_name}: {e}",
                                         exc_info=True
                                     )
+
+                    if executor is not None and rouge_futures_this_sample:
+                        for (future, traj_name, rouge_metrics_in_run, steps_to_use) in rouge_futures_this_sample:
+                            rouge_scores = future.result()
+                            for metric_name in rouge_metrics_in_run:
+                                metric_cfg = loaded_metrics[metric_name]["config"]
+                                rouge_type = metric_cfg.get("rouge_type") or kwargs.get("rouge_type", "rougeL_f1")
+                                for i, step in enumerate(steps_to_use):
+                                    if i < len(rouge_scores) and isinstance(rouge_scores[i], dict) and rouge_type in rouge_scores[i]:
+                                        step_values[traj_name][step][metric_name].append(rouge_scores[i][rouge_type])
 
                 gpu_set_phase("trajectory_batch_end", batch_idx=batch_idx)
                 # Release batch-sized GPU data before next batch to avoid holding two batches in memory (OOM with many samples).
@@ -1743,8 +1774,12 @@ def trajectory_metrics(model, **kwargs):
                 "agg_value": None,
                 "trajectory_step_metadata": trajectory_step_metadata,
             }
+            if executor is not None:
+                executor.shutdown(wait=True)
             return out
 
+        if executor is not None:
+            executor.shutdown(wait=True)
         return {
             "agg_value": agg_value,
             "value_by_index": {},  # Empty since we don't store per-sample trajectories

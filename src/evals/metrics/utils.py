@@ -377,6 +377,21 @@ def eval_rouge_recall_batch(
     return evals
 
 
+def eval_rouge_recall_batch_worker(
+    gen_outputs: List[str],
+    ground_truths: List[str],
+    use_stemmer: bool = True,
+) -> List[Dict[str, float]]:
+    """Same contract as eval_rouge_recall_batch; for use in a process pool.
+
+    Each worker creates its own RougeScorer (no shared state). Picklable; only
+    plain data (lists of strings) is passed.
+    """
+    return eval_rouge_recall_batch(
+        gen_outputs, ground_truths, use_stemmer=use_stemmer, scorer=None
+    )
+
+
 def eval_text_similarity(model, tokenizer, batch, generation_args):
     """Evaluate text similarity between model-generated outputs and ground truth using ROUGE scores.
 
