@@ -26,10 +26,46 @@ from evals.metrics.trajectory_metrics import (
     _call_metric_at_step,
     _compute_pre_compute_metrics_at_step,
     _derive_steps_to_use,
+    should_run_gc,
     trajectory_metrics,
 )
 from evals.metrics.trajectory_utils import stack_logits_history
 from evals.metrics import METRICS_REGISTRY
+
+
+class TestShouldRunGc:
+    """Tests for should_run_gc (conditional gc when VRAM > threshold)."""
+
+    def test_returns_false_when_cuda_not_available(self):
+        with patch("torch.cuda.is_available", return_value=False):
+            assert should_run_gc(0.9) is False
+
+    def test_returns_false_when_vram_below_threshold(self):
+        with patch("torch.cuda.is_available", return_value=True), patch(
+            "torch.cuda.memory_allocated", return_value=100
+        ), patch(
+            "torch.cuda.get_device_properties",
+            return_value=Mock(total_memory=1000),
+        ):
+            assert should_run_gc(0.9) is False
+
+    def test_returns_true_when_vram_at_or_above_threshold(self):
+        with patch("torch.cuda.is_available", return_value=True), patch(
+            "torch.cuda.memory_allocated", return_value=900
+        ), patch(
+            "torch.cuda.get_device_properties",
+            return_value=Mock(total_memory=1000),
+        ):
+            assert should_run_gc(0.9) is True
+
+    def test_returns_true_when_vram_above_threshold(self):
+        with patch("torch.cuda.is_available", return_value=True), patch(
+            "torch.cuda.memory_allocated", return_value=950
+        ), patch(
+            "torch.cuda.get_device_properties",
+            return_value=Mock(total_memory=1000),
+        ):
+            assert should_run_gc(0.9) is True
 
 
 class TestGetSamplerFromModel:

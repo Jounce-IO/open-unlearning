@@ -306,9 +306,10 @@ class TestTrajectoryMetricsWithTwoMetrics:
         
         tokenizer = Mock()
         tokenizer.decode = Mock(return_value="decoded text")
+        tokenizer.batch_decode = Mock(return_value=["decoded text"] * S)
         tokenizer.encode = Mock(return_value=torch.tensor([[1, 2, 3]]))
         tokenizer.eos_token_id = 2
-        
+
         # Mock eval_text_similarity for rouge (it's imported inside the function from utils)
         with patch("evals.metrics.utils.eval_text_similarity") as mock_eval_text:
             mock_eval_text.return_value = [
@@ -461,6 +462,7 @@ class TestBatchAcrossSteps:
         model.sampler = sampler
         tokenizer = Mock()
         tokenizer.decode = Mock(return_value="decoded")
+        tokenizer.batch_decode = Mock(return_value=["decoded"] * S)
         tokenizer.eos_token_id = 2
 
         class MockDataset:
@@ -519,6 +521,97 @@ class TestBatchAcrossSteps:
                 gen_texts, ground_truths = call[0][0], call[0][1]
                 assert len(gen_texts) == S
                 assert len(ground_truths) == S
+
+    def test_rouge_path_uses_batch_decode_not_decode_per_step(self):
+        """ROUGE path uses tokenizer.batch_decode once per (sample, traj_name) with list length S; decode only for ground_truth."""
+        from evals.metrics.trajectory_metrics import trajectory_metrics
+
+        S = 4
+        L_gen = 10
+        V = 100
+        full_len = 5 + L_gen
+        logits_history = [torch.randn(1, full_len, V) for _ in range(S)]
+        fixation_steps = torch.randint(0, S, (1, full_len))
+
+        class MockSamplerOutput:
+            def __init__(self, sequences, histories, logits_history, fixation_steps):
+                self.sequences = sequences
+                self.histories = histories
+                self.logits_history = logits_history
+                self.fixation_steps = fixation_steps
+
+        sampler = Mock()
+        sampler.sample = Mock(
+            return_value=MockSamplerOutput(
+                sequences=torch.randint(0, V, (1, full_len)),
+                histories=None,
+                logits_history=logits_history,
+                fixation_steps=fixation_steps,
+            )
+        )
+        model = Mock()
+        model.sampler = sampler
+        tokenizer = Mock()
+        tokenizer.decode = Mock(return_value="ground_truth_decoded")
+        tokenizer.batch_decode = Mock(return_value=["decoded"] * S)
+        tokenizer.eos_token_id = 2
+
+        class MockDataset:
+            def __init__(self):
+                self.data = [
+                    {
+                        "input_ids": torch.randint(0, V, (full_len,)),
+                        "labels": torch.randint(0, V, (full_len,)),
+                    }
+                ]
+
+            def __len__(self):
+                return len(self.data)
+
+            def __getitem__(self, idx):
+                return self.data[idx]
+
+        def mock_collator(batch):
+            return {
+                "input_ids": torch.stack([b["input_ids"] for b in batch]),
+                "labels": torch.stack([b["labels"] for b in batch]),
+                "indices": torch.tensor([0]),
+            }
+
+        raw_fn = (
+            trajectory_metrics._metric_fn
+            if hasattr(trajectory_metrics, "_metric_fn")
+            else trajectory_metrics
+        )
+        with patch("evals.metrics.trajectory_metrics.eval_rouge_recall_batch") as mock_rouge_batch:
+            mock_rouge_batch.return_value = [
+                {"rouge1_recall": 0.5, "rougeL_f1": 0.6, "rougeL_recall": 0.7}
+                for _ in range(S)
+            ]
+            raw_fn(
+                model,
+                metric_name="trajectory_metrics",
+                cache={},
+                metrics=["rouge"],
+                data=MockDataset(),
+                collators=mock_collator,
+                tokenizer=tokenizer,
+                batch_size=1,
+                trajectory_config={
+                    "return_logits": True,
+                    "return_fixation_steps": True,
+                    "sampler_kwargs": {
+                        "steps": S,
+                        "max_new_tokens": L_gen,
+                        "trajectory_sample_interval": 8,
+                    },
+                },
+            )
+            assert tokenizer.batch_decode.call_count >= 1
+            for call in tokenizer.batch_decode.call_args_list:
+                token_lists = call[0][0]
+                assert len(token_lists) == S
+            assert tokenizer.decode.call_count == 1
 
 
 class TestRougeVerification:

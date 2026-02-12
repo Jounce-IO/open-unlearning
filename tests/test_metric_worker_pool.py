@@ -42,6 +42,7 @@ def _trajectory_metrics_rouge_mock_setup(S=4, L_gen=10, V=100):
     model.sampler = sampler
     tokenizer = Mock()
     tokenizer.decode = Mock(return_value="decoded")
+    tokenizer.batch_decode = Mock(return_value=["decoded"] * S)
     tokenizer.eos_token_id = 2
 
     class MockDataset:

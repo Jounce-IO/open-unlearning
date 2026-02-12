@@ -72,6 +72,16 @@ def _debug_log(location: str, message: str, data: dict):
 IGNORE_INDEX = -100
 
 
+def should_run_gc(threshold: float = 0.9) -> bool:
+    """Return True if CUDA is available and VRAM usage (allocated/total) is >= threshold."""
+    if not torch.cuda.is_available():
+        return False
+    total = torch.cuda.get_device_properties(0).total_memory
+    if total <= 0:
+        return False
+    return (torch.cuda.memory_allocated() / total) >= threshold
+
+
 def _compute_prob_from_fixation_logits(
     fixation_logits: torch.Tensor,
     labels: torch.Tensor,
@@ -1108,6 +1118,7 @@ def trajectory_metrics(model, **kwargs):
             if not metrics_to_run:
                 continue
 
+            all_rouge_futures: list = []
         # Process each batch
             for batch_idx, batch in enumerate(dataloader):
                 gpu_set_phase("trajectory_batch_start", batch_idx=batch_idx)
@@ -1316,15 +1327,16 @@ def trajectory_metrics(model, **kwargs):
                             if loaded_metrics[m]["metric"].name == "rouge"
                         ]
                         if rouge_metrics_in_run:
-                            gen_texts = []
+                            pred_token_lists = []
                             for step in steps_to_use:
                                 logits_s = _get_logits_at_step(sample_traj, traj_name, step)
                                 if logits_s.dim() == 3:
                                     logits_s = logits_s[0]
                                 pred_tokens = torch.argmax(logits_s, dim=-1)
-                                gen_texts.append(
-                                    tokenizer.decode(pred_tokens.tolist(), skip_special_tokens=True)
-                                )
+                                pred_token_lists.append(pred_tokens.tolist())
+                            gen_texts = tokenizer.batch_decode(
+                                pred_token_lists, skip_special_tokens=True
+                            )
                             if executor is None:
                                 rouge_scores = eval_rouge_recall_batch(
                                     gen_texts,
@@ -1490,14 +1502,7 @@ def trajectory_metrics(model, **kwargs):
                                     )
 
                     if executor is not None and rouge_futures_this_sample:
-                        for (future, traj_name, rouge_metrics_in_run, steps_to_use) in rouge_futures_this_sample:
-                            rouge_scores = future.result()
-                            for metric_name in rouge_metrics_in_run:
-                                metric_cfg = loaded_metrics[metric_name]["config"]
-                                rouge_type = metric_cfg.get("rouge_type") or kwargs.get("rouge_type", "rougeL_f1")
-                                for i, step in enumerate(steps_to_use):
-                                    if i < len(rouge_scores) and isinstance(rouge_scores[i], dict) and rouge_type in rouge_scores[i]:
-                                        step_values[traj_name][step][metric_name].append(rouge_scores[i][rouge_type])
+                        all_rouge_futures.extend(rouge_futures_this_sample)
 
                 gpu_set_phase("trajectory_batch_end", batch_idx=batch_idx)
                 # Release batch-sized GPU data before next batch to avoid holding two batches in memory (OOM with many samples).
@@ -1510,10 +1515,21 @@ def trajectory_metrics(model, **kwargs):
                 except NameError:
                     pass
                 del out, R, F
-                gc.collect()
-                if torch.cuda.is_available():
-                    torch.cuda.synchronize()
-                    torch.cuda.empty_cache()
+                if should_run_gc(0.9):
+                    gc.collect()
+                    if torch.cuda.is_available():
+                        torch.cuda.synchronize()
+                        torch.cuda.empty_cache()
+
+            if executor is not None and all_rouge_futures:
+                for (future, traj_name, rouge_metrics_in_run, steps_to_use) in all_rouge_futures:
+                    rouge_scores = future.result()
+                    for metric_name in rouge_metrics_in_run:
+                        metric_cfg = loaded_metrics[metric_name]["config"]
+                        rouge_type = metric_cfg.get("rouge_type") or kwargs.get("rouge_type", "rougeL_f1")
+                        for i, step in enumerate(steps_to_use):
+                            if i < len(rouge_scores) and isinstance(rouge_scores[i], dict) and rouge_type in rouge_scores[i]:
+                                step_values[traj_name][step][metric_name].append(rouge_scores[i][rouge_type])
 
             if _key is None and privleak_accumulators is not None and holdout_dataloader is not None:
                 privleak_cfg = privleak_streaming_cfg["privleak_cfg"]
@@ -1571,9 +1587,10 @@ def trajectory_metrics(model, **kwargs):
                             h_batch, h_logits_batch
                         )
                     del h_R, h_F
-                    gc.collect()
-                    if torch.cuda.is_available():
-                        torch.cuda.empty_cache()
+                    if should_run_gc(0.9):
+                        gc.collect()
+                        if torch.cuda.is_available():
+                            torch.cuda.empty_cache()
                 for step in run_steps_to_use:
                     gpu_set_phase("privleak_dual_step", step=step)
                     pre_result = privleak_accumulators[step].aggregate()
