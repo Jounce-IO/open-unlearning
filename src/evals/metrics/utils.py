@@ -248,6 +248,51 @@ def tokenwise_logprobs(model, batch, grad=False, return_labels=False):
     return (log_probs_batch, labels_batch) if return_labels else log_probs_batch
 
 
+def tokenwise_logprobs_from_logits(batch, logits, return_labels=False):
+    """
+    Compute token-wise next token prediction logprobs from precomputed logits (no model call).
+
+    Same output as tokenwise_logprobs(model, batch) when model(**batch).logits == logits.
+    Caller should pass batch and logits on the same device.
+
+    Returns:
+        log_probs_batch (List[Tensor]): Per-sample log-prob tensors.
+        If return_labels=True: (log_probs_batch, labels_batch).
+    """
+    batch = {k: v.to(logits.device) if isinstance(v, torch.Tensor) else v for k, v in batch.items()}
+    bsz, seq_len, V = logits.shape
+    if batch["input_ids"].shape[1] > seq_len:
+        batch = {**batch, "input_ids": batch["input_ids"][:, :seq_len]}
+    if batch.get("labels") is not None and isinstance(batch["labels"], torch.Tensor):
+        if batch["labels"].shape[1] > seq_len:
+            batch = {**batch, "labels": batch["labels"][:, :seq_len]}
+    if batch.get("attention_mask") is not None and isinstance(batch["attention_mask"], torch.Tensor):
+        if batch["attention_mask"].shape[1] > seq_len:
+            batch = {**batch, "attention_mask": batch["attention_mask"][:, :seq_len]}
+    log_probs = torch.nn.functional.log_softmax(logits, dim=-1)[:, :-1, :]
+    next_tokens = batch["input_ids"][:, 1:].unsqueeze(-1)
+    target_log_probs = torch.gather(log_probs, dim=2, index=next_tokens).squeeze(-1)
+    log_probs_batch = []
+    labels_batch = []
+    for i in range(bsz):
+        labels = batch["labels"][i]
+        actual_indices = (labels != IGNORE_INDEX).nonzero(as_tuple=True)[0][:-1]
+        num_actual_tokens = actual_indices.numel()
+        if num_actual_tokens == 0:
+            labels_batch.append(torch.tensor([], device=labels.device))
+            log_probs_batch.append(torch.tensor([], device=labels.device))
+            continue
+        start_idx, end_idx = actual_indices[0].item(), actual_indices[-1].item()
+        if start_idx == 0:
+            warnings.warn(
+                "Index 0 in a datapoint's input_ids must not have loss (unignored labels) on it",
+                UserWarning,
+            )
+        log_probs_batch.append(target_log_probs[i, start_idx - 1 : end_idx])
+        labels_batch.append(labels[actual_indices])
+    return (log_probs_batch, labels_batch) if return_labels else log_probs_batch
+
+
 def tokenwise_vocab_logprobs(model, batch, grad=False, return_labels=False):
     """Get vocabulary-wise log probabilities for each token in the sequence.
 

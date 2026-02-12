@@ -44,6 +44,13 @@ from evals.metrics.trajectory_adapters import (
     compute_logit_metric_at_step,
     compute_text_metric_at_step,
 )
+from evals.metrics.mia.utils import (
+    batch_to_cpu,
+    get_attacker,
+    mia_auc_from_score_dicts,
+    MIAStreamingAccumulator,
+    process_mia_batch_worker,
+)
 from evals.gpu_phase_logger import set_phase as gpu_set_phase
 
 logger = logging.getLogger("evaluator")
@@ -1057,67 +1064,37 @@ def trajectory_metrics(model, **kwargs):
                 "Ensure model is wrapped with DiffusionModelAdapter or has accessible sampler."
             )
 
-        # When privleak + dual dataset: collect trajectories for forget and holdout first (skip when multi_dataset; run after per-key loops)
+        # When privleak + dual dataset: use streaming MIA (batch-by-batch, only scores stored; no N trajectories in memory)
         trajectories_by_key = None
+        use_streaming_privleak = False
+        privleak_accumulators = None
+        privleak_forget_futures = None
+        privleak_holdout_futures = None
+        privleak_streaming_cfg = None
         if privleak_needs_dual and not multi_dataset:
-            logger.info("Privleak with dual dataset: generating trajectories for forget and holdout")
-            gpu_set_phase("privleak_dual_forget")
-            forget_traj = _generate_trajectories_for_dataloader(
-                sampler, dataloader, trajectory_config
-            )
-            gpu_set_phase("privleak_dual_holdout")
-            holdout_traj = _generate_trajectories_for_dataloader(
-                sampler, holdout_dataloader, trajectory_config
-            )
-            if forget_traj and holdout_traj:
-                trajectories_by_key = {"forget": forget_traj, "holdout": holdout_traj}
-                S_dual = next(iter(forget_traj.values()))["S"]
-                steps_to_use_dual, _ = _derive_steps_to_use(S_dual, trajectory_config)
-                try:
-                    device = getattr(model, "device", None) or next(model.parameters()).device
-                except (StopIteration, AttributeError):
-                    device = torch.device("cpu")
-                privleak_cfg = loaded_metrics["privleak"]["config"]
-                for step in steps_to_use_dual:
-                    gpu_set_phase("privleak_dual_step", step=step)
-                    logits_by_key = {}
-                    for key, traj_by_idx in trajectories_by_key.items():
-                        logits_by_key[key] = {
-                            idx: _get_logits_at_step(traj, "steps", step)
-                            for idx, traj in traj_by_idx.items()
-                        }
-                    dual_wrapper = DualLogitModelWrapper(logits_by_key, device)
-                    kwargs_priv = {
-                        "data": {"forget": primary_data, "holdout": secondary_data},
-                        "collators": collator,
-                        "batch_size": batch_size,
-                        **{k: v for k, v in kwargs.items() if k not in ("tokenizer", "model", "data", "collators")},
-                    }
-                    pre_result = _compute_pre_compute_metrics_at_step(
-                        pre_compute_config=privleak_cfg.get("pre_compute", {}),
-                        logits=next(iter(logits_by_key["forget"].values())),
-                        batch_template={},
-                        tokenizer=tokenizer,
-                        sample_labels=None,
-                        sample_input_ids=torch.zeros(1),
-                        sample_prompt_len=0,
-                        sample_idx="0",
-                        model_wrapper_override=dual_wrapper,
-                        **kwargs_priv,
-                    )
-                    privleak_result = _get_metric_from_registry("privleak")._metric_fn(
-                        model=dual_wrapper,
-                        pre_compute=pre_result,
-                        reference_logs=kwargs.get("reference_logs"),
-                        ref_value=privleak_cfg.get("ref_value", 0.5),
-                        **{k: v for k, v in kwargs.items() if k not in ("model", "tokenizer", "pre_compute")},
-                    )
-                    for traj_name in trajectory_names:
-                        if step not in step_values[traj_name]:
-                            step_values[traj_name][step] = {m: [] for m in loaded_metrics}
-                        step_values[traj_name][step]["privleak"].append(privleak_result.get("agg_value"))
+            use_streaming_privleak = True
+            logger.info("Privleak with dual dataset: using streaming MIA (batch-by-batch, scores only)")
+            try:
+                _device = getattr(model, "device", None) or next(model.parameters()).device
+            except (StopIteration, AttributeError):
+                _device = torch.device("cpu")
+            privleak_cfg = loaded_metrics["privleak"]["config"]
+            pre_compute = privleak_cfg.get("pre_compute", {})
+            if "mia_min_k" in pre_compute:
+                attack_cls = get_attacker("min_k")
+                attack_kwargs = dict(pre_compute.get("mia_min_k", {}))
+                attack_cls_name = "min_k"
             else:
-                logger.warning("Privleak dual trajectories empty, skipping privleak")
+                attack_cls = None
+                attack_kwargs = {}
+                attack_cls_name = None
+            privleak_streaming_cfg = {
+                "device": _device,
+                "privleak_cfg": privleak_cfg,
+                "attack_cls": attack_cls,
+                "attack_cls_name": attack_cls_name,
+                "attack_kwargs": attack_kwargs,
+            }
 
         run_steps_to_use = None
         run_step_values_metadata = None
@@ -1216,6 +1193,63 @@ def trajectory_metrics(model, **kwargs):
                         S, trajectory_config
                     )
                 steps_to_use = run_steps_to_use
+                if (
+                    use_streaming_privleak
+                    and privleak_streaming_cfg is not None
+                    and privleak_streaming_cfg.get("attack_cls") is not None
+                    and privleak_accumulators is None
+                    and privleak_forget_futures is None
+                    and _key is None
+                ):
+                    cfg = privleak_streaming_cfg
+                    if executor is not None and cfg.get("attack_cls_name") is not None:
+                        privleak_forget_futures = {step: [] for step in run_steps_to_use}
+                        privleak_holdout_futures = {step: [] for step in run_steps_to_use}
+                        logger.info(
+                            "Streaming MIA: offloading forget/holdout batches to metric worker pool"
+                        )
+                    else:
+                        privleak_accumulators = {
+                            step: MIAStreamingAccumulator(
+                                cfg["attack_cls"],
+                                collator,
+                                batch_size,
+                                cfg["device"],
+                                **cfg["attack_kwargs"],
+                            )
+                            for step in run_steps_to_use
+                        }
+                if privleak_accumulators is not None and _key is None:
+                    for step in run_steps_to_use:
+                        logits_list = [
+                            _get_logits_at_step(
+                                {"R": R[i], "F": F[i], "S": S, "L": L}, "steps", step
+                            ).T
+                            for i in range(B)
+                        ]
+                        logits_batch = torch.stack(logits_list, dim=0)
+                        privleak_accumulators[step].add_forget_batch(batch, logits_batch)
+                elif privleak_forget_futures is not None and _key is None:
+                    cfg = privleak_streaming_cfg
+                    batch_cpu = batch_to_cpu(batch)
+                    for step in run_steps_to_use:
+                        logits_list = [
+                            _get_logits_at_step(
+                                {"R": R[i], "F": F[i], "S": S, "L": L}, "steps", step
+                            ).T
+                            for i in range(B)
+                        ]
+                        logits_batch = torch.stack(logits_list, dim=0)
+                        logits_cpu = logits_batch.cpu()
+                        future = executor.submit(
+                            process_mia_batch_worker,
+                            cfg["attack_cls_name"],
+                            cfg["attack_kwargs"],
+                            batch_size,
+                            batch_cpu,
+                            logits_cpu,
+                        )
+                        privleak_forget_futures[step].append(future)
                 gpu_set_phase("trajectory_after_trajectories", batch_idx=batch_idx)
                 # #region agent log
                 if batch_idx == 0:
@@ -1517,6 +1551,110 @@ def trajectory_metrics(model, **kwargs):
                 if torch.cuda.is_available():
                     torch.cuda.synchronize()
                     torch.cuda.empty_cache()
+
+            if (
+                _key is None
+                and holdout_dataloader is not None
+                and (privleak_accumulators is not None or privleak_holdout_futures is not None)
+            ):
+                privleak_cfg = privleak_streaming_cfg["privleak_cfg"]
+                for h_batch_idx, h_batch in enumerate(holdout_dataloader):
+                    gpu_set_phase("privleak_dual_holdout_batch", batch_idx=h_batch_idx)
+                    h_input_ids = h_batch["input_ids"]
+                    h_labels = h_batch.get("labels")
+                    h_indices = h_batch.get(
+                        "index",
+                        torch.arange(
+                            h_batch_idx * h_input_ids.shape[0],
+                            (h_batch_idx + 1) * h_input_ids.shape[0],
+                        ),
+                    )
+                    h_B = h_input_ids.shape[0]
+                    h_prompts = []
+                    h_prompt_lens = []
+                    for i in range(h_B):
+                        if h_labels is not None:
+                            label_mask = h_labels[i] != IGNORE_INDEX
+                            prompt_end = (
+                                label_mask.nonzero()[0][0].item()
+                                if label_mask.any()
+                                else h_input_ids.shape[1]
+                            )
+                        else:
+                            prompt_end = h_input_ids.shape[1]
+                        h_prompts.append(h_input_ids[i, :prompt_end].cpu().tolist())
+                        h_prompt_lens.append(len(h_prompts[-1]))
+                    h_sampler_output = sampler.sample(
+                        inputs=h_prompts,
+                        config=None,
+                        return_dict=True,
+                        return_logits=True,
+                        **trajectory_config.get("sampler_kwargs", {}),
+                    )
+                    h_logits_history = h_sampler_output.logits_history
+                    h_fixation_steps = h_sampler_output.fixation_steps
+                    if h_logits_history is None or len(h_logits_history) == 0 or h_fixation_steps is None:
+                        continue
+                    h_out = trajectories_from_logits(
+                        h_logits_history, h_fixation_steps, h_prompt_lens, return_trajectory_tensors=False
+                    )
+                    h_R, h_F, h_S, h_L = h_out["R"], h_out["F"], h_out["S"], h_out["L"]
+                    del h_logits_history, h_out
+                    for step in run_steps_to_use:
+                        h_logits_list = [
+                            _get_logits_at_step(
+                                {"R": h_R[i], "F": h_F[i], "S": h_S, "L": h_L}, "steps", step
+                            ).T
+                            for i in range(h_B)
+                        ]
+                        h_logits_batch = torch.stack(h_logits_list, dim=0)
+                        if privleak_accumulators is not None:
+                            privleak_accumulators[step].add_holdout_batch(
+                                h_batch, h_logits_batch
+                            )
+                        else:
+                            cfg = privleak_streaming_cfg
+                            h_batch_cpu = batch_to_cpu(h_batch)
+                            h_logits_cpu = h_logits_batch.cpu()
+                            future = executor.submit(
+                                process_mia_batch_worker,
+                                cfg["attack_cls_name"],
+                                cfg["attack_kwargs"],
+                                batch_size,
+                                h_batch_cpu,
+                                h_logits_cpu,
+                            )
+                            privleak_holdout_futures[step].append(future)
+                    del h_R, h_F
+                    gc.collect()
+                    if torch.cuda.is_available():
+                        torch.cuda.empty_cache()
+                for step in run_steps_to_use:
+                    gpu_set_phase("privleak_dual_step", step=step)
+                    if privleak_accumulators is not None:
+                        pre_result = privleak_accumulators[step].aggregate()
+                    else:
+                        forget_dict = {}
+                        for f in privleak_forget_futures[step]:
+                            forget_dict.update(f.result())
+                        holdout_dict = {}
+                        for f in privleak_holdout_futures[step]:
+                            holdout_dict.update(f.result())
+                        pre_result = mia_auc_from_score_dicts(forget_dict, holdout_dict)
+                    privleak_result = _get_metric_from_registry("privleak")._metric_fn(
+                        model=None,
+                        pre_compute=pre_result,
+                        reference_logs=kwargs.get("reference_logs"),
+                        ref_value=privleak_cfg.get("ref_value", 0.5),
+                        **{k: v for k, v in kwargs.items() if k not in ("model", "tokenizer", "pre_compute")},
+                    )
+                    for traj_name in trajectory_names:
+                        if step not in step_values[traj_name]:
+                            step_values[traj_name][step] = {m: [] for m in loaded_metrics}
+                        step_values[traj_name][step]["privleak"].append(privleak_result.get("agg_value"))
+                privleak_accumulators = None
+                privleak_forget_futures = None
+                privleak_holdout_futures = None
 
         # Multi-dataset: run privleak dual trajectory after per-key loops
         if multi_dataset and "forget" in data and "holdout" in data and "privleak" in loaded_metrics and privleak_needs_dual:
