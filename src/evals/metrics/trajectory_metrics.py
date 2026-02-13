@@ -1188,6 +1188,12 @@ def trajectory_metrics(model, **kwargs):
             if not metrics_to_run:
                 continue
 
+            n_samples = len(dataloader.dataset)
+            expected_batches = (n_samples + batch_size - 1) // batch_size
+            logger.info(
+                f"Trajectory forget dataset: {n_samples} samples, batch_size {batch_size}, "
+                f"expected batches: {expected_batches} (last batch index: {expected_batches - 1})"
+            )
             all_rouge_futures: list = []
         # Process each batch
             for batch_idx, batch in enumerate(dataloader):
