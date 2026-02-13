@@ -324,6 +324,7 @@ The system will:
 | `batch_size` | int | 1 | Batch size for evaluation |
 | `trajectory_config.return_logits` | bool | true | Enable logits tracking in sampler |
 | `trajectory_config.return_fixation_steps` | bool | true | Enable fixation step tracking |
+| `trajectory_config.sampler_kwargs.trajectory_sample_interval` | int | 8 | Interval mode only; defaults to 8 when omitted. Every-step mode is not used. |
 | `trajectory_config.sampler_kwargs.steps` | int | 32 | Number of diffusion steps |
 | `trajectory_config.sampler_kwargs.max_new_tokens` | int | 64 | Max tokens to generate |
 

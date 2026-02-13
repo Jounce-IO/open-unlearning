@@ -3,6 +3,9 @@ Trajectory-based metrics for dLLM unlearning evaluation.
 
 This module computes metrics at each diffusion step across three trajectory types
 (steps, fixation, ratio), supporting any metric from the open-unlearning framework.
+
+Trajectory evals use interval mode only (trajectory_sample_interval, default 8).
+Every-step mode (no interval) is not used.
 """
 
 import gc
@@ -71,6 +74,20 @@ def _debug_log(location: str, message: str, data: dict):
 
 # IGNORE_INDEX from data.utils
 IGNORE_INDEX = -100
+
+# Trajectory evals use interval mode only; every-step mode is not used.
+DEFAULT_TRAJECTORY_SAMPLE_INTERVAL = 8
+
+
+def _trajectory_sampler_kwargs(trajectory_config: Union[Dict, DictConfig]) -> dict:
+    """Return sampler_kwargs with trajectory_sample_interval defaulting to 8 when return_logits is used."""
+    kwargs = dict(trajectory_config.get("sampler_kwargs", {}) or {})
+    if trajectory_config.get("return_logits") and (
+        kwargs.get("trajectory_sample_interval") is None
+        or kwargs.get("trajectory_sample_interval", 0) < 1
+    ):
+        kwargs["trajectory_sample_interval"] = DEFAULT_TRAJECTORY_SAMPLE_INTERVAL
+    return kwargs
 
 
 def should_run_gc(threshold: float = 0.9) -> bool:
@@ -233,7 +250,7 @@ def _generate_trajectories_for_dataloader(
             config=None,
             return_dict=True,
             return_logits=True,
-            **trajectory_config.get("sampler_kwargs", {}),
+            **_trajectory_sampler_kwargs(trajectory_config),
         )
         logits_history = sampler_output.logits_history
         fixation_steps = sampler_output.fixation_steps
@@ -1186,7 +1203,7 @@ def trajectory_metrics(model, **kwargs):
                     config=None,  # Use default config
                     return_dict=True,
                     return_logits=True,
-                    **trajectory_config.get("sampler_kwargs", {}),
+                    **_trajectory_sampler_kwargs(trajectory_config),
                 )
                 gpu_set_phase("trajectory_after_sampler", batch_idx=batch_idx)
 
@@ -1595,7 +1612,7 @@ def trajectory_metrics(model, **kwargs):
                         config=None,
                         return_dict=True,
                         return_logits=True,
-                        **trajectory_config.get("sampler_kwargs", {}),
+                        **_trajectory_sampler_kwargs(trajectory_config),
                     )
                     h_logits_history = h_sampler_output.logits_history
                     h_fixation_steps = h_sampler_output.fixation_steps

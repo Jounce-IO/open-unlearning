@@ -26,6 +26,8 @@ from evals.metrics.trajectory_metrics import (
     _call_metric_at_step,
     _compute_pre_compute_metrics_at_step,
     _derive_steps_to_use,
+    _trajectory_sampler_kwargs,
+    DEFAULT_TRAJECTORY_SAMPLE_INTERVAL,
     should_run_gc,
     trajectory_metrics,
 )
@@ -358,6 +360,33 @@ class TestDeriveStepsToUse:
         steps_to_use, step_values_metadata = _derive_steps_to_use(0, {})
         assert steps_to_use == []
         assert step_values_metadata == []
+
+
+class TestTrajectorySamplerKwargs:
+    """Tests for _trajectory_sampler_kwargs (interval default 8 when return_logits)."""
+
+    def test_injects_interval_8_when_return_logits_and_interval_missing(self):
+        """When return_logits=True and sampler_kwargs has no trajectory_sample_interval, default to 8."""
+        config = {"return_logits": True, "sampler_kwargs": {"steps": 16, "max_new_tokens": 32}}
+        kwargs = _trajectory_sampler_kwargs(config)
+        assert kwargs["trajectory_sample_interval"] == DEFAULT_TRAJECTORY_SAMPLE_INTERVAL
+        assert kwargs["steps"] == 16
+        assert kwargs["max_new_tokens"] == 32
+
+    def test_preserves_explicit_interval(self):
+        """When trajectory_sample_interval is set, do not override."""
+        config = {
+            "return_logits": True,
+            "sampler_kwargs": {"trajectory_sample_interval": 4, "max_new_tokens": 32},
+        }
+        kwargs = _trajectory_sampler_kwargs(config)
+        assert kwargs["trajectory_sample_interval"] == 4
+
+    def test_no_inject_when_return_logits_false(self):
+        """When return_logits is False, do not add trajectory_sample_interval."""
+        config = {"return_logits": False, "sampler_kwargs": {"steps": 16}}
+        kwargs = _trajectory_sampler_kwargs(config)
+        assert "trajectory_sample_interval" not in kwargs or kwargs.get("trajectory_sample_interval") is None
 
 
 class TestTrajectoryMetricsErrorHandling:
