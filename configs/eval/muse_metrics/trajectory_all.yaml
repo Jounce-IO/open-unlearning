@@ -18,7 +18,8 @@ pre_compute:
     access_key: forget
 
 handler: trajectory_metrics
-batch_size: 1
+batch_size: 4
+sort_by_length: true
 include_metrics: null
 
 metrics:

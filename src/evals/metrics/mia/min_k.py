@@ -4,7 +4,7 @@ Min-k % Prob Attack: https://arxiv.org/pdf/2310.16789.pdf
 
 import numpy as np
 from evals.metrics.mia.all_attacks import Attack
-from evals.metrics.utils import tokenwise_logprobs
+from evals.metrics.utils import tokenwise_logprobs, tokenwise_logprobs_from_logits
 
 
 class MinKProbAttack(Attack):
@@ -14,6 +14,10 @@ class MinKProbAttack(Attack):
     def compute_batch_values(self, batch):
         """Get token-wise log probabilities for the batch."""
         return tokenwise_logprobs(self.model, batch, grad=False)
+
+    def compute_batch_values_from_logits(self, batch, logits):
+        """Get token-wise log probabilities from precomputed logits (no model call)."""
+        return tokenwise_logprobs_from_logits(batch, logits, return_labels=False)
 
     def compute_score(self, sample_stats):
         """Score single sample using min-k negative log probs scores attack."""

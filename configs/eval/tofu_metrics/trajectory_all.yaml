@@ -28,7 +28,8 @@ pre_compute:
     access_key: forget
 
 handler: trajectory_metrics
-batch_size: 1
+batch_size: 4
+sort_by_length: true
 # Order must match metric_display_names below.
 metrics:
   probability: {}
@@ -85,6 +86,8 @@ trajectory_config:
   logits_source: sampler
   return_logits: true
   return_fixation_steps: true
+  # CPU worker pool for ROUGE (0 = synchronous). Set via override to enable (e.g. 4).
+  metric_worker_pool_size: 0
   sampler_kwargs:
     steps: 16
     temperature: 0.0
