@@ -19,6 +19,7 @@ from torch.utils.data import DataLoader
 from omegaconf import ListConfig, DictConfig
 
 from evals.metrics.base import unlearning_metric
+from evals.metrics.samplers import LengthSortedSampler
 from evals.metrics.utils import (
     evaluate_probability,
     evaluate_probability_confidence_ordered,
@@ -939,6 +940,7 @@ def trajectory_metrics(model, **kwargs):
         data = kwargs.get("data")
         collator = kwargs.get("collators")
         batch_size = kwargs.get("batch_size", 1)
+        sort_by_length = kwargs.get("sort_by_length", False)
         tokenizer = kwargs.get("tokenizer")
         generation_args = kwargs.get("generation_args", {})
     
@@ -1032,14 +1034,33 @@ def trajectory_metrics(model, **kwargs):
 
         # Create dataloader(s)
         if not multi_dataset:
-            dataloader = DataLoader(primary_data, batch_size=batch_size, collate_fn=collator)
+            if sort_by_length:
+                dataloader = DataLoader(
+                    primary_data,
+                    batch_size=batch_size,
+                    sampler=LengthSortedSampler(primary_data),
+                    collate_fn=collator,
+                )
+            else:
+                dataloader = DataLoader(
+                    primary_data, batch_size=batch_size, collate_fn=collator
+                )
         else:
             dataloader = None  # created per key in loop
-        holdout_dataloader = (
-            DataLoader(secondary_data, batch_size=batch_size, collate_fn=collator)
-            if secondary_data is not None
-            else None
-        )
+        if secondary_data is not None:
+            if sort_by_length:
+                holdout_dataloader = DataLoader(
+                    secondary_data,
+                    batch_size=batch_size,
+                    sampler=LengthSortedSampler(secondary_data),
+                    collate_fn=collator,
+                )
+            else:
+                holdout_dataloader = DataLoader(
+                    secondary_data, batch_size=batch_size, collate_fn=collator
+                )
+        else:
+            holdout_dataloader = None
 
         # Check if privleak needs dual trajectories (forget + holdout)
         privleak_has_dual_data = (secondary_data is not None and holdout_dataloader is not None) or (
@@ -1105,7 +1126,17 @@ def trajectory_metrics(model, **kwargs):
         for _key in keys_to_process:
             if _key is not None:
                 primary_data = data[_key]
-                dataloader = DataLoader(primary_data, batch_size=batch_size, collate_fn=collator)
+                if sort_by_length:
+                    dataloader = DataLoader(
+                        primary_data,
+                        batch_size=batch_size,
+                        sampler=LengthSortedSampler(primary_data),
+                        collate_fn=collator,
+                    )
+                else:
+                    dataloader = DataLoader(
+                        primary_data, batch_size=batch_size, collate_fn=collator
+                    )
                 metrics_to_run = [
                     m for m in loaded_metrics
                     if (loaded_metrics[m].get("config") or {}).get("dataset_key") == _key
@@ -1611,8 +1642,26 @@ def trajectory_metrics(model, **kwargs):
         if multi_dataset and "forget" in data and "holdout" in data and "privleak" in loaded_metrics and privleak_needs_dual:
             primary_data = data["forget"]
             secondary_data = data["holdout"]
-            dataloader = DataLoader(primary_data, batch_size=batch_size, collate_fn=collator)
-            holdout_dataloader = DataLoader(secondary_data, batch_size=batch_size, collate_fn=collator)
+            if sort_by_length:
+                dataloader = DataLoader(
+                    primary_data,
+                    batch_size=batch_size,
+                    sampler=LengthSortedSampler(primary_data),
+                    collate_fn=collator,
+                )
+                holdout_dataloader = DataLoader(
+                    secondary_data,
+                    batch_size=batch_size,
+                    sampler=LengthSortedSampler(secondary_data),
+                    collate_fn=collator,
+                )
+            else:
+                dataloader = DataLoader(
+                    primary_data, batch_size=batch_size, collate_fn=collator
+                )
+                holdout_dataloader = DataLoader(
+                    secondary_data, batch_size=batch_size, collate_fn=collator
+                )
             logger.info("Privleak with dual dataset: generating trajectories for forget and holdout")
             gpu_set_phase("privleak_dual_forget")
             forget_traj = _generate_trajectories_for_dataloader(sampler, dataloader, trajectory_config)

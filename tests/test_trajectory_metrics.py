@@ -1029,6 +1029,207 @@ class TestTrajectoryMetricsIntegration:
         # Sampler should have been called once per batch
         assert sampler.sample.call_count == num_samples
 
+    def test_sort_by_length_order_invariance(self):
+        """Same aggregated results with sort_by_length=True vs False (order invariance)."""
+        import numpy as np
+
+        V, L_gen, S = 50, 6, 4
+        full_len = 10 + L_gen  # 16
+        # 4 samples with distinct prompt lengths 5, 7, 3, 6 so mock can key logits by length
+        prompt_lengths = [5, 7, 3, 6]
+        IGNORE_INDEX = -100
+
+        # Precompute deterministic logits per "virtual index" (0..3) so same sample -> same logits
+        torch.manual_seed(123)
+        logits_by_index = []
+        for _ in range(4):
+            lh = [torch.randn(1, full_len, V) for _ in range(S)]
+            fix = torch.randint(0, S, (1, full_len))
+            logits_by_index.append((lh, fix))
+        length_to_idx = {5: 0, 7: 1, 3: 2, 6: 3}
+
+        def mock_sample(inputs, **kwargs):
+            B = len(inputs)
+            lengths = [len(p) for p in inputs]
+            lh_stacked = [
+                torch.cat([logits_by_index[length_to_idx[L]][0][s] for L in lengths], dim=0)
+                for s in range(S)
+            ]
+            fix_stacked = torch.cat(
+                [logits_by_index[length_to_idx[L]][1] for L in lengths], dim=0
+            )
+            return Mock(
+                logits_history=lh_stacked,
+                fixation_steps=fix_stacked,
+                sequences=torch.randint(0, V, (B, full_len)),
+                histories=None,
+            )
+
+        sampler = Mock()
+        sampler.sample.side_effect = mock_sample
+        model = Mock()
+        model.sampler = sampler
+
+        def make_dataset():
+            data = []
+            for i, plen in enumerate(prompt_lengths):
+                input_ids = torch.randint(0, V, (full_len,))
+                labels = torch.full((full_len,), IGNORE_INDEX, dtype=torch.long)
+                labels[plen:] = input_ids[plen:].clone()
+                data.append({"input_ids": input_ids, "labels": labels, "index": i})
+            return data
+
+        class MockDataset:
+            def __init__(self):
+                self.data = make_dataset()
+
+            def __len__(self):
+                return len(self.data)
+
+            def __getitem__(self, idx):
+                return self.data[idx]
+
+        def mock_collator(batch):
+            return {
+                "input_ids": torch.nn.utils.rnn.pad_sequence(
+                    [b["input_ids"] for b in batch], batch_first=True, padding_value=0
+                ),
+                "labels": torch.nn.utils.rnn.pad_sequence(
+                    [b["labels"] for b in batch], batch_first=True, padding_value=IGNORE_INDEX
+                ),
+                "index": torch.tensor([b["index"] for b in batch]),
+            }
+
+        tokenizer = Mock()
+        tokenizer.decode = lambda x, **kwargs: "decoded"
+
+        dataset = MockDataset()
+        base_kwargs = {
+            "metric_name": "trajectory_metrics",
+            "cache": {},
+            "metrics": ["probability"],
+            "data": dataset,
+            "collators": mock_collator,
+            "tokenizer": tokenizer,
+            "batch_size": 2,
+            "trajectory_config": {
+                "return_logits": True,
+                "return_fixation_steps": True,
+                "sampler_kwargs": {"steps": S, "max_new_tokens": L_gen},
+            },
+        }
+
+        result_no_sort = trajectory_metrics(model, **base_kwargs, sort_by_length=False)
+        result_sort = trajectory_metrics(model, **base_kwargs, sort_by_length=True)
+
+        assert result_no_sort is not None and "agg_value" in result_no_sort
+        assert result_sort is not None and "agg_value" in result_sort
+        for traj_name in result_no_sort["agg_value"]:
+            assert traj_name in result_sort["agg_value"]
+            for metric_name in result_no_sort["agg_value"][traj_name]:
+                assert metric_name in result_sort["agg_value"][traj_name]
+                a = np.asarray(result_no_sort["agg_value"][traj_name][metric_name])
+                b = np.asarray(result_sort["agg_value"][traj_name][metric_name])
+                np.testing.assert_allclose(a, b, rtol=1e-5, atol=1e-8)
+
+    def test_batch_size_four_same_aggregate_as_batch_size_one(self):
+        """Same aggregated results for batch_size=1 vs batch_size=4 (batch-size invariance)."""
+        import numpy as np
+
+        V, L_gen, S = 50, 6, 4
+        prompt_len = 10
+        full_len = prompt_len + L_gen  # 16, same for all samples
+        num_samples = 8
+        IGNORE_INDEX = -100
+        # Same prompt length for all so L (generated length) is identical; encode index in first token
+        prompt_lengths = [prompt_len] * num_samples
+
+        torch.manual_seed(456)
+        logits_by_index = []
+        for _ in range(num_samples):
+            lh = [torch.randn(1, full_len, V) for _ in range(S)]
+            fix = torch.randint(0, S, (1, full_len))
+            logits_by_index.append((lh, fix))
+
+        def mock_sample(inputs, **kwargs):
+            B = len(inputs)
+            # Encode index in first token: we built input_ids so input_ids[i, 0] == i
+            indices = [int(p[0]) % num_samples for p in inputs]
+            lh_stacked = [
+                torch.cat([logits_by_index[idx][0][s] for idx in indices], dim=0)
+                for s in range(S)
+            ]
+            fix_stacked = torch.cat([logits_by_index[idx][1] for idx in indices], dim=0)
+            return Mock(
+                logits_history=lh_stacked,
+                fixation_steps=fix_stacked,
+                sequences=torch.randint(0, V, (B, full_len)),
+                histories=None,
+            )
+
+        sampler = Mock()
+        sampler.sample.side_effect = mock_sample
+        model = Mock()
+        model.sampler = sampler
+
+        class MockDataset:
+            def __init__(self):
+                self.data = []
+                for i, plen in enumerate(prompt_lengths):
+                    input_ids = torch.randint(0, V, (full_len,))
+                    input_ids[0] = i  # encode index in first token for mock
+                    labels = torch.full((full_len,), IGNORE_INDEX, dtype=torch.long)
+                    labels[plen:] = input_ids[plen:].clone()
+                    self.data.append({"input_ids": input_ids, "labels": labels, "index": i})
+
+            def __len__(self):
+                return len(self.data)
+
+            def __getitem__(self, idx):
+                return self.data[idx]
+
+        def mock_collator(batch):
+            return {
+                "input_ids": torch.nn.utils.rnn.pad_sequence(
+                    [b["input_ids"] for b in batch], batch_first=True, padding_value=0
+                ),
+                "labels": torch.nn.utils.rnn.pad_sequence(
+                    [b["labels"] for b in batch], batch_first=True, padding_value=IGNORE_INDEX
+                ),
+                "index": torch.tensor([b["index"] for b in batch]),
+            }
+
+        tokenizer = Mock()
+        tokenizer.decode = lambda x, **kwargs: "decoded"
+
+        dataset = MockDataset()
+        base_kwargs = {
+            "metric_name": "trajectory_metrics",
+            "cache": {},
+            "metrics": ["probability"],
+            "data": dataset,
+            "collators": mock_collator,
+            "tokenizer": tokenizer,
+            "trajectory_config": {
+                "return_logits": True,
+                "return_fixation_steps": True,
+                "sampler_kwargs": {"steps": S, "max_new_tokens": L_gen},
+            },
+        }
+
+        result_b1 = trajectory_metrics(model, **base_kwargs, batch_size=1)
+        result_b4 = trajectory_metrics(model, **base_kwargs, batch_size=4)
+
+        assert result_b1 is not None and "agg_value" in result_b1
+        assert result_b4 is not None and "agg_value" in result_b4
+        for traj_name in result_b1["agg_value"]:
+            assert traj_name in result_b4["agg_value"]
+            for metric_name in result_b1["agg_value"][traj_name]:
+                assert metric_name in result_b4["agg_value"][traj_name]
+                a = np.asarray(result_b1["agg_value"][traj_name][metric_name])
+                b = np.asarray(result_b4["agg_value"][traj_name][metric_name])
+                np.testing.assert_allclose(a, b, rtol=1e-5, atol=1e-8)
+
 
 class TestDynamicMetricLoading:
     """Tests for dynamic metric loading from registry."""

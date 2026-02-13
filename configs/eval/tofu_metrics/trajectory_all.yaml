@@ -28,7 +28,8 @@ pre_compute:
     access_key: forget
 
 handler: trajectory_metrics
-batch_size: 1
+batch_size: 4
+sort_by_length: true
 # Order must match metric_display_names below.
 metrics:
   probability: {}
