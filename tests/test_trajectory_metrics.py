@@ -26,6 +26,7 @@ from evals.metrics.trajectory_metrics import (
     _call_metric_at_step,
     _compute_pre_compute_metrics_at_step,
     _derive_steps_to_use,
+    _get_logits_at_step,
     _trajectory_sampler_kwargs,
     DEFAULT_TRAJECTORY_SAMPLE_INTERVAL,
     should_run_gc,
@@ -387,6 +388,21 @@ class TestTrajectorySamplerKwargs:
         config = {"return_logits": False, "sampler_kwargs": {"steps": 16}}
         kwargs = _trajectory_sampler_kwargs(config)
         assert "trajectory_sample_interval" not in kwargs or kwargs.get("trajectory_sample_interval") is None
+
+
+class TestTrajectoryMetricsIndexErrorRepro:
+    """Reproduces IndexError when a batch has fewer steps than run_steps_to_use (for debug instrumentation)."""
+
+    def test_get_logits_at_step_step_3_S_3_raises_index_error(self):
+        """Direct repro: R has S=3 (valid indices 0,1,2); loop uses step=3 → IndexError. Writes debug NDJSON before crash."""
+        V, L, S = 10, 5, 3
+        R = torch.randn(1, V, L, S)
+        F = torch.zeros(1, L, dtype=torch.long)
+        run_steps_to_use = [0, 1, 2, 3]
+        traj = {"R": R[0], "F": F[0], "S": S, "L": L}
+        with pytest.raises(IndexError, match="index 3 is out of bounds"):
+            for step in run_steps_to_use:
+                _get_logits_at_step(traj, "steps", step)
 
 
 class TestTrajectoryMetricsErrorHandling:

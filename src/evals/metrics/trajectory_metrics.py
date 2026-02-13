@@ -55,6 +55,24 @@ logger = logging.getLogger("evaluator")
 
 # #region agent log
 _DEBUG_LOG_PATH = "/workspaces/dllm/.cursor/debug.log"
+_DEBUG_NDJSON_PATH = "/workspaces/dllm/.cursor/debug.log"
+
+def _debug_ndjson(data: dict) -> None:
+    """Append one NDJSON line to debug log for hypothesis testing; also print to stderr for GPU job logs."""
+    import json
+    payload = {**data, "timestamp": data.get("timestamp", int(time.time() * 1000))}
+    line = json.dumps(payload) + "\n"
+    try:
+        with open(_DEBUG_NDJSON_PATH, "a") as f:
+            f.write(line)
+    except Exception:
+        pass
+    try:
+        import sys
+        print(f"[DEBUG_NDJSON] {line.strip()}", file=sys.stderr, flush=True)
+    except Exception:
+        pass
+# #endregion
 
 def _debug_log(location: str, message: str, data: dict):
     import json
@@ -280,6 +298,10 @@ def _get_logits_at_step(traj: Dict[str, Any], traj_name: str, step: int) -> torc
     R_sample = traj["R"]
     F_sample = traj["F"]
     if traj_name == "steps":
+        # #region agent log
+        S_dim = int(R_sample.shape[2]) if R_sample.dim() >= 3 else 0
+        _debug_ndjson({"hypothesisId": "H_get_logits", "location": "_get_logits_at_step", "message": "step vs S", "data": {"step": step, "R_sample_shape_2": S_dim, "out_of_bounds": step >= S_dim if S_dim else None}})
+        # #endregion
         return R_sample[:, :, step]
     if traj_name == "fixation_start":
         return compute_fixation_start_trajectory(R_sample, step, F_sample)
@@ -1198,12 +1220,17 @@ def trajectory_metrics(model, **kwargs):
                     prompt_lens.append(len(prompt))
         
                 # Generate using sampler with logits tracking
+                # #region agent log
+                _sampler_kw = _trajectory_sampler_kwargs(trajectory_config)
+                if batch_idx == 0:
+                    _debug_ndjson({"hypothesisId": "H2", "location": "trajectory_metrics", "message": "sampler kwargs (interval mode?)", "data": {"batch_idx": 0, "trajectory_sample_interval": _sampler_kw.get("trajectory_sample_interval"), "has_interval": _sampler_kw.get("trajectory_sample_interval") not in (None, 0)}})
+                # #endregion
                 sampler_output = sampler.sample(
                     inputs=prompts,
                     config=None,  # Use default config
                     return_dict=True,
                     return_logits=True,
-                    **_trajectory_sampler_kwargs(trajectory_config),
+                    **_sampler_kw,
                 )
                 gpu_set_phase("trajectory_after_sampler", batch_idx=batch_idx)
 
@@ -1232,6 +1259,9 @@ def trajectory_metrics(model, **kwargs):
                             "cuda_max_allocated_mib": round(torch.cuda.max_memory_allocated() / (1024**2), 2),
                         },
                     )
+                # #region agent log
+                _debug_ndjson({"hypothesisId": "H2", "location": "trajectory_metrics", "message": "S from sampler (len logits_history)", "data": {"batch_idx": batch_idx, "logits_history_len": len(logits_history)}})
+                # #endregion
                 _debug_log("trajectory_metrics.py:trajectories_from_logits:call", "calling trajectories_from_logits", {"return_trajectory_tensors": False, "batch_idx": batch_idx})
                 # #endregion
                 out = trajectories_from_logits(
@@ -1243,7 +1273,14 @@ def trajectory_metrics(model, **kwargs):
                     run_steps_to_use, run_step_values_metadata = _derive_steps_to_use(
                         S, trajectory_config
                     )
-                steps_to_use = run_steps_to_use
+                    # #region agent log
+                    _debug_ndjson({"hypothesisId": "H1", "location": "trajectory_metrics", "message": "run_steps_to_use set from first batch", "data": {"batch_idx": batch_idx, "run_steps_to_use": run_steps_to_use, "S": S}})
+                    # #endregion
+                steps_to_use = [s for s in run_steps_to_use if s < S]
+                # #region agent log
+                steps_overflow = [s for s in run_steps_to_use if s >= S]
+                _debug_ndjson({"hypothesisId": "H3", "location": "trajectory_metrics", "message": "per-batch S and steps", "data": {"batch_idx": batch_idx, "S": S, "run_steps_to_use": run_steps_to_use, "steps_to_use": steps_to_use, "steps_overflow": steps_overflow, "will_crash_privleak": len(steps_overflow) > 0}})
+                # #endregion
                 if (
                     use_streaming_privleak
                     and privleak_streaming_cfg is not None
@@ -1263,7 +1300,7 @@ def trajectory_metrics(model, **kwargs):
                         for step in run_steps_to_use
                     }
                 if privleak_accumulators is not None and _key is None:
-                    for step in run_steps_to_use:
+                    for step in steps_to_use:
                         logits_list = [
                             _get_logits_at_step(
                                 {"R": R[i], "F": F[i], "S": S, "L": L}, "steps", step
@@ -1623,7 +1660,8 @@ def trajectory_metrics(model, **kwargs):
                     )
                     h_R, h_F, h_S, h_L = h_out["R"], h_out["F"], h_out["S"], h_out["L"]
                     del h_logits_history, h_out
-                    for step in run_steps_to_use:
+                    h_steps_to_use = [s for s in run_steps_to_use if s < h_S]
+                    for step in h_steps_to_use:
                         h_logits_list = [
                             _get_logits_at_step(
                                 {"R": h_R[i], "F": h_F[i], "S": h_S, "L": h_L}, "steps", step
