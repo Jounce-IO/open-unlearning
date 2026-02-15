@@ -81,14 +81,15 @@ metric_display_names:
   - trajectory_model_utility
   - trajectory_privleak
 
+# steps/max_new_tokens match locuslab/open-unlearning: https://github.com/locuslab/open-unlearning/blob/main/configs/generation/default.yaml
 trajectory_config:
   logits_source: sampler
   return_logits: true
   return_fixation_steps: true
   sampler_kwargs:
-    steps: 16
+    steps: 50  # ceil(200/4)
     temperature: 0.0
-    max_new_tokens: 32
+    max_new_tokens: 200
     # Tokens between trajectory captures; larger = fewer logits stored, less memory.
     trajectory_sample_interval: 8
 
@@ -121,4 +122,4 @@ collators:
       padding_side: left
 
 generation_args:
-  max_new_tokens: 32
+  max_new_tokens: 200

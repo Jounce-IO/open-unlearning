@@ -50,14 +50,15 @@ metric_display_names:
   - trajectory_extraction_strength
   - trajectory_privleak
 
+# steps/max_new_tokens match locuslab/open-unlearning MUSE (e.g. forget_verbmem 128): https://github.com/locuslab/open-unlearning/tree/main/configs/eval/muse_metrics
 trajectory_config:
   logits_source: sampler
   return_logits: true
   return_fixation_steps: true
   sampler_kwargs:
-    steps: 16
+    steps: 32  # ceil(128/4)
     temperature: 0.0
-    max_new_tokens: 32
+    max_new_tokens: 128
     # Tokens between trajectory captures; larger = fewer logits stored, less memory.
     trajectory_sample_interval: 8
 
@@ -130,5 +131,5 @@ collators:
       padding_side: left
 
 generation_args:
-  max_new_tokens: 32
+  max_new_tokens: 128
   stopwords: ["\n\n", "\nQuestion", "Question:"]
