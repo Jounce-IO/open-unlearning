@@ -758,13 +758,15 @@ class TestTrajectoryMetricsIntegration:
         )
         assert result_single is not None and "agg_value" in result_single
         assert "step_distribution" in result_single
-        for traj_name in result_single["agg_value"]:
-            for metric_name in result_single["agg_value"][traj_name]:
-                dist = result_single["step_distribution"][traj_name][metric_name]
-                agg = np.asarray(result_single["agg_value"][traj_name][metric_name])
-                assert set(dist.keys()) == {"mean", "std", "median", "p25", "p75", "min", "max", "ci_low", "ci_high"}
-                assert len(dist["mean"]) == len(agg)
-                np.testing.assert_allclose(dist["mean"], agg, rtol=1e-5, atol=1e-8)
+        # Result is nested by view (full, eos)
+        for view in result_single["agg_value"]:
+            for traj_name in result_single["agg_value"][view]:
+                for metric_name in result_single["agg_value"][view][traj_name]:
+                    dist = result_single["step_distribution"][view][traj_name][metric_name]
+                    agg = np.asarray(result_single["agg_value"][view][traj_name][metric_name])
+                    assert set(dist.keys()) == {"mean", "std", "median", "p25", "p75", "min", "max", "ci_low", "ci_high"}
+                    assert len(dist["mean"]) == len(agg)
+                    np.testing.assert_allclose(dist["mean"], agg, rtol=1e-5, atol=1e-8)
 
         # Run 2: batch_size=2, two different samples -> result_b2
         sampler2 = Mock()
@@ -816,8 +818,9 @@ class TestTrajectoryMetricsIntegration:
         assert "step_distribution" in result_b2
 
         # If only the first sample were used in B=2, agg would match B=1. Different logits => different values.
-        agg1 = result_single["agg_value"]
-        agg2 = result_b2["agg_value"]
+        view = "full"
+        agg1 = result_single["agg_value"][view]
+        agg2 = result_b2["agg_value"][view]
         for traj_name in agg1:
             if traj_name not in agg2:
                 continue
@@ -899,21 +902,22 @@ class TestTrajectoryMetricsIntegration:
             },
         )
         assert "step_distribution" in result
-        for traj_name in result["step_distribution"]:
-            for metric_name in result["step_distribution"][traj_name]:
-                d = result["step_distribution"][traj_name][metric_name]
-                mean_arr = np.asarray(d["mean"])
-                std_arr = np.asarray(d["std"])
-                ci_low_arr = np.asarray(d["ci_low"])
-                ci_high_arr = np.asarray(d["ci_high"])
-                min_arr = np.asarray(d["min"])
-                max_arr = np.asarray(d["max"])
-                # Single sample per step => std=0, ci_low=ci_high=mean, min=max=mean
-                np.testing.assert_allclose(std_arr, 0.0, rtol=0, atol=1e-10)
-                np.testing.assert_allclose(ci_low_arr, mean_arr, rtol=0, atol=1e-10)
-                np.testing.assert_allclose(ci_high_arr, mean_arr, rtol=0, atol=1e-10)
-                np.testing.assert_allclose(min_arr, mean_arr, rtol=0, atol=1e-10)
-                np.testing.assert_allclose(max_arr, mean_arr, rtol=0, atol=1e-10)
+        for view in result["step_distribution"]:
+            for traj_name in result["step_distribution"][view]:
+                for metric_name in result["step_distribution"][view][traj_name]:
+                    d = result["step_distribution"][view][traj_name][metric_name]
+                    mean_arr = np.asarray(d["mean"])
+                    std_arr = np.asarray(d["std"])
+                    ci_low_arr = np.asarray(d["ci_low"])
+                    ci_high_arr = np.asarray(d["ci_high"])
+                    min_arr = np.asarray(d["min"])
+                    max_arr = np.asarray(d["max"])
+                    # Single sample per step => std=0, ci_low=ci_high=mean, min=max=mean
+                    np.testing.assert_allclose(std_arr, 0.0, rtol=0, atol=1e-10)
+                    np.testing.assert_allclose(ci_low_arr, mean_arr, rtol=0, atol=1e-10)
+                    np.testing.assert_allclose(ci_high_arr, mean_arr, rtol=0, atol=1e-10)
+                    np.testing.assert_allclose(min_arr, mean_arr, rtol=0, atol=1e-10)
+                    np.testing.assert_allclose(max_arr, mean_arr, rtol=0, atol=1e-10)
 
     def test_trajectory_metrics_batch_size_4_runs(self):
         """trajectory_metrics with batch_size=4 runs without shape errors."""
@@ -1062,15 +1066,15 @@ class TestTrajectoryMetricsIntegration:
         )
         assert result is not None
         assert "agg_value" in result
-        agg = result["agg_value"]
-        assert isinstance(agg, dict)
-        for traj_name, metrics_dict in agg.items():
-            assert isinstance(metrics_dict, dict)
-            for metric_name, arr in metrics_dict.items():
-                arr = np.asarray(arr)
-                assert arr.size > 0, f"traj={traj_name} metric={metric_name} should have aggregated values"
-                # With trajectory_sample_interval=8 we use all S steps; num_steps = S
-                assert arr.shape[0] == S, f"expected S={S} steps, got {arr.shape[0]}"
+        for view in result["agg_value"]:
+            agg = result["agg_value"][view]
+            assert isinstance(agg, dict)
+            for traj_name, metrics_dict in agg.items():
+                assert isinstance(metrics_dict, dict)
+                for metric_name, arr in metrics_dict.items():
+                    arr = np.asarray(arr)
+                    assert arr.size > 0, f"view={view} traj={traj_name} metric={metric_name} should have aggregated values"
+                    assert arr.shape[0] == S, f"expected S={S} steps, got {arr.shape[0]}"
         # Sampler should have been called once per batch
         assert sampler.sample.call_count == num_samples
 
@@ -1169,12 +1173,13 @@ class TestTrajectoryMetricsIntegration:
 
         assert result_no_sort is not None and "agg_value" in result_no_sort
         assert result_sort is not None and "agg_value" in result_sort
-        for traj_name in result_no_sort["agg_value"]:
-            assert traj_name in result_sort["agg_value"]
-            for metric_name in result_no_sort["agg_value"][traj_name]:
-                assert metric_name in result_sort["agg_value"][traj_name]
-                a = np.asarray(result_no_sort["agg_value"][traj_name][metric_name])
-                b = np.asarray(result_sort["agg_value"][traj_name][metric_name])
+        view = "full"
+        for traj_name in result_no_sort["agg_value"][view]:
+            assert traj_name in result_sort["agg_value"][view]
+            for metric_name in result_no_sort["agg_value"][view][traj_name]:
+                assert metric_name in result_sort["agg_value"][view][traj_name]
+                a = np.asarray(result_no_sort["agg_value"][view][traj_name][metric_name])
+                b = np.asarray(result_sort["agg_value"][view][traj_name][metric_name])
                 np.testing.assert_allclose(a, b, rtol=1e-5, atol=1e-8)
 
     def test_batch_size_four_same_aggregate_as_batch_size_one(self):
@@ -1267,13 +1272,234 @@ class TestTrajectoryMetricsIntegration:
 
         assert result_b1 is not None and "agg_value" in result_b1
         assert result_b4 is not None and "agg_value" in result_b4
-        for traj_name in result_b1["agg_value"]:
-            assert traj_name in result_b4["agg_value"]
-            for metric_name in result_b1["agg_value"][traj_name]:
-                assert metric_name in result_b4["agg_value"][traj_name]
-                a = np.asarray(result_b1["agg_value"][traj_name][metric_name])
-                b = np.asarray(result_b4["agg_value"][traj_name][metric_name])
+        view = "full"
+        for traj_name in result_b1["agg_value"][view]:
+            assert traj_name in result_b4["agg_value"][view]
+            for metric_name in result_b1["agg_value"][view][traj_name]:
+                assert metric_name in result_b4["agg_value"][view][traj_name]
+                a = np.asarray(result_b1["agg_value"][view][traj_name][metric_name])
+                b = np.asarray(result_b4["agg_value"][view][traj_name][metric_name])
                 np.testing.assert_allclose(a, b, rtol=1e-5, atol=1e-8)
+
+    def test_include_views_full_only_returns_single_view(self):
+        """With include_views=[full], result contains only 'full' in agg_value and step_distribution."""
+        class MockSamplerOutput:
+            def __init__(self, sequences, histories, logits_history, fixation_steps):
+                self.sequences = sequences
+                self.histories = histories
+                self.logits_history = logits_history
+                self.fixation_steps = fixation_steps
+        V, L_gen, S = 20, 6, 4
+        full_len = 5 + L_gen
+        sampler = Mock()
+        sampler.sample.return_value = MockSamplerOutput(
+            sequences=torch.randint(0, V, (1, full_len)),
+            histories=None,
+            logits_history=[torch.randn(1, full_len, V) for _ in range(S)],
+            fixation_steps=torch.randint(0, S, (1, full_len)),
+        )
+        model = Mock()
+        model.sampler = sampler
+        result = trajectory_metrics(
+            model,
+            metric_name="trajectory_metrics",
+            cache={},
+            metrics=["probability"],
+            data=MockDataset(1, full_len, V),
+            collators=mock_collator(1, full_len),
+            tokenizer=Mock(decode=lambda x, **kw: "decoded"),
+            batch_size=1,
+            trajectory_config={
+                "return_logits": True,
+                "return_fixation_steps": True,
+                "include_views": ["full"],
+                "sampler_kwargs": {"steps": S, "max_new_tokens": L_gen},
+            },
+        )
+        assert set(result["agg_value"].keys()) == {"full"}
+        assert set(result["step_distribution"].keys()) == {"full"}
+
+    def test_include_views_eos_only_returns_single_view(self):
+        """With include_views=[eos], result contains only 'eos' in agg_value and step_distribution."""
+        class MockSamplerOutput:
+            def __init__(self, sequences, histories, logits_history, fixation_steps):
+                self.sequences = sequences
+                self.histories = histories
+                self.logits_history = logits_history
+                self.fixation_steps = fixation_steps
+        V, L_gen, S = 20, 6, 4
+        full_len = 5 + L_gen
+        sampler = Mock()
+        sampler.sample.return_value = MockSamplerOutput(
+            sequences=torch.randint(0, V, (1, full_len)),
+            histories=None,
+            logits_history=[torch.randn(1, full_len, V) for _ in range(S)],
+            fixation_steps=torch.randint(0, S, (1, full_len)),
+        )
+        model = Mock()
+        model.sampler = sampler
+        result = trajectory_metrics(
+            model,
+            metric_name="trajectory_metrics",
+            cache={},
+            metrics=["probability"],
+            data=MockDataset(1, full_len, V),
+            collators=mock_collator(1, full_len),
+            tokenizer=Mock(decode=lambda x, **kw: "decoded"),
+            batch_size=1,
+            trajectory_config={
+                "return_logits": True,
+                "return_fixation_steps": True,
+                "include_views": ["eos"],
+                "sampler_kwargs": {"steps": S, "max_new_tokens": L_gen},
+            },
+        )
+        assert set(result["agg_value"].keys()) == {"eos"}
+        assert set(result["step_distribution"].keys()) == {"eos"}
+
+    def test_include_views_both_returns_full_and_eos(self):
+        """Default include_views (both) returns 'full' and 'eos' in agg_value and step_distribution."""
+        class MockSamplerOutput:
+            def __init__(self, sequences, histories, logits_history, fixation_steps):
+                self.sequences = sequences
+                self.histories = histories
+                self.logits_history = logits_history
+                self.fixation_steps = fixation_steps
+        V, L_gen, S = 20, 6, 4
+        full_len = 5 + L_gen
+        sampler = Mock()
+        sampler.sample.return_value = MockSamplerOutput(
+            sequences=torch.randint(0, V, (1, full_len)),
+            histories=None,
+            logits_history=[torch.randn(1, full_len, V) for _ in range(S)],
+            fixation_steps=torch.randint(0, S, (1, full_len)),
+        )
+        model = Mock()
+        model.sampler = sampler
+        result = trajectory_metrics(
+            model,
+            metric_name="trajectory_metrics",
+            cache={},
+            metrics=["probability"],
+            data=MockDataset(1, full_len, V),
+            collators=mock_collator(1, full_len),
+            tokenizer=Mock(decode=lambda x, **kw: "decoded"),
+            batch_size=1,
+            trajectory_config={
+                "return_logits": True,
+                "return_fixation_steps": True,
+                "include_views": ["full", "eos"],
+                "sampler_kwargs": {"steps": S, "max_new_tokens": L_gen},
+            },
+        )
+        assert set(result["agg_value"].keys()) == {"full", "eos"}
+        assert set(result["step_distribution"].keys()) == {"full", "eos"}
+        import numpy as np
+        view = "full"
+        for traj_name in result["agg_value"][view]:
+            for metric_name in result["agg_value"][view][traj_name]:
+                a_full = np.asarray(result["agg_value"]["full"][traj_name][metric_name])
+                a_eos = np.asarray(result["agg_value"]["eos"][traj_name][metric_name])
+                assert a_full.shape == a_eos.shape, "full and eos should have same step count"
+
+    def test_eos_view_diffs_from_full_when_eos_in_sequences(self):
+        """When EOS appears before end of sequence, eos view aggregate can differ from full (different length)."""
+        class MockSamplerOutput:
+            def __init__(self, sequences, histories, logits_history, fixation_steps):
+                self.sequences = sequences
+                self.histories = histories
+                self.logits_history = logits_history
+                self.fixation_steps = fixation_steps
+        V, L_gen, S = 30, 8, 4
+        prompt_len = 4
+        full_len = prompt_len + L_gen
+        eos_id = 1
+        # Build sequences: sample 0 has EOS at generated position 3 (L_eff=4), so eos uses 4 tokens, full uses 8
+        sequences = torch.randint(2, V, (1, full_len))
+        sequences[0, prompt_len + 3] = eos_id
+        sampler = Mock()
+        sampler.sample.return_value = MockSamplerOutput(
+            sequences=sequences,
+            histories=None,
+            logits_history=[torch.randn(1, full_len, V) for _ in range(S)],
+            fixation_steps=torch.randint(0, S, (1, full_len)),
+        )
+        model = Mock()
+        model.sampler = sampler
+        tokenizer = Mock()
+        tokenizer.decode = lambda x, **kw: "decoded"
+        tokenizer.eos_token_id = eos_id
+        # Dataset with prompt_len=4 so generated region length L=8; EOS at gen position 3 -> L_eff=4
+        IGNORE_INDEX = -100
+        one_input = torch.randint(0, V, (full_len,))
+        one_labels = torch.cat([
+            torch.full((prompt_len,), IGNORE_INDEX, dtype=torch.long),
+            torch.randint(0, V, (L_gen,)),
+        ])
+        class DS:
+            data = [(one_input, one_labels)]
+            def __len__(self):
+                return len(self.data)
+            def __getitem__(self, idx):
+                return {"input_ids": self.data[idx][0], "labels": self.data[idx][1]}
+        result = trajectory_metrics(
+            model,
+            metric_name="trajectory_metrics",
+            cache={},
+            metrics=["probability"],
+            data=DS(),
+            collators=mock_collator(1, full_len),
+            tokenizer=tokenizer,
+            batch_size=1,
+            trajectory_config={
+                "return_logits": True,
+                "return_fixation_steps": True,
+                "include_views": ["full", "eos"],
+                "sampler_kwargs": {"steps": S, "max_new_tokens": L_gen},
+            },
+        )
+        assert "full" in result["agg_value"] and "eos" in result["agg_value"]
+        import numpy as np
+        # Both views should have same number of steps; values may differ because eos uses shorter sequence
+        for traj_name in result["agg_value"]["full"]:
+            assert traj_name in result["agg_value"]["eos"]
+            for metric_name in result["agg_value"]["full"][traj_name]:
+                a_full = np.asarray(result["agg_value"]["full"][traj_name][metric_name])
+                a_eos = np.asarray(result["agg_value"]["eos"][traj_name][metric_name])
+                assert a_full.shape == a_eos.shape
+                # With different lengths (4 vs 8), probability aggregates can differ
+                assert a_full.size > 0 and a_eos.size > 0
+
+
+def MockDataset(n, full_len, V, ignore_index=-100):
+    """Minimal dataset for trajectory tests: n samples, full_len tokens, random labels in generated region."""
+    class DS:
+        data = [
+            (
+                torch.randint(0, V, (full_len,)),
+                torch.cat([
+                    torch.full((full_len - (full_len // 2),), ignore_index, dtype=torch.long),
+                    torch.randint(0, V, (full_len // 2,)),
+                ]),
+            )
+            for _ in range(n)
+        ]
+        def __len__(self):
+            return len(self.data)
+        def __getitem__(self, idx):
+            inp, lab = self.data[idx]
+            return {"input_ids": inp, "labels": lab}
+    return DS()
+
+
+def mock_collator(n, full_len):
+    def collator(batch):
+        return {
+            "input_ids": torch.stack([b["input_ids"] for b in batch]),
+            "labels": torch.stack([b["labels"] for b in batch]),
+            "index": torch.arange(len(batch)),
+        }
+    return collator
 
 
 class TestDynamicMetricLoading:

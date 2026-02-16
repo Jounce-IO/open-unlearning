@@ -265,6 +265,7 @@ trajectory_config:
   logits_source: sampler  # or "external"
   return_logits: true  # Required: enables logits tracking
   return_fixation_steps: true  # Required: enables fixation tracking
+  include_views: [full, eos]  # full = all positions 0..L; eos = positions 0..L_eff-1 only. Default both.
   sampler_kwargs:  # Additional sampler arguments
     steps: 32  # Number of diffusion steps
     temperature: 0.0
@@ -282,6 +283,15 @@ collators:
     args:
       padding_side: left  # For generation
 ```
+
+### Views: full and eos
+
+Trajectory metrics can be computed for two **views** of the same trajectory:
+
+- **full**: Uses all positions `0..L` (full generated length). Captures "leakage" and behavior over the entire sequence.
+- **eos**: Uses positions `0..L_eff-1` only, where `L_eff` is the effective length up to and including the first EOS token in the generated region. Captures the "real" response before padding or post-EOS tokens.
+
+Configure with `trajectory_config.include_views: [full, eos]` (default), `[full]`, or `[eos]`. When both are included, results are returned with `agg_value["full"]` and `agg_value["eos"]` (and similarly `step_distribution["full"]`, `step_distribution["eos"]`). The dllm CLI flag `--trajectory-views both|full|eos` overrides this.
 
 ### Dynamic Metric Loading
 
@@ -324,6 +334,7 @@ The system will:
 | `batch_size` | int | 1 | Batch size for evaluation |
 | `trajectory_config.return_logits` | bool | true | Enable logits tracking in sampler |
 | `trajectory_config.return_fixation_steps` | bool | true | Enable fixation step tracking |
+| `trajectory_config.include_views` | list | `[full, eos]` | Which views to compute: **full** (all positions 0..L, leakage), **eos** (positions 0..L_eff-1 only, real response up to first EOS). Use `[full]`, `[eos]`, or both. Default both. |
 | `trajectory_config.sampler_kwargs.trajectory_sample_interval` | int | 8 | Interval mode only; defaults to 8 when omitted. Every-step mode is not used. |
 | `trajectory_config.sampler_kwargs.steps` | int | 32 | Number of diffusion steps |
 | `trajectory_config.sampler_kwargs.max_new_tokens` | int | 64 | Max tokens to generate |
@@ -454,26 +465,37 @@ for traj_name, trajectory in trajectories.items():  # steps, fixation, ratio
 
 ## Output Format
 
-The `trajectory_metrics` function returns a dictionary following the standard metric format:
+The `trajectory_metrics` function returns a dictionary following the standard metric format. When `include_views` is `[full, eos]` (default), `agg_value` and `step_distribution` are **nested by view**:
 
 ```python
 {
     "agg_value": {
-        # Aggregated values across all samples
-        "steps": {
-            "probability": np.array([0.5, 0.6, 0.7, ...]),  # [S] - mean at each step
-            "exact_memorization": np.array([0.8, 0.85, 0.9, ...]),  # [S]
-            ...
+        # When include_views = [full, eos] (default), one key per view
+        "full": {
+            "steps": {
+                "probability": np.array([0.5, 0.6, 0.7, ...]),  # [S] - mean at each step
+                "exact_memorization": np.array([0.8, 0.85, 0.9, ...]),  # [S]
+                ...
+            },
+            "fixation_start": {...},
+            "fixation_end": {...},
+            "fixation_ratio": {...}
         },
-        "fixation": {
-            "probability": np.array([...]),  # [S]
-            ...
-        },
-        "ratio": {
-            "probability": np.array([...]),  # [S]
-            ...
+        "eos": {
+            # Same structure as "full", but computed over positions 0..L_eff-1 only
+            "steps": {"probability": np.array([...]), ...},
+            "fixation_start": {...},
+            "fixation_end": {...},
+            "fixation_ratio": {...}
         }
     },
+    # step_distribution has the same nesting: step_distribution["full"], step_distribution["eos"]
+    "step_distribution": {
+        "full": { "steps": {...}, "fixation_start": {...}, ... },
+        "eos": { "steps": {...}, "fixation_start": {...}, ... }
+    },
+    # Legacy flat shape when include_views has a single view (e.g. [full] only):
+    # "agg_value": { "steps": {...}, "fixation_start": {...}, ... }
     "value_by_index": {
         # Per-sample values
         "0": {
