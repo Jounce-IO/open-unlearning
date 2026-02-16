@@ -1414,6 +1414,11 @@ def trajectory_metrics(model, **kwargs):
                                     del prob_results
                                     torch.cuda.synchronize()
                                     torch.cuda.empty_cache()
+                            # Free stacked logits and eos allocation before next traj_name (full run: 4 traj types × 2 views can OOM otherwise).
+                            if torch.cuda.is_available():
+                                del logits_stacked, labels_batch_full
+                                torch.cuda.synchronize()
+                                torch.cuda.empty_cache()
 
                         for step in steps_to_use:
                             # Get logits at this step (on-demand from R, F)
