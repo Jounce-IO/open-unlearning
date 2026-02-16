@@ -89,31 +89,32 @@ def _compute_prob_from_fixation_logits(
 
     Handles length mismatch (e.g. sampler returns shorter sequence than padded batch labels)
     by trimming to min length so cross_entropy does not raise. Counts num_token_gt only
-    over used (non-ignore) positions.
+    over used (non-ignore) positions. Uses no_grad to avoid retaining gradient buffers (OOM).
     """
-    fixation_logits = fixation_logits.to(device)
-    labels = labels.to(device)
-    B, T_fl, V = fixation_logits.shape
-    T_lab = labels.shape[1]
-    T = min(T_fl, T_lab)
-    fixation_logits = fixation_logits[:, :T, :].contiguous()
-    labels = labels[:, :T].contiguous()
-    shifted_logits = fixation_logits[..., :-1, :].contiguous()
-    shifted_labels = labels[..., 1:].contiguous()
-    if shifted_logits.dtype in (torch.bfloat16, torch.float16):
-        shifted_logits = shifted_logits.float()
-    loss_fn = torch.nn.CrossEntropyLoss(ignore_index=ignore_index, reduction="none")
-    losses = loss_fn(shifted_logits.transpose(-1, -2), shifted_labels).sum(dim=-1)
-    num_token_gt = (shifted_labels != ignore_index).sum(dim=-1).clamp(min=1)
-    avg_losses = losses / num_token_gt
-    normalized_probs = torch.exp(-avg_losses)
-    # Single GPU→CPU transfer per tensor; release GPU tensors promptly
-    avg_losses_list = _tensor_to_list_of_floats(avg_losses)
-    normalized_probs_list = _tensor_to_list_of_floats(normalized_probs)
-    return [
-        {"prob": prob, "avg_loss": avg_loss}
-        for prob, avg_loss in zip(normalized_probs_list, avg_losses_list)
-    ]
+    with torch.no_grad():
+        fixation_logits = fixation_logits.to(device)
+        labels = labels.to(device)
+        B, T_fl, V = fixation_logits.shape
+        T_lab = labels.shape[1]
+        T = min(T_fl, T_lab)
+        fixation_logits = fixation_logits[:, :T, :].contiguous()
+        labels = labels[:, :T].contiguous()
+        shifted_logits = fixation_logits[..., :-1, :].contiguous()
+        shifted_labels = labels[..., 1:].contiguous()
+        if shifted_logits.dtype in (torch.bfloat16, torch.float16):
+            shifted_logits = shifted_logits.float()
+        loss_fn = torch.nn.CrossEntropyLoss(ignore_index=ignore_index, reduction="none")
+        losses = loss_fn(shifted_logits.transpose(-1, -2), shifted_labels).sum(dim=-1)
+        num_token_gt = (shifted_labels != ignore_index).sum(dim=-1).clamp(min=1)
+        avg_losses = losses / num_token_gt
+        normalized_probs = torch.exp(-avg_losses)
+        # Single GPU→CPU transfer per tensor; release GPU tensors promptly
+        avg_losses_list = _tensor_to_list_of_floats(avg_losses)
+        normalized_probs_list = _tensor_to_list_of_floats(normalized_probs)
+        return [
+            {"prob": prob, "avg_loss": avg_loss}
+            for prob, avg_loss in zip(normalized_probs_list, avg_losses_list)
+        ]
 
 
 def _derive_steps_to_use(
@@ -1524,9 +1525,19 @@ def trajectory_metrics(model, **kwargs):
                                         f"Error computing {metric_name} at step {step} for {traj_name}: {e}",
                                         exc_info=True
                                     )
+                            # Release per-step tensors so baseline memory does not grow across steps (fixes GPU leak).
+                            try:
+                                del batch_template_eos, logits
+                            except NameError:
+                                pass
 
                     if executor is not None and rouge_futures_this_sample:
                         all_rouge_futures.extend(rouge_futures_this_sample)
+
+                    # Aggressive per-sample cleanup to avoid baseline memory growth across samples (GPU leak).
+                    gc.collect()
+                    if torch.cuda.is_available():
+                        torch.cuda.empty_cache()
 
                 gpu_set_phase("trajectory_batch_end", batch_idx=batch_idx)
                 # Release batch-sized GPU data before next batch to avoid holding two batches in memory (OOM with many samples).
