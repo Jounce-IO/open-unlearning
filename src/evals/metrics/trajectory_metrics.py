@@ -1519,6 +1519,10 @@ def trajectory_metrics(model, **kwargs):
                                             )
                                         if metric_value is not None:
                                             step_values_by_view[view][traj_name][step][metric_name].append(metric_value)
+                                    # Return GPU memory after metrics that allocate large log_probs/contiguous logits
+                                    # so the next metric (e.g. hm_aggregate) or next step does not OOM (see .monitor/oom-investigation-exact-cause.md).
+                                    if metric_name in ("extraction_strength", "truth_ratio", "ks_test") and torch.cuda.is_available():
+                                        torch.cuda.empty_cache()
                         
                                 except Exception as e:
                                     logger.warning(
