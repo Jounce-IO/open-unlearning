@@ -1078,6 +1078,176 @@ class TestTrajectoryMetricsIntegration:
         # Sampler should have been called once per batch
         assert sampler.sample.call_count == num_samples
 
+    def test_two_view_probability_calls_cuda_cleanup_when_available(self):
+        """With include_views=[full, eos] and probability, we call torch.cuda.synchronize and empty_cache after first view (no GPU leakage)."""
+        V, L_gen, S = 30, 6, 4
+        full_len = 5 + L_gen
+        num_samples = 2
+
+        class MockSamplerOutput:
+            def __init__(self, sequences, histories, logits_history, fixation_steps):
+                self.sequences = sequences
+                self.histories = histories
+                self.logits_history = logits_history
+                self.fixation_steps = fixation_steps
+
+        sampler = Mock()
+        def sample_side_effect(*args, **kwargs):
+            return MockSamplerOutput(
+                sequences=torch.randint(0, V, (1, full_len)),
+                histories=None,
+                logits_history=[torch.randn(1, full_len, V) for _ in range(S)],
+                fixation_steps=torch.randint(0, S, (1, full_len)),
+            )
+        sampler.sample.side_effect = [sample_side_effect() for _ in range(num_samples)]
+
+        model = Mock()
+        model.sampler = sampler
+
+        class MockDataset:
+            def __init__(self):
+                self.data = [
+                    {"input_ids": torch.randint(0, V, (full_len,)), "labels": torch.randint(0, V, (full_len,))}
+                    for _ in range(num_samples)
+                ]
+
+            def __len__(self):
+                return len(self.data)
+
+            def __getitem__(self, idx):
+                return self.data[idx]
+
+        def mock_collator(batch):
+            return {
+                "input_ids": torch.stack([b["input_ids"] for b in batch]),
+                "labels": torch.stack([b["labels"] for b in batch]),
+                "indices": torch.tensor(list(range(len(batch)))),
+            }
+
+        tokenizer = Mock()
+        tokenizer.decode = lambda x, **kwargs: "decoded text"
+
+        with patch("torch.cuda.is_available", return_value=True), patch(
+            "torch.cuda.get_device_properties", return_value=Mock(total_memory=10**9)
+        ), patch("torch.cuda.memory_allocated", return_value=100), patch(
+            "torch.cuda.synchronize", new_callable=Mock
+        ) as mock_sync, patch(
+            "torch.cuda.empty_cache", new_callable=Mock
+        ) as mock_empty:
+            result = trajectory_metrics(
+                model,
+                metric_name="trajectory_metrics",
+                cache={},
+                metrics=["probability"],
+                data=MockDataset(),
+                collators=mock_collator,
+                tokenizer=tokenizer,
+                batch_size=1,
+                trajectory_config={
+                    "return_logits": True,
+                    "return_fixation_steps": True,
+                    "include_views": ["full", "eos"],
+                    "sampler_kwargs": {
+                        "steps": S,
+                        "max_new_tokens": L_gen,
+                        "trajectory_sample_interval": 8,
+                    },
+                },
+            )
+            assert result is not None
+            assert "agg_value" in result
+            # With 2 views we run probability twice per (sample, traj_name). Cleanup runs after first view each time.
+            assert mock_sync.call_count >= 1, "cuda.synchronize should be called when two views and CUDA available"
+            assert mock_empty.call_count >= 1, "cuda.empty_cache should be called when two views and CUDA available"
+
+    def test_two_view_multi_batch_no_python_memory_leak(self):
+        """Run trajectory_metrics with both views over multiple batches; completes without error (no GPU). Validates no crash from leaked refs."""
+        import numpy as np
+
+        V, L_gen, S = 40, 6, 4
+        full_len = 5 + L_gen
+        num_samples = 6
+        batch_size = 1
+
+        class MockSamplerOutput:
+            def __init__(self, sequences, histories, logits_history, fixation_steps):
+                self.sequences = sequences
+                self.histories = histories
+                self.logits_history = logits_history
+                self.fixation_steps = fixation_steps
+
+        sampler = Mock()
+        outputs = []
+        for _ in range(num_samples):
+            lh = [torch.randn(1, full_len, V) for _ in range(S)]
+            fix = torch.randint(0, S, (1, full_len))
+            outputs.append(
+                MockSamplerOutput(
+                    sequences=torch.randint(0, V, (1, full_len)),
+                    histories=None,
+                    logits_history=lh,
+                    fixation_steps=fix,
+                )
+            )
+        sampler.sample.side_effect = outputs
+
+        model = Mock()
+        model.sampler = sampler
+
+        class MockDataset:
+            def __init__(self):
+                self.data = [
+                    {"input_ids": torch.randint(0, V, (full_len,)), "labels": torch.randint(0, V, (full_len,))}
+                    for _ in range(num_samples)
+                ]
+
+            def __len__(self):
+                return len(self.data)
+
+            def __getitem__(self, idx):
+                return self.data[idx]
+
+        def mock_collator(batch):
+            return {
+                "input_ids": torch.stack([b["input_ids"] for b in batch]),
+                "labels": torch.stack([b["labels"] for b in batch]),
+                "indices": torch.tensor(list(range(len(batch)))),
+            }
+
+        tokenizer = Mock()
+        tokenizer.decode = lambda x, **kwargs: "decoded text"
+
+        result = trajectory_metrics(
+            model,
+            metric_name="trajectory_metrics",
+            cache={},
+            metrics=["probability"],
+            data=MockDataset(),
+            collators=mock_collator,
+            tokenizer=tokenizer,
+            batch_size=batch_size,
+            trajectory_config={
+                "return_logits": True,
+                "return_fixation_steps": True,
+                "include_views": ["full", "eos"],
+                "sampler_kwargs": {
+                    "steps": S,
+                    "max_new_tokens": L_gen,
+                    "trajectory_sample_interval": 8,
+                },
+            },
+        )
+
+        assert result is not None
+        assert "agg_value" in result
+        for view in ("full", "eos"):
+            assert view in result["agg_value"]
+            for traj_name, metrics_dict in result["agg_value"][view].items():
+                assert "probability" in metrics_dict
+                arr = np.asarray(result["agg_value"][view][traj_name]["probability"])
+                assert arr.size == S, f"view={view} traj={traj_name} expected S={S} steps"
+        assert sampler.sample.call_count == num_samples
+
     def test_sort_by_length_order_invariance(self):
         """Same aggregated results with sort_by_length=True vs False (order invariance)."""
         import numpy as np
