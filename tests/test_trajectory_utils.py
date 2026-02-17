@@ -23,6 +23,7 @@ sys.path.insert(0, str(repo_root / "src"))
 from evals.metrics.trajectory_utils import (
     stack_logits_history,
     compute_trajectories,
+    compute_eos_position_lengths,
     compute_fixation_start_trajectory,
     compute_fixation_end_trajectory,
     compute_fixation_ratio_trajectory,
@@ -534,6 +535,144 @@ class TestComputeTrajectories:
         assert T_fixation_start.device == R.device
         assert T_fixation_end.device == R.device
         assert T_fixation_ratio.device == R.device
+
+
+class TestComputeEosPositionLengths:
+    """Tests for compute_eos_position_lengths(R, F, eos_id) — single shared lengths (B,)."""
+
+    def test_eos_position_lengths_shape(self):
+        """Lengths have shape (B,); single sample returns scalar."""
+        B, V, L, S = 2, 10, 5, 4
+        R = torch.randn(B, V, L, S)
+        F = torch.randint(0, S, (B, L))
+        lengths = compute_eos_position_lengths(R, F, eos_token_id=0)
+        assert lengths.shape == (B,)
+        lengths_single = compute_eos_position_lengths(R[0], F[0], eos_token_id=0)
+        assert lengths_single.dim() == 0 or lengths_single.shape == ()
+
+    def test_eos_position_first_position(self):
+        """When fixed token at position 0 is EOS, length is 0."""
+        B, V, L, S = 1, 3, 4, 2
+        R = torch.randn(B, V, L, S)
+        F = torch.zeros(B, L, dtype=torch.long)
+        R[:, :, 0, 0] = -1e9
+        R[:, 2, 0, 0] = 1e9
+        lengths = compute_eos_position_lengths(R, F, eos_token_id=2)
+        assert (lengths == 0).all()
+
+    def test_eos_position_no_eos_returns_L(self):
+        """When no fixed token is EOS, length is L."""
+        B, V, L, S = 1, 3, 4, 2
+        R = torch.randn(B, V, L, S)
+        F = torch.zeros(B, L, dtype=torch.long)
+        R[:, 2, :, 0] = -1e9
+        lengths = compute_eos_position_lengths(R, F, eos_token_id=2)
+        assert (lengths == L).all()
+
+    def test_eos_position_first_occurrence(self):
+        """Length is the first (0-based) position where fixed token is EOS."""
+        B, V, L, S = 1, 3, 5, 2
+        R = torch.zeros(B, V, L, S)
+        R[:, 0, :, :] = 1.0
+        F = torch.zeros(B, L, dtype=torch.long)
+        R[:, 2, 2, 0] = 2.0
+        lengths = compute_eos_position_lengths(R, F, eos_token_id=2)
+        assert (lengths == 2).all()
+
+
+class TestTrajectoryCalculationFullExample:
+    """
+    Full example: R, F -> trajectories and *_lengths (EOS position).
+
+    Covers: EOS never predicted, EOS predicted twice, F varies by batch and position,
+    probs sum to 1, non-extreme probs, all trajectories non-trivial.
+    """
+
+    def test_full_example_inputs_outputs_and_lengths(self):
+        vocab = ["a", "b", "<eos>"]
+        EOS_ID = 2
+        B, V, L, S = 2, 3, 4, 5
+        assert len(vocab) == V
+
+        # F: fixation step per (batch, position). Varies between batch and between positions.
+        F = torch.tensor([
+            [0, 2, 1, 4],
+            [1, 3, 3, 2],
+        ], dtype=torch.long)
+
+        # R: logits [B, V, L, S]. Build so that:
+        # - Batch 0: at no position at step F[0,l] is argmax EOS (EOS never predicted).
+        # - Batch 1: at positions 1 and 3 at step F[1,l] argmax is EOS (EOS twice).
+        # - Some logits yield non-extreme softmax (values in (0,1)).
+        # - All four trajectories differ (non-trivial).
+        R = torch.zeros(B, V, L, S)
+        for b in range(B):
+            for l in range(L):
+                for s in range(S):
+                    R[b, 0, l, s] = 0.1 * (b * 100 + l * 10 + s + 1)
+                    R[b, 1, l, s] = 0.15 * (b * 100 + l * 10 + s + 2)
+                    R[b, 2, l, s] = 0.05 * (b * 100 + l * 10 + s)
+        # Batch 0: at F[0,l] ensure argmax is not EOS (e.g. token 0 or 1 wins).
+        R[0, 0, :, :] += 0.5
+        R[0, 2, :, :] -= 0.3
+        # Batch 1: at (1,1,F[1,1]=3) and (1,3,F[1,3]=2) make EOS win; at final step s=4 first EOS at pos 1.
+        R[1, 2, 1, 3] = 2.0
+        R[1, 0, 1, 3] = -1.0
+        R[1, 1, 1, 3] = -1.0
+        R[1, 2, 3, 2] = 2.0
+        R[1, 0, 3, 2] = -1.0
+        R[1, 1, 3, 2] = -1.0
+        R[1, 2, 1, S - 1] = 2.0
+        R[1, 0, 1, S - 1] = -1.0
+        R[1, 1, 1, S - 1] = -1.0
+
+        T_steps, T_fixation_start, T_fixation_end, T_fixation_ratio = compute_trajectories(
+            R, F, S
+        )
+        lengths = compute_eos_position_lengths(R, F, EOS_ID)
+
+        assert T_steps.shape == (B, V, L, S)
+        assert lengths.shape == (B,)
+
+        # EOS was never predicted in batch 0 at fixation steps
+        for l in range(L):
+            step_at_fix = F[0, l].item()
+            argmax_at_fix = R[0, :, l, step_at_fix].argmax().item()
+            assert argmax_at_fix != EOS_ID, f"batch 0 pos {l}: EOS should not be predicted"
+
+        # EOS was predicted twice in batch 1 (positions 1 and 3 at their fixation steps)
+        assert R[1, :, 1, F[1, 1].item()].argmax().item() == EOS_ID
+        assert R[1, :, 3, F[1, 3].item()].argmax().item() == EOS_ID
+
+        # Fixation step varies between batch items
+        assert not torch.equal(F[0], F[1])
+        # Fixation step varies between positions
+        for b in range(B):
+            assert F[b].unique().numel() > 1 or L == 1
+
+        # Probabilities sum to 1 (softmax over vocab at each (b,l,s))
+        for b in range(B):
+            for l in range(L):
+                for s in range(S):
+                    probs = torch.softmax(R[b, :, l, s], dim=0)
+                    assert torch.allclose(probs.sum(), torch.tensor(1.0))
+
+        # Some probabilities are not 0 or 1 (non-extreme)
+        probs_flat = torch.softmax(R.view(-1, V), dim=1).flatten()
+        non_extreme = ((probs_flat > 1e-6) & (probs_flat < 1.0 - 1e-6)).any()
+        assert non_extreme
+
+        # All four trajectories produce different values (non-trivial)
+        assert not torch.equal(T_steps, T_fixation_start)
+        assert not torch.equal(T_steps, T_fixation_end)
+        assert not torch.equal(T_steps, T_fixation_ratio)
+        assert not torch.equal(T_fixation_start, T_fixation_end)
+        assert not torch.equal(T_fixation_start, T_fixation_ratio)
+        assert not torch.equal(T_fixation_end, T_fixation_ratio)
+
+        # Single shared lengths: batch 0 no EOS -> L; batch 1 first EOS at 1
+        assert lengths[0].item() == L
+        assert lengths[1].item() == 1
 
 
 class TestOnDemandTrajectoryFunctions:

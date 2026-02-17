@@ -102,6 +102,51 @@ def compute_trajectories(
     return T_steps, T_fixation_start, T_fixation_end, T_fixation_ratio
 
 
+def compute_eos_position_lengths(
+    R: torch.Tensor, F: torch.Tensor, eos_token_id: int
+) -> torch.Tensor:
+    """
+    For each batch, return the 0-based position of the first EOS after all steps.
+
+    Uses the fixed sequence: at each position l the fixed token is argmax of
+    R[b, :, l, F[b, l]]. The length is the first position where that token is
+    eos_token_id. This is the same for all trajectory types (they agree at the
+    final step), so there is a single shared lengths tensor. If EOS is never
+    predicted, the length is L.
+
+    Args:
+        R: [B, V, L, S] logits (or [V, L, S] for single sample).
+        F: [B, L] fixation steps (or [L] for single sample).
+        eos_token_id: Vocab index of the EOS token.
+
+    Returns:
+        lengths: [B] long tensor of EOS positions (0-based), or L when no EOS.
+    """
+    if R.dim() == 3:
+        R = R.unsqueeze(0)
+        F = F.unsqueeze(0)
+        squeeze_out = True
+    else:
+        squeeze_out = False
+    B, V, L, S = R.shape
+    device = R.device
+    # Fixed token at (b, l) = argmax R[b, :, l, F[b, l]]
+    index = F.unsqueeze(1).unsqueeze(3)  # [B, 1, L, 1]
+    index = index.expand(B, V, L, 1).long()
+    R_at_fix = torch.gather(R, dim=3, index=index).squeeze(3)  # [B, V, L]
+    pred = R_at_fix.argmax(dim=1)  # [B, L]
+    is_eos = pred == eos_token_id
+    indices = torch.arange(L, device=device, dtype=torch.long).view(
+        1, L
+    ).expand(B, L)
+    values = torch.where(is_eos, indices, L + 1)
+    lengths = values.min(dim=1)[0]
+    lengths = torch.where(lengths <= L, lengths, torch.full_like(lengths, L))
+    if squeeze_out:
+        lengths = lengths.squeeze(0)
+    return lengths
+
+
 def compute_fixation_start_trajectory(
     raw: torch.Tensor, step_index: int, fixation_indices: torch.Tensor
 ) -> torch.Tensor:
