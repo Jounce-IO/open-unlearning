@@ -192,3 +192,10 @@ def get_tokenizer(tokenizer_cfg: DictConfig):
 # register models
 _register_model(AutoModelForCausalLM)
 _register_model(ProbedLlamaForCausalLM)
+
+# Dream (dLLM): load via dllm's DreamModel since Hub config has no AutoModelForCausalLM auto_map
+try:
+    from dllm.pipelines.dream import DreamModel
+    _register_model(DreamModel)
+except ImportError:
+    pass  # dllm not available; DreamModel simply won't be in registry
