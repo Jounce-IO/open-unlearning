@@ -10,9 +10,6 @@ Every-step mode (no interval) is not used.
 
 import gc
 import logging
-import os
-import subprocess
-import time
 from concurrent.futures import ProcessPoolExecutor
 
 import numpy as np
@@ -35,6 +32,7 @@ from evals.metrics.utils import (
 from rouge_score import rouge_scorer
 from evals.metrics.trajectory_utils import (
     trajectories_from_logits,
+    effective_lengths_from_eos,
     compute_trajectories,
     compute_fixation_start_trajectory,
     compute_fixation_end_trajectory,
@@ -53,43 +51,6 @@ from evals.gpu_phase_logger import set_phase as gpu_set_phase
 
 logger = logging.getLogger("evaluator")
 
-# #region agent log
-_DEBUG_LOG_PATH = "/workspaces/dllm/.cursor/debug.log"
-_DEBUG_NDJSON_PATH = "/workspaces/dllm/.cursor/debug.log"
-
-def _debug_ndjson(data: dict) -> None:
-    """Append one NDJSON line to debug log for hypothesis testing; also print to stderr for GPU job logs."""
-    import json
-    payload = {**data, "timestamp": data.get("timestamp", int(time.time() * 1000))}
-    line = json.dumps(payload) + "\n"
-    try:
-        with open(_DEBUG_NDJSON_PATH, "a") as f:
-            f.write(line)
-    except Exception:
-        pass
-    try:
-        import sys
-        print(f"[DEBUG_NDJSON] {line.strip()}", file=sys.stderr, flush=True)
-    except Exception:
-        pass
-# #endregion
-
-def _debug_log(location: str, message: str, data: dict):
-    import json
-    payload = {"location": location, "message": message, "data": data, "timestamp": int(time.time() * 1000)}
-    line = json.dumps(payload) + "\n"
-    try:
-        with open(_DEBUG_LOG_PATH, "a") as f:
-            f.write(line)
-    except Exception:
-        pass
-    try:
-        import sys
-        print(f"[DEBUG] {line.strip()}", file=sys.stderr, flush=True)
-    except Exception:
-        pass
-# #endregion
-
 # IGNORE_INDEX from data.utils
 IGNORE_INDEX = -100
 
@@ -106,6 +67,48 @@ def _trajectory_sampler_kwargs(trajectory_config: Union[Dict, DictConfig]) -> di
     ):
         kwargs["trajectory_sample_interval"] = DEFAULT_TRAJECTORY_SAMPLE_INTERVAL
     return kwargs
+
+
+def _build_prompts_for_sampler(
+    input_ids: torch.Tensor,
+    labels: Optional[torch.Tensor],
+    tokenizer: Any,
+    ignore_index: int = IGNORE_INDEX,
+) -> tuple[list[list[int]], list[int]]:
+    """Build prompt token lists and lengths for sampler.sample(inputs=...).
+
+    Supports two data conventions:
+    - Labels use ignore_index for the prompt: prompt = input_ids[:, :prompt_end] with
+      prompt_end = first index where labels != ignore_index.
+    - Prompt-only input_ids (e.g. predict_with_generate): when prompt_end would be 0,
+      use the non-pad tokens of input_ids as the prompt so TOFU/MUSE work correctly.
+    """
+    B = input_ids.shape[0]
+    prompts: list[list[int]] = []
+    prompt_lens: list[int] = []
+    _pad = getattr(tokenizer, "pad_token_id", None) if tokenizer else None
+    pad_token_id = _pad if isinstance(_pad, (int, float)) else None
+    for i in range(B):
+        if labels is not None:
+            label_mask = labels[i] != ignore_index
+            if label_mask.any():
+                prompt_end = label_mask.nonzero()[0][0].item()
+            else:
+                prompt_end = input_ids.shape[1]
+        else:
+            prompt_end = input_ids.shape[1]
+        if prompt_end == 0 and pad_token_id is not None:
+            non_pad = (input_ids[i] != pad_token_id).view(-1)
+            prompt_len_from_input = non_pad.sum().item()
+            if prompt_len_from_input > 0:
+                prompt = input_ids[i][non_pad].cpu().tolist()
+                prompts.append(prompt)
+                prompt_lens.append(len(prompt))
+                continue
+        prompt = input_ids[i, :prompt_end].cpu().tolist()
+        prompts.append(prompt)
+        prompt_lens.append(len(prompt))
+    return prompts, prompt_lens
 
 
 def should_run_gc(threshold: float = 0.9) -> bool:
@@ -128,31 +131,32 @@ def _compute_prob_from_fixation_logits(
 
     Handles length mismatch (e.g. sampler returns shorter sequence than padded batch labels)
     by trimming to min length so cross_entropy does not raise. Counts num_token_gt only
-    over used (non-ignore) positions.
+    over used (non-ignore) positions. Uses no_grad to avoid retaining gradient buffers (OOM).
     """
-    fixation_logits = fixation_logits.to(device)
-    labels = labels.to(device)
-    B, T_fl, V = fixation_logits.shape
-    T_lab = labels.shape[1]
-    T = min(T_fl, T_lab)
-    fixation_logits = fixation_logits[:, :T, :].contiguous()
-    labels = labels[:, :T].contiguous()
-    shifted_logits = fixation_logits[..., :-1, :].contiguous()
-    shifted_labels = labels[..., 1:].contiguous()
-    if shifted_logits.dtype in (torch.bfloat16, torch.float16):
-        shifted_logits = shifted_logits.float()
-    loss_fn = torch.nn.CrossEntropyLoss(ignore_index=ignore_index, reduction="none")
-    losses = loss_fn(shifted_logits.transpose(-1, -2), shifted_labels).sum(dim=-1)
-    num_token_gt = (shifted_labels != ignore_index).sum(dim=-1).clamp(min=1)
-    avg_losses = losses / num_token_gt
-    normalized_probs = torch.exp(-avg_losses)
-    # Single GPU→CPU transfer per tensor; release GPU tensors promptly
-    avg_losses_list = _tensor_to_list_of_floats(avg_losses)
-    normalized_probs_list = _tensor_to_list_of_floats(normalized_probs)
-    return [
-        {"prob": prob, "avg_loss": avg_loss}
-        for prob, avg_loss in zip(normalized_probs_list, avg_losses_list)
-    ]
+    with torch.no_grad():
+        fixation_logits = fixation_logits.to(device)
+        labels = labels.to(device)
+        B, T_fl, V = fixation_logits.shape
+        T_lab = labels.shape[1]
+        T = min(T_fl, T_lab)
+        fixation_logits = fixation_logits[:, :T, :].contiguous()
+        labels = labels[:, :T].contiguous()
+        shifted_logits = fixation_logits[..., :-1, :].contiguous()
+        shifted_labels = labels[..., 1:].contiguous()
+        if shifted_logits.dtype in (torch.bfloat16, torch.float16):
+            shifted_logits = shifted_logits.float()
+        loss_fn = torch.nn.CrossEntropyLoss(ignore_index=ignore_index, reduction="none")
+        losses = loss_fn(shifted_logits.transpose(-1, -2), shifted_labels).sum(dim=-1)
+        num_token_gt = (shifted_labels != ignore_index).sum(dim=-1).clamp(min=1)
+        avg_losses = losses / num_token_gt
+        normalized_probs = torch.exp(-avg_losses)
+        # Single GPU→CPU transfer per tensor; release GPU tensors promptly
+        avg_losses_list = _tensor_to_list_of_floats(avg_losses)
+        normalized_probs_list = _tensor_to_list_of_floats(normalized_probs)
+        return [
+            {"prob": prob, "avg_loss": avg_loss}
+            for prob, avg_loss in zip(normalized_probs_list, avg_losses_list)
+        ]
 
 
 def _derive_steps_to_use(
@@ -298,10 +302,6 @@ def _get_logits_at_step(traj: Dict[str, Any], traj_name: str, step: int) -> torc
     R_sample = traj["R"]
     F_sample = traj["F"]
     if traj_name == "steps":
-        # #region agent log
-        S_dim = int(R_sample.shape[2]) if R_sample.dim() >= 3 else 0
-        _debug_ndjson({"hypothesisId": "H_get_logits", "location": "_get_logits_at_step", "message": "step vs S", "data": {"step": step, "R_sample_shape_2": S_dim, "out_of_bounds": step >= S_dim if S_dim else None}})
-        # #endregion
         return R_sample[:, :, step]
     if traj_name == "fixation_start":
         return compute_fixation_start_trajectory(R_sample, step, F_sample)
@@ -907,34 +907,6 @@ def _call_metric_at_step(
 @unlearning_metric(name="trajectory_metrics")
 def trajectory_metrics(model, **kwargs):
     with torch.inference_mode():
-        # #region agent log
-        _debug_log(
-            "trajectory_metrics.py:trajectory_metrics:entry",
-            "trajectory_metrics entry",
-            {
-                "__file__": __file__,
-                "cuda_available": torch.cuda.is_available(),
-                "cuda_allocated_mib": round(torch.cuda.memory_allocated() / (1024**2), 2) if torch.cuda.is_available() else None,
-                "cuda_max_allocated_mib": round(torch.cuda.max_memory_allocated() / (1024**2), 2) if torch.cuda.is_available() else None,
-                "git_rev": (
-                    (lambda r: r.stdout.strip() if r.returncode == 0 else None)(
-                        subprocess.run(
-                            ["git", "rev-parse", "HEAD"],
-                            capture_output=True,
-                            text=True,
-                            cwd=os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "..", "..")),
-                        )
-                    )
-                ),
-            },
-        )
-        if torch.cuda.is_available():
-            try:
-                stats = torch.cuda.memory_stats()
-                _debug_log("trajectory_metrics.py:trajectory_metrics:entry_stats", "cuda memory_stats at entry", {"allocator_stats_keys": list(stats.keys())[:20]})
-            except Exception:
-                pass
-        # #endregion
         gpu_set_phase("trajectory_entry")
         """
         Compute metrics along diffusion trajectories.
@@ -1117,8 +1089,21 @@ def trajectory_metrics(model, **kwargs):
         # Trajectory names
         trajectory_names = ["steps", "fixation_start", "fixation_end", "fixation_ratio"]
 
-        # Storage for aggregation: collect values across samples per step
-        step_values = {traj_name: {} for traj_name in trajectory_names}
+        # Views: full (all positions 0..L) vs eos (positions 0..L_eff-1 only). Default both.
+        _include_views_raw = trajectory_config.get("include_views", ["full", "eos"])
+        if isinstance(_include_views_raw, (list, ListConfig)):
+            include_views = list(_include_views_raw)
+        else:
+            include_views = ["full", "eos"]
+        include_views = [str(v).lower() for v in include_views if str(v).lower() in ("full", "eos")]
+        if not include_views:
+            include_views = ["full", "eos"]
+
+        # Storage for aggregation: per view, then traj_name -> step -> metric_name -> list of values
+        step_values_by_view = {
+            v: {traj_name: {} for traj_name in trajectory_names}
+            for v in include_views
+        }
 
         # Get sampler from model
         sampler = _get_sampler_from_model(model)
@@ -1195,6 +1180,8 @@ def trajectory_metrics(model, **kwargs):
                 f"expected batches: {expected_batches} (last batch index: {expected_batches - 1})"
             )
             all_rouge_futures: list = []
+            effective_length_by_index: dict[str, int] = {}
+            prompt_len_by_index: dict[str, int] = {}
         # Process each batch
             for batch_idx, batch in enumerate(dataloader):
                 gpu_set_phase("trajectory_batch_start", batch_idx=batch_idx)
@@ -1203,34 +1190,15 @@ def trajectory_metrics(model, **kwargs):
                 attention_mask = batch.get("attention_mask")
                 indices = batch.get("index", torch.arange(batch_idx * batch_size, 
                                                           (batch_idx + 1) * batch_size))
-        
                 B = input_ids.shape[0]
         
                 # Prepare inputs for sampler (list of token sequences)
-                prompts = []
-                prompt_lens = []
-                for i in range(B):
-                    # Extract prompt (non-ignored tokens)
-                    if labels is not None:
-                        # Find where labels start (first non-IGNORE_INDEX)
-                        label_mask = labels[i] != IGNORE_INDEX
-                        if label_mask.any():
-                            prompt_end = label_mask.nonzero()[0][0].item()
-                        else:
-                            prompt_end = input_ids.shape[1]
-                    else:
-                        prompt_end = input_ids.shape[1]
-            
-                    prompt = input_ids[i, :prompt_end].cpu().tolist()
-                    prompts.append(prompt)
-                    prompt_lens.append(len(prompt))
+                prompts, prompt_lens = _build_prompts_for_sampler(
+                    input_ids, labels, tokenizer, IGNORE_INDEX
+                )
         
                 # Generate using sampler with logits tracking
-                # #region agent log
                 _sampler_kw = _trajectory_sampler_kwargs(trajectory_config)
-                if batch_idx == 0:
-                    _debug_ndjson({"hypothesisId": "H2", "location": "trajectory_metrics", "message": "sampler kwargs (interval mode?)", "data": {"batch_idx": 0, "trajectory_sample_interval": _sampler_kw.get("trajectory_sample_interval"), "has_interval": _sampler_kw.get("trajectory_sample_interval") not in (None, 0)}})
-                # #endregion
                 sampler_output = sampler.sample(
                     inputs=prompts,
                     config=None,  # Use default config
@@ -1252,41 +1220,29 @@ def trajectory_metrics(model, **kwargs):
                     logger.warning(f"Batch {batch_idx}: No fixation_steps returned from sampler")
                     continue
 
-                # #region agent log
-                if batch_idx == 0 and torch.cuda.is_available():
-                    _debug_log(
-                        "trajectory_metrics.py:after_sampler_sample",
-                        "after sampler.sample() batch 0 (raw logits_history in memory)",
-                        {
-                            "batch_idx": 0,
-                            "logits_history_len": len(logits_history),
-                            "first_step_shape": list(logits_history[0].shape),
-                            "cuda_allocated_mib": round(torch.cuda.memory_allocated() / (1024**2), 2),
-                            "cuda_max_allocated_mib": round(torch.cuda.max_memory_allocated() / (1024**2), 2),
-                        },
-                    )
-                # #region agent log
-                _debug_ndjson({"hypothesisId": "H2", "location": "trajectory_metrics", "message": "S from sampler (len logits_history)", "data": {"batch_idx": batch_idx, "logits_history_len": len(logits_history)}})
-                # #endregion
-                _debug_log("trajectory_metrics.py:trajectories_from_logits:call", "calling trajectories_from_logits", {"return_trajectory_tensors": False, "batch_idx": batch_idx})
-                # #endregion
                 out = trajectories_from_logits(
                     logits_history, fixation_steps, prompt_lens, return_trajectory_tensors=False
                 )
                 R, F, S, L = out["R"], out["F"], out["S"], out["L"]
                 del logits_history # Release list of tensors immediately after stacking/slicing
+
+                # Effective length per sample (for eos view): first EOS in generated region, or L
+                sequences = getattr(sampler_output, "sequences", None)
+                eos_token_id = getattr(tokenizer, "eos_token_id", None) if tokenizer else None
+                if eos_token_id is None and trajectory_config:
+                    eos_token_id = trajectory_config.get("eos_token_id")
+                if sequences is not None and sequences.dim() >= 2 and "eos" in include_views:
+                    effective_lengths = effective_lengths_from_eos(
+                        sequences, prompt_lens, L, eos_token_id
+                    )
+                else:
+                    effective_lengths = [L] * B
+
                 if run_steps_to_use is None:
                     run_steps_to_use, run_step_values_metadata = _derive_steps_to_use(
                         S, trajectory_config
                     )
-                    # #region agent log
-                    _debug_ndjson({"hypothesisId": "H1", "location": "trajectory_metrics", "message": "run_steps_to_use set from first batch", "data": {"batch_idx": batch_idx, "run_steps_to_use": run_steps_to_use, "S": S}})
-                    # #endregion
                 steps_to_use = [s for s in run_steps_to_use if s < S]
-                # #region agent log
-                steps_overflow = [s for s in run_steps_to_use if s >= S]
-                _debug_ndjson({"hypothesisId": "H3", "location": "trajectory_metrics", "message": "per-batch S and steps", "data": {"batch_idx": batch_idx, "S": S, "run_steps_to_use": run_steps_to_use, "steps_to_use": steps_to_use, "steps_overflow": steps_overflow, "will_crash_privleak": len(steps_overflow) > 0}})
-                # #endregion
                 if (
                     use_streaming_privleak
                     and privleak_streaming_cfg is not None
@@ -1316,20 +1272,6 @@ def trajectory_metrics(model, **kwargs):
                         logits_batch = torch.stack(logits_list, dim=0)
                         privleak_accumulators[step].add_forget_batch(batch, logits_batch)
                 gpu_set_phase("trajectory_after_trajectories", batch_idx=batch_idx)
-                # #region agent log
-                if batch_idx == 0:
-                    _debug_log(
-                        "trajectory_metrics.py:after_trajectories_from_logits",
-                        "after trajectories_from_logits (batch 0)",
-                        {
-                            "R_shape": list(R.shape),
-                            "S": S,
-                            "L": L,
-                            "cuda_allocated_mib": round(torch.cuda.memory_allocated() / (1024**2), 2) if torch.cuda.is_available() else None,
-                            "cuda_max_allocated_mib": round(torch.cuda.max_memory_allocated() / (1024**2), 2) if torch.cuda.is_available() else None,
-                        },
-                    )
-                # #endregion
 
                 # Process each sample in batch (each sample uses its own R, F; logits computed on-demand)
                 for sample_idx in range(B):
@@ -1408,10 +1350,61 @@ def trajectory_metrics(model, **kwargs):
                     rouge_futures_this_sample = []
 
                     # Compute metrics for each trajectory type and step (only report steps)
+                    L_eff_b = effective_lengths[sample_idx]
+                    effective_length_by_index[idx_str] = L_eff_b
+                    prompt_len_by_index[idx_str] = sample_prompt_len
+                    # Log prompt + EOS response vs full response (clear, labeled block per sample)
+                    if sequences is not None and tokenizer is not None:
+                        pl = prompt_lens[sample_idx]
+                        seq = sequences[sample_idx]
+                        prompt_text = tokenizer.decode(seq[:pl].tolist(), skip_special_tokens=True)
+                        response_eos_text = tokenizer.decode(
+                            seq[pl : pl + L_eff_b].tolist(), skip_special_tokens=True
+                        )
+                        # Full response: no skip_special_tokens so we see raw EOS/pad/junk after the answer
+                        response_full_raw = tokenizer.decode(
+                            seq[pl : pl + L].tolist(), skip_special_tokens=False
+                        )
+                        _max_prompt, _max_resp = 400, 600
+                        _trunc = lambda s, n: s[:n] + ("..." if len(s) > n else "")
+                        gen_ids = seq[pl : pl + L].tolist()
+                        eos_slice_ids = gen_ids[:L_eff_b]
+                        # Show first/last token IDs of EOS slice so we can verify EOS and no truncation
+                        token_id_preview = (
+                            f"first 5 token_ids={eos_slice_ids[:5]!r}"
+                            if len(eos_slice_ids) >= 5
+                            else f"token_ids={eos_slice_ids!r}"
+                        )
+                        if len(eos_slice_ids) > 5:
+                            token_id_preview += f" ... last 3 token_ids={eos_slice_ids[-3:]!r}"
+                        logger.info(
+                            "[trajectory_response] sample_index=%s\n"
+                            "  Prompt length: %s\n"
+                            "  Total generated length (L): %s\n"
+                            "  EOS index (L_eff): %s (tokens up to/incl first EOS; rest is padding/junk)\n"
+                            "  Generated token IDs (EOS slice): %s\n"
+                            "  Prompt: %s\n"
+                            "  Response up to EOS (%s tokens, no char truncation): %s\n"
+                            "  Full response raw (%s tokens, skip_special_tokens=False): %s\n"
+                            "---",
+                            idx_str,
+                            pl,
+                            L,
+                            L_eff_b,
+                            token_id_preview,
+                            _trunc(prompt_text, _max_prompt),
+                            L_eff_b,
+                            response_eos_text,
+                            L,
+                            response_full_raw,
+                        )
                     for traj_name in trajectory_names:
-                        for step in steps_to_use:
-                            if step not in step_values[traj_name]:
-                                step_values[traj_name][step] = {metric_name: [] for metric_name in loaded_metrics.keys()}
+                        for view in include_views:
+                            for step in steps_to_use:
+                                if step not in step_values_by_view[view][traj_name]:
+                                    step_values_by_view[view][traj_name][step] = {
+                                        m: [] for m in loaded_metrics.keys()
+                                    }
 
                         rouge_metrics_in_run = [
                             m for m in metrics_to_run
@@ -1425,32 +1418,43 @@ def trajectory_metrics(model, **kwargs):
                                     logits_s = logits_s[0]
                                 pred_tokens = torch.argmax(logits_s, dim=-1)
                                 pred_token_lists.append(pred_tokens.tolist())
-                            gen_texts = tokenizer.batch_decode(
+                            gen_texts_full = tokenizer.batch_decode(
                                 pred_token_lists, skip_special_tokens=True
                             )
+                            gen_texts_eos = [
+                                tokenizer.decode(
+                                    (p[:L_eff_b] if len(p) > L_eff_b else p),
+                                    skip_special_tokens=True,
+                                )
+                                for p in pred_token_lists
+                            ]
                             if executor is None:
-                                rouge_scores = eval_rouge_recall_batch(
-                                    gen_texts,
-                                    [ground_truth_str] * len(steps_to_use),
-                                    use_stemmer=True,
-                                    scorer=rouge_scorer_instance,
-                                )
-                                for metric_name in rouge_metrics_in_run:
-                                    metric_cfg = loaded_metrics[metric_name]["config"]
-                                    rouge_type = metric_cfg.get("rouge_type") or kwargs.get("rouge_type", "rougeL_f1")
-                                    for i, step in enumerate(steps_to_use):
-                                        if i < len(rouge_scores) and isinstance(rouge_scores[i], dict) and rouge_type in rouge_scores[i]:
-                                            step_values[traj_name][step][metric_name].append(rouge_scores[i][rouge_type])
+                                for view in include_views:
+                                    gen_texts = gen_texts_full if view == "full" else gen_texts_eos
+                                    rouge_scores = eval_rouge_recall_batch(
+                                        gen_texts,
+                                        [ground_truth_str] * len(steps_to_use),
+                                        use_stemmer=True,
+                                        scorer=rouge_scorer_instance,
+                                    )
+                                    for metric_name in rouge_metrics_in_run:
+                                        metric_cfg = loaded_metrics[metric_name]["config"]
+                                        rouge_type = metric_cfg.get("rouge_type") or kwargs.get("rouge_type", "rougeL_f1")
+                                        for i, step in enumerate(steps_to_use):
+                                            if i < len(rouge_scores) and isinstance(rouge_scores[i], dict) and rouge_type in rouge_scores[i]:
+                                                step_values_by_view[view][traj_name][step][metric_name].append(rouge_scores[i][rouge_type])
                             else:
-                                future = executor.submit(
-                                    eval_rouge_recall_batch_worker,
-                                    gen_texts,
-                                    [ground_truth_str] * len(steps_to_use),
-                                    True,
-                                )
-                                rouge_futures_this_sample.append(
-                                    (future, traj_name, rouge_metrics_in_run, steps_to_use)
-                                )
+                                for view in include_views:
+                                    gen_texts = gen_texts_full if view == "full" else gen_texts_eos
+                                    future = executor.submit(
+                                        eval_rouge_recall_batch_worker,
+                                        gen_texts,
+                                        [ground_truth_str] * len(steps_to_use),
+                                        True,
+                                    )
+                                    rouge_futures_this_sample.append(
+                                        (future, traj_name, rouge_metrics_in_run, steps_to_use, view)
+                                    )
 
                         if "probability" in metrics_to_run and generated_labels is not None:
                             logits_list = [
@@ -1461,37 +1465,55 @@ def trajectory_metrics(model, **kwargs):
                             logits_stacked = torch.stack(
                                 [l.t() for l in logits_list], dim=0
                             )
-                            labels_batch = generated_labels.unsqueeze(0).expand(
+                            labels_batch_full = generated_labels.unsqueeze(0).expand(
                                 len(steps_to_use), -1
                             ).to(device=device, dtype=torch.long)
-                            prob_results = _compute_prob_from_fixation_logits(
-                                logits_stacked, labels_batch, device, IGNORE_INDEX
-                            )
-                            for i, step in enumerate(steps_to_use):
-                                if i < len(prob_results) and "prob" in prob_results[i]:
-                                    step_values[traj_name][step]["probability"].append(
-                                        prob_results[i]["prob"]
+                            for view in include_views:
+                                if view == "full":
+                                    prob_results = _compute_prob_from_fixation_logits(
+                                        logits_stacked, labels_batch_full, device, IGNORE_INDEX
                                     )
+                                else:
+                                    L_eff_slice = min(L_eff_b, logits_stacked.shape[1])
+                                    prob_results = _compute_prob_from_fixation_logits(
+                                        logits_stacked[:, :L_eff_slice, :],
+                                        labels_batch_full[:, :L_eff_slice],
+                                        device,
+                                        IGNORE_INDEX,
+                                    )
+                                for i, step in enumerate(steps_to_use):
+                                    if i < len(prob_results) and "prob" in prob_results[i]:
+                                        step_values_by_view[view][traj_name][step]["probability"].append(
+                                            prob_results[i]["prob"]
+                                        )
+                                # Free GPU memory after first view so second view (eos) does not OOM (two-view doubles prob work per sample).
+                                if len(include_views) > 1 and torch.cuda.is_available():
+                                    del prob_results
+                                    torch.cuda.synchronize()
+                                    torch.cuda.empty_cache()
+                            # Free stacked logits and eos allocation before next traj_name (full run: 4 traj types × 2 views can OOM otherwise).
+                            if torch.cuda.is_available():
+                                del logits_stacked, labels_batch_full
+                                torch.cuda.synchronize()
+                                torch.cuda.empty_cache()
 
                         for step in steps_to_use:
                             # Get logits at this step (on-demand from R, F)
                             logits = _get_logits_at_step(sample_traj, traj_name, step)  # [V, L]
-                            # #region agent log
-                            if batch_idx == 0 and sample_idx == 0 and traj_name == "steps" and (step == 0 or step == S - 1):
-                                _debug_log(
-                                    "trajectory_metrics.py:after_get_logits_at_step",
-                                    "after _get_logits_at_step",
-                                    {
-                                        "logits_shape": list(logits.shape),
-                                        "traj_name": traj_name,
-                                        "step": step,
-                                        "cuda_allocated_mib": round(torch.cuda.memory_allocated() / (1024**2), 2) if torch.cuda.is_available() else None,
-                                        "cuda_max_allocated_mib": round(torch.cuda.max_memory_allocated() / (1024**2), 2) if torch.cuda.is_available() else None,
-                                    },
-                                )
-                            # #endregion
 
-                            # Compute each requested metric (skip rouge and probability; already batched above)
+                            # Build eos batch_template (sliced to L_eff_b) for eos view
+                            L_eff_slice = min(L_eff_b, batch_template["input_ids"].shape[1])
+                            batch_template_eos = {}
+                            for k, v in batch_template.items():
+                                if isinstance(v, torch.Tensor) and v.dim() >= 1 and v.shape[-1] >= L_eff_slice:
+                                    if v.dim() == 1:
+                                        batch_template_eos[k] = v[:L_eff_slice].unsqueeze(0)
+                                    else:
+                                        batch_template_eos[k] = v[:, :L_eff_slice].clone()
+                                else:
+                                    batch_template_eos[k] = v
+
+                            # Compute each requested metric (skip rouge and probability; already batched above) for each view
                             for metric_name, metric_info in [(m, loaded_metrics[m]) for m in metrics_to_run]:
                                 try:
                                     metric = metric_info["metric"]
@@ -1504,96 +1526,98 @@ def trajectory_metrics(model, **kwargs):
 
                                     gpu_set_phase("trajectory_metric", metric=metric_name, batch_idx=batch_idx, step=step)
 
-                                    # Call metric at this step
-                                    # Remove tokenizer from kwargs if present to avoid duplicate argument
                                     kwargs_clean = {k: v for k, v in kwargs.items() if k != "tokenizer"}
-                                    # Pass indexable data to metrics (rouge, etc.): use primary_data so DataLoader can index 0,1,2...
                                     if primary_data is not None:
                                         kwargs_clean["data"] = primary_data
                                     kwargs_clean["ground_truth"] = ground_truth_str
                                     kwargs_clean["rouge_scorer"] = rouge_scorer_instance
-                                    result = _call_metric_at_step(
-                                        metric=metric,
-                                        logits=logits,
-                                        batch_template=batch_template,
-                                        tokenizer=tokenizer,
-                                        sample_labels=sample_labels,
-                                        sample_input_ids=sample_input_ids,
-                                        sample_prompt_len=sample_prompt_len,
-                                        metric_config=metric_cfg,
-                                        sample_idx=idx_str,
-                                        **kwargs_clean
-                                    )
-                            
-                                    # Extract metric value from result and append directly to step_values
-                                    metric_value = None
-                                    if isinstance(result, dict):
-                                        # Try common keys
-                                        if "agg_value" in result:
-                                            metric_value = result["agg_value"]
-                                        elif "value_by_index" in result:
-                                            # Extract value from first index
-                                            value_by_index = result["value_by_index"]
-                                            if value_by_index:
-                                                first_idx = list(value_by_index.keys())[0]
-                                                first_value = value_by_index[first_idx]
-                                                # Extract numeric value from first_value dict
-                                                if isinstance(first_value, dict):
-                                                    for key in ["prob", "score", "value"]:
-                                                        if key in first_value:
-                                                            metric_value = first_value[key]
-                                                            break
-                                                    if metric_value is None:
-                                                        # Use first numeric value
-                                                        for key, value in first_value.items():
-                                                            if isinstance(value, (int, float, np.number)):
-                                                                metric_value = float(value)
+
+                                    for view in include_views:
+                                        bt = batch_template if view == "full" else batch_template_eos
+                                        logits_view = logits[:, :L_eff_slice] if view == "eos" else logits
+                                        result = _call_metric_at_step(
+                                            metric=metric,
+                                            logits=logits_view,
+                                            batch_template=bt,
+                                            tokenizer=tokenizer,
+                                            sample_labels=sample_labels,
+                                            sample_input_ids=sample_input_ids,
+                                            sample_prompt_len=sample_prompt_len,
+                                            metric_config=metric_cfg,
+                                            sample_idx=idx_str,
+                                            **kwargs_clean
+                                        )
+                                        metric_value = None
+                                        if isinstance(result, dict):
+                                            if "agg_value" in result:
+                                                metric_value = result["agg_value"]
+                                            elif "value_by_index" in result:
+                                                value_by_index = result["value_by_index"]
+                                                if value_by_index:
+                                                    first_idx = list(value_by_index.keys())[0]
+                                                    first_value = value_by_index[first_idx]
+                                                    if isinstance(first_value, dict):
+                                                        for key in ["prob", "score", "value"]:
+                                                            if key in first_value:
+                                                                metric_value = first_value[key]
                                                                 break
-                                        elif "prob" in result:
-                                            metric_value = result["prob"]
-                                        elif "score" in result:
-                                            metric_value = result["score"]
-                                        else:
-                                            # Use first numeric value
-                                            for key, value in result.items():
-                                                if isinstance(value, (int, float, np.number)):
-                                                    metric_value = float(value)
-                                                    break
-                                    elif isinstance(result, list) and len(result) > 0:
-                                        # List of dicts (common format)
-                                        result_dict = result[0]
-                                        if isinstance(result_dict, dict):
-                                            if "prob" in result_dict:
-                                                metric_value = result_dict["prob"]
-                                            elif "score" in result_dict:
-                                                metric_value = result_dict["score"]
+                                                        if metric_value is None:
+                                                            for key, value in first_value.items():
+                                                                if isinstance(value, (int, float, np.number)):
+                                                                    metric_value = float(value)
+                                                                    break
+                                            elif "prob" in result:
+                                                metric_value = result["prob"]
+                                            elif "score" in result:
+                                                metric_value = result["score"]
                                             else:
-                                                # Use first numeric value
-                                                for key, value in result_dict.items():
+                                                for key, value in result.items():
                                                     if isinstance(value, (int, float, np.number)):
                                                         metric_value = float(value)
                                                         break
-                                    elif isinstance(result, (int, float, np.number)):
-                                        metric_value = float(result)
-                            
-                                    # Debug: log extraction_strength at first/last step for verification
-                                    if metric_name == "extraction_strength" and step in (steps_to_use[0], steps_to_use[-1]) and metric_value is not None:
-                                        logger.debug(
-                                            f"extraction_strength step={step} sample={idx_str}: value={metric_value}"
-                                        )
-
-                                    # Append to step_values for aggregation
-                                    if metric_value is not None:
-                                        step_values[traj_name][step][metric_name].append(metric_value)
+                                        elif isinstance(result, list) and len(result) > 0:
+                                            result_dict = result[0]
+                                            if isinstance(result_dict, dict):
+                                                if "prob" in result_dict:
+                                                    metric_value = result_dict["prob"]
+                                                elif "score" in result_dict:
+                                                    metric_value = result_dict["score"]
+                                                else:
+                                                    for key, value in result_dict.items():
+                                                        if isinstance(value, (int, float, np.number)):
+                                                            metric_value = float(value)
+                                                            break
+                                        elif isinstance(result, (int, float, np.number)):
+                                            metric_value = float(result)
+                                        if metric_name == "extraction_strength" and step in (steps_to_use[0], steps_to_use[-1]) and metric_value is not None:
+                                            logger.debug(
+                                                f"extraction_strength step={step} sample={idx_str}: value={metric_value}"
+                                            )
+                                        if metric_value is not None:
+                                            step_values_by_view[view][traj_name][step][metric_name].append(metric_value)
+                                    # Return GPU memory after metrics that allocate large log_probs/contiguous logits
+                                    # so the next metric (e.g. hm_aggregate) or next step does not OOM (see .monitor/oom-investigation-exact-cause.md).
+                                    if metric_name in ("extraction_strength", "truth_ratio", "ks_test") and torch.cuda.is_available():
+                                        torch.cuda.empty_cache()
                         
                                 except Exception as e:
                                     logger.warning(
                                         f"Error computing {metric_name} at step {step} for {traj_name}: {e}",
                                         exc_info=True
                                     )
+                            # Release per-step tensors so baseline memory does not grow across steps (fixes GPU leak).
+                            try:
+                                del batch_template_eos, logits
+                            except NameError:
+                                pass
 
                     if executor is not None and rouge_futures_this_sample:
                         all_rouge_futures.extend(rouge_futures_this_sample)
+
+                    # Aggressive per-sample cleanup to avoid baseline memory growth across samples (GPU leak).
+                    gc.collect()
+                    if torch.cuda.is_available():
+                        torch.cuda.empty_cache()
 
                 gpu_set_phase("trajectory_batch_end", batch_idx=batch_idx)
                 # Release batch-sized GPU data before next batch to avoid holding two batches in memory (OOM with many samples).
@@ -1613,14 +1637,19 @@ def trajectory_metrics(model, **kwargs):
                         torch.cuda.empty_cache()
 
             if executor is not None and all_rouge_futures:
-                for (future, traj_name, rouge_metrics_in_run, steps_to_use) in all_rouge_futures:
+                for item in all_rouge_futures:
+                    if len(item) == 5:
+                        future, traj_name, rouge_metrics_in_run, steps_to_use, view = item
+                    else:
+                        future, traj_name, rouge_metrics_in_run, steps_to_use = item
+                        view = "full"
                     rouge_scores = future.result()
                     for metric_name in rouge_metrics_in_run:
                         metric_cfg = loaded_metrics[metric_name]["config"]
                         rouge_type = metric_cfg.get("rouge_type") or kwargs.get("rouge_type", "rougeL_f1")
                         for i, step in enumerate(steps_to_use):
                             if i < len(rouge_scores) and isinstance(rouge_scores[i], dict) and rouge_type in rouge_scores[i]:
-                                step_values[traj_name][step][metric_name].append(rouge_scores[i][rouge_type])
+                                step_values_by_view[view][traj_name][step][metric_name].append(rouge_scores[i][rouge_type])
 
             if _key is None and privleak_accumulators is not None and holdout_dataloader is not None:
                 privleak_cfg = privleak_streaming_cfg["privleak_cfg"]
@@ -1635,21 +1664,9 @@ def trajectory_metrics(model, **kwargs):
                             (h_batch_idx + 1) * h_input_ids.shape[0],
                         ),
                     )
-                    h_B = h_input_ids.shape[0]
-                    h_prompts = []
-                    h_prompt_lens = []
-                    for i in range(h_B):
-                        if h_labels is not None:
-                            label_mask = h_labels[i] != IGNORE_INDEX
-                            prompt_end = (
-                                label_mask.nonzero()[0][0].item()
-                                if label_mask.any()
-                                else h_input_ids.shape[1]
-                            )
-                        else:
-                            prompt_end = h_input_ids.shape[1]
-                        h_prompts.append(h_input_ids[i, :prompt_end].cpu().tolist())
-                        h_prompt_lens.append(len(h_prompts[-1]))
+                    h_prompts, h_prompt_lens = _build_prompts_for_sampler(
+                        h_input_ids, h_labels, tokenizer, IGNORE_INDEX
+                    )
                     h_sampler_output = sampler.sample(
                         inputs=h_prompts,
                         config=None,
@@ -1693,10 +1710,12 @@ def trajectory_metrics(model, **kwargs):
                         ref_value=privleak_cfg.get("ref_value", 0.5),
                         **{k: v for k, v in kwargs.items() if k not in ("model", "tokenizer", "pre_compute")},
                     )
-                    for traj_name in trajectory_names:
-                        if step not in step_values[traj_name]:
-                            step_values[traj_name][step] = {m: [] for m in loaded_metrics}
-                        step_values[traj_name][step]["privleak"].append(privleak_result.get("agg_value"))
+                    pv = privleak_result.get("agg_value")
+                    for view in include_views:
+                        for traj_name in trajectory_names:
+                            if step not in step_values_by_view[view][traj_name]:
+                                step_values_by_view[view][traj_name][step] = {m: [] for m in loaded_metrics}
+                            step_values_by_view[view][traj_name][step]["privleak"].append(pv)
                 privleak_accumulators = None
 
         # Multi-dataset: run privleak dual trajectory after per-key loops
@@ -1771,10 +1790,12 @@ def trajectory_metrics(model, **kwargs):
                         ref_value=privleak_cfg.get("ref_value", 0.5),
                         **{k: v for k, v in kwargs.items() if k not in ("model", "tokenizer", "pre_compute")},
                     )
-                    for traj_name in trajectory_names:
-                        if step not in step_values[traj_name]:
-                            step_values[traj_name][step] = {m: [] for m in loaded_metrics}
-                        step_values[traj_name][step]["privleak"].append(privleak_result.get("agg_value"))
+                    pv = privleak_result.get("agg_value")
+                    for view in include_views:
+                        for traj_name in trajectory_names:
+                            if step not in step_values_by_view[view][traj_name]:
+                                step_values_by_view[view][traj_name][step] = {m: [] for m in loaded_metrics}
+                            step_values_by_view[view][traj_name][step]["privleak"].append(pv)
             else:
                 logger.warning("Privleak dual trajectories empty, skipping privleak")
 
@@ -1815,100 +1836,93 @@ def trajectory_metrics(model, **kwargs):
                 "ci_low": ci_low,
                 "ci_high": ci_high,
             }
-        # Aggregate results: compute mean and per-step distribution for each step (after all batches)
-        agg_value = {}
-        step_distribution = {}
-        for traj_name in trajectory_names:
-            agg_value[traj_name] = {}
-            step_distribution[traj_name] = {}
-            for metric_name in loaded_metrics.keys():
-                # Collect values per step
-                step_metric_values = {}  # {step: [values across samples]}
-                if traj_name in step_values:
-                    for step, metrics_dict in step_values[traj_name].items():
-                        if metric_name in metrics_dict and len(metrics_dict[metric_name]) > 0:
-                            step_metric_values[step] = metrics_dict[metric_name]
-            
-                # Aggregate: mean and full distribution per step
-                if step_metric_values:
-                    ordered_steps = (
-                        run_steps_to_use
-                        if run_steps_to_use is not None
-                        else sorted(step_metric_values.keys())
-                    )
-                    aggregated = []
-                    dist_means, dist_stds, dist_medians = [], [], []
-                    dist_p25, dist_p75, dist_mins, dist_maxs = [], [], [], []
-                    dist_ci_low, dist_ci_high = [], []
-                    for step in ordered_steps:
-                        if step in step_metric_values:
-                            vals = step_metric_values[step]
-                            vals_clean = [float(v) if v is not None else np.nan for v in vals]
-                            aggregated.append(np.nanmean(vals_clean) if vals_clean else np.nan)
-                            d = _distribution_for_step(vals_clean)
-                            dist_means.append(d["mean"])
-                            dist_stds.append(d["std"])
-                            dist_medians.append(d["median"])
-                            dist_p25.append(d["p25"])
-                            dist_p75.append(d["p75"])
-                            dist_mins.append(d["min"])
-                            dist_maxs.append(d["max"])
-                            dist_ci_low.append(d["ci_low"])
-                            dist_ci_high.append(d["ci_high"])
-                        else:
-                            aggregated.append(np.nan)
-                            dist_means.append(np.nan)
-                            dist_stds.append(np.nan)
-                            dist_medians.append(np.nan)
-                            dist_p25.append(np.nan)
-                            dist_p75.append(np.nan)
-                            dist_mins.append(np.nan)
-                            dist_maxs.append(np.nan)
-                            dist_ci_low.append(np.nan)
-                            dist_ci_high.append(np.nan)
-                    agg_value[traj_name][metric_name] = np.array(aggregated)
-                    step_distribution[traj_name][metric_name] = {
-                        "mean": np.array(dist_means),
-                        "std": np.array(dist_stds),
-                        "median": np.array(dist_medians),
-                        "p25": np.array(dist_p25),
-                        "p75": np.array(dist_p75),
-                        "min": np.array(dist_mins),
-                        "max": np.array(dist_maxs),
-                        "ci_low": np.array(dist_ci_low),
-                        "ci_high": np.array(dist_ci_high),
-                    }
-                else:
-                    agg_value[traj_name][metric_name] = np.array([])
-                    step_distribution[traj_name][metric_name] = {
-                        "mean": np.array([]),
-                        "std": np.array([]),
-                        "median": np.array([]),
-                        "p25": np.array([]),
-                        "p75": np.array([]),
-                        "min": np.array([]),
-                        "max": np.array([]),
-                        "ci_low": np.array([]),
-                        "ci_high": np.array([]),
-                    }
-    
-        # #region agent log
-        if torch.cuda.is_available():
-            _debug_log(
-                "trajectory_metrics.py:trajectory_metrics:exit",
-                "trajectory_metrics exit",
-                {
-                    "cuda_allocated_mib": round(torch.cuda.memory_allocated() / (1024**2), 2),
-                    "cuda_max_allocated_mib": round(torch.cuda.max_memory_allocated() / (1024**2), 2),
-                },
-            )
-        # #endregion
+        # Aggregate results per view: compute mean and per-step distribution for each step
+        agg_value_by_view = {}
+        step_distribution_by_view = {}
+        for view in include_views:
+            step_values = step_values_by_view[view]
+            agg_value = {}
+            step_distribution = {}
+            for traj_name in trajectory_names:
+                agg_value[traj_name] = {}
+                step_distribution[traj_name] = {}
+                for metric_name in loaded_metrics.keys():
+                    step_metric_values = {}
+                    if traj_name in step_values:
+                        for step, metrics_dict in step_values[traj_name].items():
+                            if metric_name in metrics_dict and len(metrics_dict[metric_name]) > 0:
+                                step_metric_values[step] = metrics_dict[metric_name]
+                    if step_metric_values:
+                        ordered_steps = (
+                            run_steps_to_use
+                            if run_steps_to_use is not None
+                            else sorted(step_metric_values.keys())
+                        )
+                        aggregated = []
+                        dist_means, dist_stds, dist_medians = [], [], []
+                        dist_p25, dist_p75, dist_mins, dist_maxs = [], [], [], []
+                        dist_ci_low, dist_ci_high = [], []
+                        for step in ordered_steps:
+                            if step in step_metric_values:
+                                vals = step_metric_values[step]
+                                vals_clean = [float(v) if v is not None else np.nan for v in vals]
+                                aggregated.append(np.nanmean(vals_clean) if vals_clean else np.nan)
+                                d = _distribution_for_step(vals_clean)
+                                dist_means.append(d["mean"])
+                                dist_stds.append(d["std"])
+                                dist_medians.append(d["median"])
+                                dist_p25.append(d["p25"])
+                                dist_p75.append(d["p75"])
+                                dist_mins.append(d["min"])
+                                dist_maxs.append(d["max"])
+                                dist_ci_low.append(d["ci_low"])
+                                dist_ci_high.append(d["ci_high"])
+                            else:
+                                aggregated.append(np.nan)
+                                dist_means.append(np.nan)
+                                dist_stds.append(np.nan)
+                                dist_medians.append(np.nan)
+                                dist_p25.append(np.nan)
+                                dist_p75.append(np.nan)
+                                dist_mins.append(np.nan)
+                                dist_maxs.append(np.nan)
+                                dist_ci_low.append(np.nan)
+                                dist_ci_high.append(np.nan)
+                        agg_value[traj_name][metric_name] = np.array(aggregated)
+                        step_distribution[traj_name][metric_name] = {
+                            "mean": np.array(dist_means),
+                            "std": np.array(dist_stds),
+                            "median": np.array(dist_medians),
+                            "p25": np.array(dist_p25),
+                            "p75": np.array(dist_p75),
+                            "min": np.array(dist_mins),
+                            "max": np.array(dist_maxs),
+                            "ci_low": np.array(dist_ci_low),
+                            "ci_high": np.array(dist_ci_high),
+                        }
+                    else:
+                        agg_value[traj_name][metric_name] = np.array([])
+                        step_distribution[traj_name][metric_name] = {
+                            "mean": np.array([]),
+                            "std": np.array([]),
+                            "median": np.array([]),
+                            "p25": np.array([]),
+                            "p75": np.array([]),
+                            "min": np.array([]),
+                            "max": np.array([]),
+                            "ci_low": np.array([]),
+                            "ci_high": np.array([]),
+                        }
+            agg_value_by_view[view] = agg_value
+            step_distribution_by_view[view] = step_distribution
 
         # Build trajectory step metadata so results can interpret step indices (which diffusion/unmasked-token step each index is).
         sampler_kwargs = trajectory_config.get("sampler_kwargs", {})
         num_trajectory_steps = 0
-        if agg_value and "steps" in agg_value and agg_value["steps"]:
-            first_metric_arr = next(iter(agg_value["steps"].values()), None)
+        first_view = include_views[0] if include_views else "full"
+        agg_first = agg_value_by_view.get(first_view) or {}
+        if agg_first and "steps" in agg_first and agg_first["steps"]:
+            first_metric_arr = next(iter(agg_first["steps"].values()), None)
             if first_metric_arr is not None and len(first_metric_arr) > 0:
                 num_trajectory_steps = int(len(first_metric_arr))
         trajectory_sample_interval = sampler_kwargs.get("trajectory_sample_interval")
@@ -1940,6 +1954,10 @@ def trajectory_metrics(model, **kwargs):
         }
         if step_values is not None:
             trajectory_step_metadata["step_values"] = step_values
+        if effective_length_by_index:
+            trajectory_step_metadata["effective_length_by_index"] = effective_length_by_index
+        if prompt_len_by_index:
+            trajectory_step_metadata["prompt_len_by_index"] = prompt_len_by_index
 
         # Single-pass: return one result per display name so evaluator merges into logs.
         internal_names = list(loaded_metrics.keys())
@@ -1960,13 +1978,19 @@ def trajectory_metrics(model, **kwargs):
             for display_name, internal_name in zip(display_names, internal_names):
                 out[display_name] = {
                     "agg_value": {
-                        traj: {internal_name: agg_value[traj][internal_name]}
-                        for traj in trajectory_names
+                        view: {
+                            traj: {internal_name: agg_value_by_view[view][traj][internal_name]}
+                            for traj in trajectory_names
+                        }
+                        for view in include_views
                     },
                     "value_by_index": {},
                     "step_distribution": {
-                        traj: {internal_name: step_distribution[traj][internal_name]}
-                        for traj in trajectory_names
+                        view: {
+                            traj: {internal_name: step_distribution_by_view[view][traj][internal_name]}
+                            for traj in trajectory_names
+                        }
+                        for view in include_views
                     },
                 }
             out["trajectory_step_metadata"] = {
@@ -1980,9 +2004,9 @@ def trajectory_metrics(model, **kwargs):
         if executor is not None:
             executor.shutdown(wait=True)
         return {
-            "agg_value": agg_value,
-            "value_by_index": {},  # Empty since we don't store per-sample trajectories
-            "step_distribution": step_distribution,
+            "agg_value": agg_value_by_view,
+            "value_by_index": {},
+            "step_distribution": step_distribution_by_view,
         }
 
 

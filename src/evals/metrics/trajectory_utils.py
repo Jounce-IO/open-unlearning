@@ -10,7 +10,7 @@ This module provides functions to:
 """
 
 import torch
-from typing import List, Union
+from typing import List, Optional, Union
 
 
 def stack_logits_history(logits_history: List[torch.Tensor]) -> torch.Tensor:
@@ -307,6 +307,51 @@ def trajectories_from_logits(
         "S": S,
         "L": L,
     }
+
+
+def effective_lengths_from_eos(
+    sequences: torch.Tensor,
+    prompt_lens: Union[List[int], torch.Tensor],
+    L: int,
+    eos_token_id: Optional[int],
+) -> List[int]:
+    """
+    Compute per-sample effective length (positions 0..L_eff-1 include first EOS).
+
+    For each sample b, the generated region is sequences[b, prompt_lens[b]:prompt_lens[b]+L].
+    L_eff[b] = (first index of eos_token_id in that region) + 1, or L if no EOS.
+    If eos_token_id is None, returns [L] * B (no EOS trimming).
+
+    Args:
+        sequences: [B, T_full] token ids (full sequence including prompt + generated).
+        prompt_lens: Length-B list or 1-d tensor of prompt lengths per sample.
+        L: Generated length (number of positions in the generated region).
+        eos_token_id: Token ID for EOS, or None to use full length for all samples.
+
+    Returns:
+        List of B integers: effective length per sample (1-indexed count including EOS position).
+    """
+    if not isinstance(sequences, torch.Tensor):
+        sequences = torch.tensor(sequences, dtype=torch.long)
+    B = sequences.shape[0]
+    if isinstance(prompt_lens, torch.Tensor):
+        prompt_lens = prompt_lens.tolist()
+    if eos_token_id is None:
+        return [L] * B
+    out: List[int] = []
+    for b in range(B):
+        pl = prompt_lens[b]
+        gen_slice = sequences[b, pl : pl + L]
+        eq = gen_slice == eos_token_id
+        if not isinstance(eq, torch.Tensor):
+            eq = torch.tensor([eq], dtype=torch.bool, device=gen_slice.device if isinstance(gen_slice, torch.Tensor) else None)
+        match = eq.nonzero(as_tuple=True)[0]
+        if match.numel() == 0:
+            out.append(L)
+        else:
+            first_eos_idx = int(match[0].item())
+            out.append(first_eos_idx + 1)
+    return out
 
 
 def extract_logits_at_step(trajectory: torch.Tensor, step: int) -> torch.Tensor:
