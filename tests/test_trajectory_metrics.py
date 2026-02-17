@@ -163,6 +163,180 @@ class TestBuildPromptsForSampler:
         assert prompt_lens[1] == 3
 
 
+class TestSamplerReceivesCorrectPrompt:
+    """Integration tests that the sampler is called with the correct (non-empty) prompts.
+
+    Prevents regression where predict_with_generate-style data (input_ids prompt-only,
+    labels without IGNORE_INDEX) led to empty prompts being sent to the sampler.
+    """
+
+    def test_predict_with_generate_style_sampler_receives_non_empty_prompt(self):
+        """With prompt-only input_ids and no IGNORE in labels, sampler.sample(inputs=...) gets correct prompt."""
+        V, L_gen, S = 100, 10, 8
+        prompt_tokens = [100, 101, 102, 103, 104]  # known prompt we will assert on
+        prompt_len = len(prompt_tokens)
+        full_len = prompt_len + L_gen
+        pad_id = 0
+
+        # Batch: input_ids = prompt only (then padded to full_len for stacking); labels = no IGNORE
+        input_ids_row = torch.tensor(prompt_tokens + [pad_id] * (full_len - prompt_len), dtype=torch.long)
+        labels_row = torch.randint(1, V, (full_len,))  # no IGNORE -> prompt_end would be 0 without fallback
+
+        class MockSamplerOutput:
+            def __init__(self, sequences, histories, logits_history, fixation_steps):
+                self.sequences = sequences
+                self.histories = histories
+                self.logits_history = logits_history
+                self.fixation_steps = fixation_steps
+
+        captured_inputs = []
+
+        def capture_sample(inputs=None, **kwargs):
+            captured_inputs.append(list(inputs) if inputs is not None else [])
+            return MockSamplerOutput(
+                sequences=torch.randint(0, V, (len(inputs) if inputs else 1, full_len)),
+                histories=None,
+                logits_history=[torch.randn(len(inputs) if inputs else 1, full_len, V) for _ in range(S)],
+                fixation_steps=torch.randint(0, S, (len(inputs) if inputs else 1, full_len)),
+            )
+
+        sampler = Mock()
+        sampler.sample.side_effect = capture_sample
+        model = Mock()
+        model.sampler = sampler
+
+        class MockDataset:
+            def __init__(self):
+                self.data = [
+                    {"input_ids": input_ids_row.clone(), "labels": labels_row.clone()}
+                ]
+
+            def __len__(self):
+                return len(self.data)
+
+            def __getitem__(self, idx):
+                return self.data[idx]
+
+        def mock_collator(batch):
+            return {
+                "input_ids": torch.stack([b["input_ids"] for b in batch]),
+                "labels": torch.stack([b["labels"] for b in batch]),
+                "index": torch.tensor([0]),
+            }
+
+        tokenizer = Mock(pad_token_id=pad_id)
+        tokenizer.decode = lambda x, **kwargs: "decoded"
+
+        kwargs = {
+            "metrics": ["probability"],
+            "data": MockDataset(),
+            "collators": mock_collator,
+            "tokenizer": tokenizer,
+            "batch_size": 1,
+            "trajectory_config": {
+                "return_logits": True,
+                "return_fixation_steps": True,
+                "sampler_kwargs": {"steps": S, "max_new_tokens": L_gen},
+            },
+        }
+        trajectory_metrics(
+            model,
+            metric_name="trajectory_metrics",
+            cache={},
+            **kwargs,
+        )
+        assert sampler.sample.call_count >= 1, "sampler.sample should be called at least once"
+        assert len(captured_inputs) >= 1, "should have captured at least one call"
+        inputs_sent = captured_inputs[0]
+        assert len(inputs_sent) == 1, "batch size 1 -> one prompt"
+        prompt_sent = inputs_sent[0]
+        assert len(prompt_sent) > 0, "prompt must not be empty (regression: empty prompt with predict_with_generate)"
+        assert prompt_sent == prompt_tokens, (
+            f"sampler must receive the prompt tokens (non-pad input_ids). Got {prompt_sent}, expected {prompt_tokens}"
+        )
+
+    def test_training_style_sampler_receives_prefix_prompt(self):
+        """With IGNORE in labels for prefix, sampler receives input_ids up to first non-IGNORE."""
+        V, L_gen, S = 400, 10, 8  # V large enough for token ids 200..204 and 300..309
+        P = 5  # prompt length
+        full_len = P + L_gen
+        prompt_tokens = [200, 201, 202, 203, 204]
+        IGNORE_INDEX = -100
+
+        input_ids_row = torch.tensor(
+            prompt_tokens + list(range(300, 300 + L_gen)),
+            dtype=torch.long,
+        )
+        labels_row = torch.full((full_len,), IGNORE_INDEX, dtype=torch.long)
+        labels_row[P:] = input_ids_row[P:].clone()
+
+        class MockSamplerOutput:
+            def __init__(self, sequences, histories, logits_history, fixation_steps):
+                self.sequences = sequences
+                self.histories = histories
+                self.logits_history = logits_history
+                self.fixation_steps = fixation_steps
+
+        captured_inputs = []
+
+        def capture_sample(inputs=None, **kwargs):
+            captured_inputs.append(list(inputs) if inputs is not None else [])
+            return MockSamplerOutput(
+                sequences=torch.randint(0, V, (len(inputs) if inputs else 1, full_len)),
+                histories=None,
+                logits_history=[torch.randn(len(inputs) if inputs else 1, full_len, V) for _ in range(S)],
+                fixation_steps=torch.randint(0, S, (len(inputs) if inputs else 1, full_len)),
+            )
+
+        sampler = Mock()
+        sampler.sample.side_effect = capture_sample
+        model = Mock()
+        model.sampler = sampler
+
+        class MockDataset:
+            def __init__(self):
+                self.data = [{"input_ids": input_ids_row.clone(), "labels": labels_row.clone()}]
+
+            def __len__(self):
+                return len(self.data)
+
+            def __getitem__(self, idx):
+                return self.data[idx]
+
+        def mock_collator(batch):
+            return {
+                "input_ids": torch.stack([b["input_ids"] for b in batch]),
+                "labels": torch.stack([b["labels"] for b in batch]),
+                "index": torch.tensor([0]),
+            }
+
+        tokenizer = Mock(pad_token_id=0)
+        tokenizer.decode = lambda x, **kwargs: "decoded"
+
+        kwargs = {
+            "metrics": ["probability"],
+            "data": MockDataset(),
+            "collators": mock_collator,
+            "tokenizer": tokenizer,
+            "batch_size": 1,
+            "trajectory_config": {
+                "return_logits": True,
+                "return_fixation_steps": True,
+                "sampler_kwargs": {"steps": S, "max_new_tokens": L_gen},
+            },
+        }
+        trajectory_metrics(
+            model,
+            metric_name="trajectory_metrics",
+            cache={},
+            **kwargs,
+        )
+        assert len(captured_inputs) >= 1
+        prompt_sent = captured_inputs[0][0]
+        assert len(prompt_sent) == P, "training-style: prompt = first P tokens"
+        assert prompt_sent == prompt_tokens, f"expected {prompt_tokens}, got {prompt_sent}"
+
+
 class TestGetSamplerFromModel:
     """Tests for _get_sampler_from_model function."""
     
