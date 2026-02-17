@@ -1361,25 +1361,42 @@ def trajectory_metrics(model, **kwargs):
                         response_eos_text = tokenizer.decode(
                             seq[pl : pl + L_eff_b].tolist(), skip_special_tokens=True
                         )
-                        response_full_text = tokenizer.decode(
-                            seq[pl : pl + L].tolist(), skip_special_tokens=True
+                        # Full response: no skip_special_tokens so we see raw EOS/pad/junk after the answer
+                        response_full_raw = tokenizer.decode(
+                            seq[pl : pl + L].tolist(), skip_special_tokens=False
                         )
                         _max_prompt, _max_resp = 400, 600
                         _trunc = lambda s, n: s[:n] + ("..." if len(s) > n else "")
+                        gen_ids = seq[pl : pl + L].tolist()
+                        eos_slice_ids = gen_ids[:L_eff_b]
+                        # Show first/last token IDs of EOS slice so we can verify EOS and no truncation
+                        token_id_preview = (
+                            f"first 5 token_ids={eos_slice_ids[:5]!r}"
+                            if len(eos_slice_ids) >= 5
+                            else f"token_ids={eos_slice_ids!r}"
+                        )
+                        if len(eos_slice_ids) > 5:
+                            token_id_preview += f" ... last 3 token_ids={eos_slice_ids[-3:]!r}"
                         logger.info(
                             "[trajectory_response] sample_index=%s\n"
                             "  Prompt length: %s\n"
-                            "  EOS index (L_eff): %s (generated length up to/incl first EOS)\n"
+                            "  Total generated length (L): %s\n"
+                            "  EOS index (L_eff): %s (tokens up to/incl first EOS; rest is padding/junk)\n"
+                            "  Generated token IDs (EOS slice): %s\n"
                             "  Prompt: %s\n"
-                            "  Response up to EOS: %s\n"
-                            "  Full response: %s\n"
+                            "  Response up to EOS (%s tokens, no char truncation): %s\n"
+                            "  Full response raw (%s tokens, skip_special_tokens=False): %s\n"
                             "---",
                             idx_str,
                             pl,
+                            L,
                             L_eff_b,
+                            token_id_preview,
                             _trunc(prompt_text, _max_prompt),
-                            _trunc(response_eos_text, _max_resp),
-                            _trunc(response_full_text, _max_resp),
+                            L_eff_b,
+                            response_eos_text,
+                            L,
+                            response_full_raw,
                         )
                     for traj_name in trajectory_names:
                         for view in include_views:
