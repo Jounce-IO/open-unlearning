@@ -581,6 +581,318 @@ class TestComputeEosPositionLengths:
         assert (lengths == 2).all()
 
 
+# -----------------------------------------------------------------------------
+# Concrete example: exact inputs and expected outputs from
+# knowledge/summaries/trajectory-calculation-concrete-example.py (main repo).
+# Keep in sync when that file changes.
+# -----------------------------------------------------------------------------
+_CONCRETE_B, _CONCRETE_V, _CONCRETE_L, _CONCRETE_S = 2, 3, 4, 5
+_CONCRETE_EOS_ID = 2
+
+_CONCRETE_F = [
+    [0, 2, 1, 4],
+    [1, 3, 3, 2],
+]
+
+_CONCRETE_R = [
+    [
+        [
+            [1.0, 0.0, -1.0, -2.0, -3.0],
+            [1.0, 0.0, -1.0, -2.0, -3.0],
+            [-1.0, 0.0, -1.0, -2.0, -3.0],
+            [1.0, 0.0, -1.0, -2.0, -3.0],
+        ],
+        [
+            [0.0, 1.0, 0.0, -1.0, -2.0],
+            [0.0, 1.0, 0.0, -1.0, -2.0],
+            [-1.0, 1.0, 0.0, -1.0, -2.0],
+            [0.0, 1.0, 0.0, -1.0, -2.0],
+        ],
+        [
+            [-2.0, -1.0, -2.0, -3.0, -4.0],
+            [-2.0, -1.0, -2.0, -3.0, -4.0],
+            [1.0, -1.0, -2.0, -3.0, -4.0],
+            [-2.0, -1.0, -2.0, -3.0, -4.0],
+        ],
+    ],
+    [
+        [
+            [0.0, 1.0, 0.0, -1.0, -2.0],
+            [0.0, 0.0, -1.0, -2.0, -3.0],
+            [0.0, 0.0, -1.0, -2.0, -3.0],
+            [0.0, -1.0, 1.0, -2.0, -3.0],
+        ],
+        [
+            [0.0, 0.0, 0.0, -1.0, -2.0],
+            [0.0, 0.0, -1.0, -2.0, -3.0],
+            [0.0, 0.0, -1.0, -2.0, -3.0],
+            [0.0, -1.0, 0.0, -2.0, -3.0],
+        ],
+        [
+            [-1.0, -1.0, -1.0, 2.0, -2.0],
+            [-1.0, -1.0, -1.0, 2.0, 2.0],
+            [-1.0, -1.0, -1.0, 2.0, -2.0],
+            [-1.0, -1.0, 2.0, -2.0, -3.0],
+        ],
+    ],
+]
+
+_CONCRETE_T_steps = [
+    [
+        [
+            [1.0, 0.0, -1.0, -2.0, -3.0],
+            [1.0, 0.0, -1.0, -2.0, -3.0],
+            [-1.0, 0.0, -1.0, -2.0, -3.0],
+            [1.0, 0.0, -1.0, -2.0, -3.0],
+        ],
+        [
+            [0.0, 1.0, 0.0, -1.0, -2.0],
+            [0.0, 1.0, 0.0, -1.0, -2.0],
+            [-1.0, 1.0, 0.0, -1.0, -2.0],
+            [0.0, 1.0, 0.0, -1.0, -2.0],
+        ],
+        [
+            [-2.0, -1.0, -2.0, -3.0, -4.0],
+            [-2.0, -1.0, -2.0, -3.0, -4.0],
+            [1.0, -1.0, -2.0, -3.0, -4.0],
+            [-2.0, -1.0, -2.0, -3.0, -4.0],
+        ],
+    ],
+    [
+        [
+            [0.0, 1.0, 0.0, -1.0, -2.0],
+            [0.0, 0.0, -1.0, -2.0, -3.0],
+            [0.0, 0.0, -1.0, -2.0, -3.0],
+            [0.0, -1.0, 1.0, -2.0, -3.0],
+        ],
+        [
+            [0.0, 0.0, 0.0, -1.0, -2.0],
+            [0.0, 0.0, -1.0, -2.0, -3.0],
+            [0.0, 0.0, -1.0, -2.0, -3.0],
+            [0.0, -1.0, 0.0, -2.0, -3.0],
+        ],
+        [
+            [-1.0, -1.0, -1.0, 2.0, -2.0],
+            [-1.0, -1.0, -1.0, 2.0, 2.0],
+            [-1.0, -1.0, -1.0, 2.0, -2.0],
+            [-1.0, -1.0, 2.0, -2.0, -3.0],
+        ],
+    ],
+]
+
+_CONCRETE_T_Fstart = [
+    [
+        [
+            [1.0, 1.0, 1.0, 1.0, 1.0],
+            [1.0, 0.0, -1.0, -1.0, -1.0],
+            [-1.0, 0.0, 0.0, 0.0, 0.0],
+            [1.0, 0.0, -1.0, -2.0, -3.0],
+        ],
+        [
+            [0.0, 0.0, 0.0, 0.0, 0.0],
+            [0.0, 1.0, 0.0, 0.0, 0.0],
+            [-1.0, 1.0, 1.0, 1.0, 1.0],
+            [0.0, 1.0, 0.0, -1.0, -2.0],
+        ],
+        [
+            [-2.0, -2.0, -2.0, -2.0, -2.0],
+            [-2.0, -1.0, -2.0, -2.0, -2.0],
+            [1.0, -1.0, -1.0, -1.0, -1.0],
+            [-2.0, -1.0, -2.0, -3.0, -4.0],
+        ],
+    ],
+    [
+        [
+            [0.0, 1.0, 1.0, 1.0, 1.0],
+            [0.0, 0.0, -1.0, -2.0, -2.0],
+            [0.0, 0.0, -1.0, -2.0, -2.0],
+            [0.0, -1.0, 1.0, 1.0, 1.0],
+        ],
+        [
+            [0.0, 0.0, 0.0, 0.0, 0.0],
+            [0.0, 0.0, -1.0, -2.0, -2.0],
+            [0.0, 0.0, -1.0, -2.0, -2.0],
+            [0.0, -1.0, 0.0, 0.0, 0.0],
+        ],
+        [
+            [-1.0, -1.0, -1.0, -1.0, -1.0],
+            [-1.0, -1.0, -1.0, 2.0, 2.0],
+            [-1.0, -1.0, -1.0, 2.0, 2.0],
+            [-1.0, -1.0, 2.0, 2.0, 2.0],
+        ],
+    ],
+]
+
+_CONCRETE_T_Fend = [
+    [
+        [
+            [1.0, 1.0, 1.0, 1.0, 1.0],
+            [1.0, 1.0, 1.0, 0.0, -1.0],
+            [-1.0, -1.0, -1.0, -1.0, 0.0],
+            [1.0, 0.0, -1.0, -2.0, -3.0],
+        ],
+        [
+            [0.0, 0.0, 0.0, 0.0, 0.0],
+            [0.0, 0.0, 0.0, 1.0, 0.0],
+            [-1.0, -1.0, -1.0, -1.0, 1.0],
+            [0.0, 1.0, 0.0, -1.0, -2.0],
+        ],
+        [
+            [-2.0, -2.0, -2.0, -2.0, -2.0],
+            [-2.0, -2.0, -2.0, -1.0, -2.0],
+            [1.0, 1.0, 1.0, 1.0, -1.0],
+            [-2.0, -1.0, -2.0, -3.0, -4.0],
+        ],
+    ],
+    [
+        [
+            [0.0, 0.0, 0.0, 0.0, 1.0],
+            [0.0, 0.0, 0.0, -1.0, -2.0],
+            [0.0, 0.0, 0.0, -1.0, -2.0],
+            [0.0, 0.0, 0.0, -1.0, 1.0],
+        ],
+        [
+            [0.0, 0.0, 0.0, 0.0, 0.0],
+            [0.0, 0.0, 0.0, -1.0, -2.0],
+            [0.0, 0.0, 0.0, -1.0, -2.0],
+            [0.0, 0.0, 0.0, -1.0, 0.0],
+        ],
+        [
+            [-1.0, -1.0, -1.0, -1.0, -1.0],
+            [-1.0, -1.0, -1.0, -1.0, 2.0],
+            [-1.0, -1.0, -1.0, -1.0, 2.0],
+            [-1.0, -1.0, -1.0, -1.0, 2.0],
+        ],
+    ],
+]
+
+_CONCRETE_T_Fratio = [
+    [
+        [
+            [1.0, 1.0, 1.0, 1.0, 1.0],
+            [1.0, 1.0, 0.0, 0.0, -1.0],
+            [-1.0, -1.0, -1.0, -1.0, 0.0],
+            [1.0, 0.0, -1.0, -2.0, -3.0],
+        ],
+        [
+            [0.0, 0.0, 0.0, 0.0, 0.0],
+            [0.0, 0.0, 1.0, 1.0, 0.0],
+            [-1.0, -1.0, -1.0, -1.0, 1.0],
+            [0.0, 1.0, 0.0, -1.0, -2.0],
+        ],
+        [
+            [-2.0, -2.0, -2.0, -2.0, -2.0],
+            [-2.0, -2.0, -1.0, -1.0, -2.0],
+            [1.0, 1.0, 1.0, 1.0, -1.0],
+            [-2.0, -1.0, -2.0, -3.0, -4.0],
+        ],
+    ],
+    [
+        [
+            [0.0, 0.0, 0.0, 0.0, 1.0],
+            [0.0, 0.0, 0.0, -1.0, -2.0],
+            [0.0, 0.0, 0.0, -1.0, -2.0],
+            [0.0, 0.0, -1.0, -1.0, 1.0],
+        ],
+        [
+            [0.0, 0.0, 0.0, 0.0, 0.0],
+            [0.0, 0.0, 0.0, -1.0, -2.0],
+            [0.0, 0.0, 0.0, -1.0, -2.0],
+            [0.0, 0.0, -1.0, -1.0, 0.0],
+        ],
+        [
+            [-1.0, -1.0, -1.0, -1.0, -1.0],
+            [-1.0, -1.0, -1.0, -1.0, 2.0],
+            [-1.0, -1.0, -1.0, -1.0, 2.0],
+            [-1.0, -1.0, -1.0, -1.0, 2.0],
+        ],
+    ],
+]
+
+_CONCRETE_lengths = [4, 1]
+
+
+class TestConcreteExampleTrajectory:
+    """
+    Exact inputs and expected outputs from
+    knowledge/summaries/trajectory-calculation-concrete-example.py.
+    Tests the same code path used in unlearning evaluation.
+    """
+
+    def test_concrete_example_trajectories_and_lengths(self):
+        """compute_trajectories and compute_eos_position_lengths match concrete example."""
+        R = torch.tensor(_CONCRETE_R, dtype=torch.float32)
+        F = torch.tensor(_CONCRETE_F, dtype=torch.long)
+        B, V, L, S = _CONCRETE_B, _CONCRETE_V, _CONCRETE_L, _CONCRETE_S
+        EOS_ID = _CONCRETE_EOS_ID
+
+        T_steps, T_fixation_start, T_fixation_end, T_fixation_ratio = compute_trajectories(
+            R, F, S
+        )
+        lengths = compute_eos_position_lengths(R, F, EOS_ID)
+
+        expected_T_steps = torch.tensor(_CONCRETE_T_steps, dtype=torch.float32)
+        expected_T_Fstart = torch.tensor(_CONCRETE_T_Fstart, dtype=torch.float32)
+        expected_T_Fend = torch.tensor(_CONCRETE_T_Fend, dtype=torch.float32)
+        expected_T_Fratio = torch.tensor(_CONCRETE_T_Fratio, dtype=torch.float32)
+        expected_lengths = torch.tensor(_CONCRETE_lengths, dtype=torch.long)
+
+        assert T_steps.shape == (B, V, L, S)
+        assert torch.allclose(T_steps, expected_T_steps), "T_steps mismatch"
+        assert torch.allclose(T_fixation_start, expected_T_Fstart), "T_fixation_start mismatch"
+        assert torch.allclose(T_fixation_end, expected_T_Fend), "T_fixation_end mismatch"
+        assert torch.allclose(T_fixation_ratio, expected_T_Fratio), "T_fixation_ratio mismatch"
+        assert lengths.shape == (B,)
+        assert torch.equal(lengths, expected_lengths), "lengths mismatch"
+
+    def test_prompt_invariance_same_r_f_same_outputs(self):
+        """Adding prompt tokens must not change trajectory or length outputs for same R, F."""
+        R = torch.tensor(_CONCRETE_R, dtype=torch.float32)
+        F = torch.tensor(_CONCRETE_F, dtype=torch.long)
+        B, V, L, S = _CONCRETE_B, _CONCRETE_V, _CONCRETE_L, _CONCRETE_S
+        EOS_ID = _CONCRETE_EOS_ID
+        P = 3
+
+        # Run A: no prompt. logits_history [B, L, V] per step, fixation_steps [B, L].
+        logits_history_a = [
+            R[:, :, :, s].permute(0, 2, 1) for s in range(S)
+        ]
+        fixation_steps_a = F.clone()
+        prompt_lens_a = [0, 0]
+
+        out_a = trajectories_from_logits(
+            logits_history_a, fixation_steps_a, prompt_lens_a, return_trajectory_tensors=False
+        )
+        R_a, F_a = out_a["R"], out_a["F"]
+        T_steps_a, T_fs_a, T_fe_a, T_fr_a = compute_trajectories(R_a, F_a, S)
+        lengths_a = compute_eos_position_lengths(R_a, F_a, EOS_ID)
+
+        # Run B: with prompt. Full-sequence logits [B, P+L, V], fixation [B, P+L]; generated region = last L.
+        logits_history_b = []
+        for s in range(S):
+            full = torch.zeros(B, P + L, V, dtype=torch.float32)
+            full[:, P : P + L, :] = R[:, :, :, s].permute(0, 2, 1)
+            logits_history_b.append(full)
+        fixation_steps_b = torch.zeros(B, P + L, dtype=torch.long)
+        fixation_steps_b[:, P : P + L] = F
+        prompt_lens_b = [P, P]
+
+        out_b = trajectories_from_logits(
+            logits_history_b, fixation_steps_b, prompt_lens_b, return_trajectory_tensors=False
+        )
+        R_b, F_b = out_b["R"], out_b["F"]
+        T_steps_b, T_fs_b, T_fe_b, T_fr_b = compute_trajectories(R_b, F_b, S)
+        lengths_b = compute_eos_position_lengths(R_b, F_b, EOS_ID)
+
+        assert torch.allclose(R_a, R_b), "R differs with prompt"
+        assert torch.equal(F_a, F_b), "F differs with prompt"
+        assert torch.allclose(T_steps_a, T_steps_b), "steps differ with prompt"
+        assert torch.allclose(T_fs_a, T_fs_b), "fixation_start differ with prompt"
+        assert torch.allclose(T_fe_a, T_fe_b), "fixation_end differ with prompt"
+        assert torch.allclose(T_fr_a, T_fr_b), "fixation_ratio differ with prompt"
+        assert torch.equal(lengths_a, lengths_b), "lengths differ with prompt"
+
+
 class TestTrajectoryCalculationFullExample:
     """
     Full example: R, F -> trajectories and *_lengths (EOS position).
