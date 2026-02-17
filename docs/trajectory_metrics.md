@@ -393,6 +393,16 @@ Samplers (MDLMSampler, BD3LMSampler) are modified to:
    )
    ```
 
+### Prompt extraction and data formats
+
+Trajectory metrics support two data conventions so TOFU, MUSE, and WMDP work without dataset-specific logic:
+
+1. **Labels mark prompt:** `labels` use `IGNORE_INDEX` (-100) for the prompt prefix. The prompt is taken as `input_ids[:, :prompt_end]` where `prompt_end` is the first index where `labels != IGNORE_INDEX` (or the full sequence length if all labels are IGNORE). This is the typical training-style setup (e.g. WMDP with `PretrainingDataset`).
+
+2. **Prompt-only input_ids:** With `predict_with_generate=True` (e.g. TOFU and MUSE), preprocessing may produce `input_ids` that contain only the prompt and `labels` that are the full conversation token ids with no IGNORE positions. In that case `prompt_end` from labels would be 0. The code uses a fallback: when `prompt_end == 0` and the tokenizer has a `pad_token_id`, the prompt is taken as the **non-pad tokens** of `input_ids` (in order). That yields the correct prompt for the sampler without dataset-specific branches.
+
+Both the main batch loop and the privleak holdout batch use the same logic (via `_build_prompts_for_sampler`).
+
 ### Generated Portion Extraction
 
 **Critical Implementation Detail**: The sampler returns logits for the **full sequence** (prompt + generated), but trajectory metrics need only the **generated portion**.

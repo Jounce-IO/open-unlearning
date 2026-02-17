@@ -26,6 +26,7 @@ def preprocess_chat_instance(
     When in training, both the returned `input_ids` and `labels` cover the entire conversation.
     `input_ids` has no padding, and `labels` assign `IGNORE_INDEX` to tokens where loss is not computed (i.e. all tokens except the final response message).
     When in generation, `input_ids` are returned only up to the last user prompt, excluding the assistant's response. The `labels` returned are the same as during training.
+    When `predict_with_generate` is True, consumers (e.g. trajectory evals) should treat `input_ids` as prompt-only and use the full non-pad sequence as the prompt when labels do not use IGNORE_INDEX.
     `attention_mask` is always 1 over the full `input_ids` token sequence.
 
     `prompt_msgs` and `response_msgs` are lists where, except for the last pair, all

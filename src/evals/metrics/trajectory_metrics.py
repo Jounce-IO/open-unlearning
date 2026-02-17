@@ -69,6 +69,48 @@ def _trajectory_sampler_kwargs(trajectory_config: Union[Dict, DictConfig]) -> di
     return kwargs
 
 
+def _build_prompts_for_sampler(
+    input_ids: torch.Tensor,
+    labels: Optional[torch.Tensor],
+    tokenizer: Any,
+    ignore_index: int = IGNORE_INDEX,
+) -> tuple[list[list[int]], list[int]]:
+    """Build prompt token lists and lengths for sampler.sample(inputs=...).
+
+    Supports two data conventions:
+    - Labels use ignore_index for the prompt: prompt = input_ids[:, :prompt_end] with
+      prompt_end = first index where labels != ignore_index.
+    - Prompt-only input_ids (e.g. predict_with_generate): when prompt_end would be 0,
+      use the non-pad tokens of input_ids as the prompt so TOFU/MUSE work correctly.
+    """
+    B = input_ids.shape[0]
+    prompts: list[list[int]] = []
+    prompt_lens: list[int] = []
+    _pad = getattr(tokenizer, "pad_token_id", None) if tokenizer else None
+    pad_token_id = _pad if isinstance(_pad, (int, float)) else None
+    for i in range(B):
+        if labels is not None:
+            label_mask = labels[i] != ignore_index
+            if label_mask.any():
+                prompt_end = label_mask.nonzero()[0][0].item()
+            else:
+                prompt_end = input_ids.shape[1]
+        else:
+            prompt_end = input_ids.shape[1]
+        if prompt_end == 0 and pad_token_id is not None:
+            non_pad = (input_ids[i] != pad_token_id).view(-1)
+            prompt_len_from_input = non_pad.sum().item()
+            if prompt_len_from_input > 0:
+                prompt = input_ids[i][non_pad].cpu().tolist()
+                prompts.append(prompt)
+                prompt_lens.append(len(prompt))
+                continue
+        prompt = input_ids[i, :prompt_end].cpu().tolist()
+        prompts.append(prompt)
+        prompt_lens.append(len(prompt))
+    return prompts, prompt_lens
+
+
 def should_run_gc(threshold: float = 0.9) -> bool:
     """Return True if CUDA is available and VRAM usage (allocated/total) is >= threshold."""
     if not torch.cuda.is_available():
@@ -1148,27 +1190,12 @@ def trajectory_metrics(model, **kwargs):
                 attention_mask = batch.get("attention_mask")
                 indices = batch.get("index", torch.arange(batch_idx * batch_size, 
                                                           (batch_idx + 1) * batch_size))
-        
                 B = input_ids.shape[0]
         
                 # Prepare inputs for sampler (list of token sequences)
-                prompts = []
-                prompt_lens = []
-                for i in range(B):
-                    # Extract prompt (non-ignored tokens)
-                    if labels is not None:
-                        # Find where labels start (first non-IGNORE_INDEX)
-                        label_mask = labels[i] != IGNORE_INDEX
-                        if label_mask.any():
-                            prompt_end = label_mask.nonzero()[0][0].item()
-                        else:
-                            prompt_end = input_ids.shape[1]
-                    else:
-                        prompt_end = input_ids.shape[1]
-            
-                    prompt = input_ids[i, :prompt_end].cpu().tolist()
-                    prompts.append(prompt)
-                    prompt_lens.append(len(prompt))
+                prompts, prompt_lens = _build_prompts_for_sampler(
+                    input_ids, labels, tokenizer, IGNORE_INDEX
+                )
         
                 # Generate using sampler with logits tracking
                 _sampler_kw = _trajectory_sampler_kwargs(trajectory_config)
@@ -1611,21 +1638,9 @@ def trajectory_metrics(model, **kwargs):
                             (h_batch_idx + 1) * h_input_ids.shape[0],
                         ),
                     )
-                    h_B = h_input_ids.shape[0]
-                    h_prompts = []
-                    h_prompt_lens = []
-                    for i in range(h_B):
-                        if h_labels is not None:
-                            label_mask = h_labels[i] != IGNORE_INDEX
-                            prompt_end = (
-                                label_mask.nonzero()[0][0].item()
-                                if label_mask.any()
-                                else h_input_ids.shape[1]
-                            )
-                        else:
-                            prompt_end = h_input_ids.shape[1]
-                        h_prompts.append(h_input_ids[i, :prompt_end].cpu().tolist())
-                        h_prompt_lens.append(len(h_prompts[-1]))
+                    h_prompts, h_prompt_lens = _build_prompts_for_sampler(
+                        h_input_ids, h_labels, tokenizer, IGNORE_INDEX
+                    )
                     h_sampler_output = sampler.sample(
                         inputs=h_prompts,
                         config=None,
