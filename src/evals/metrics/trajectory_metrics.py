@@ -1138,6 +1138,8 @@ def trajectory_metrics(model, **kwargs):
                 f"expected batches: {expected_batches} (last batch index: {expected_batches - 1})"
             )
             all_rouge_futures: list = []
+            effective_length_by_index: dict[str, int] = {}
+            prompt_len_by_index: dict[str, int] = {}
         # Process each batch
             for batch_idx, batch in enumerate(dataloader):
                 gpu_set_phase("trajectory_batch_start", batch_idx=batch_idx)
@@ -1322,6 +1324,27 @@ def trajectory_metrics(model, **kwargs):
 
                     # Compute metrics for each trajectory type and step (only report steps)
                     L_eff_b = effective_lengths[sample_idx]
+                    effective_length_by_index[idx_str] = L_eff_b
+                    prompt_len_by_index[idx_str] = sample_prompt_len
+                    # Log prompt + model response (test/debug; will be removed)
+                    if sequences is not None and tokenizer is not None:
+                        pl = prompt_lens[sample_idx]
+                        seq = sequences[sample_idx]
+                        prompt_tokens = seq[:pl].tolist()
+                        response_tokens = seq[pl : pl + L].tolist()
+                        full_text = tokenizer.decode(seq.tolist(), skip_special_tokens=True)
+                        prompt_text = tokenizer.decode(prompt_tokens, skip_special_tokens=True)
+                        response_text = tokenizer.decode(response_tokens, skip_special_tokens=True)
+                        _max_prompt, _max_resp = 400, 600
+                        logger.info(
+                            "[trajectory_response] sample_index=%s L_eff=%s prompt_len=%s | prompt=%s | response=%s | full=%s",
+                            idx_str,
+                            L_eff_b,
+                            pl,
+                            prompt_text[:_max_prompt] + ("..." if len(prompt_text) > _max_prompt else ""),
+                            response_text[:_max_resp] + ("..." if len(response_text) > _max_resp else ""),
+                            full_text[: _max_prompt + _max_resp] + ("..." if len(full_text) > _max_prompt + _max_resp else ""),
+                        )
                     for traj_name in trajectory_names:
                         for view in include_views:
                             for step in steps_to_use:
@@ -1890,6 +1913,10 @@ def trajectory_metrics(model, **kwargs):
         }
         if step_values is not None:
             trajectory_step_metadata["step_values"] = step_values
+        if effective_length_by_index:
+            trajectory_step_metadata["effective_length_by_index"] = effective_length_by_index
+        if prompt_len_by_index:
+            trajectory_step_metadata["prompt_len_by_index"] = prompt_len_by_index
 
         # Single-pass: return one result per display name so evaluator merges into logs.
         internal_names = list(loaded_metrics.keys())
