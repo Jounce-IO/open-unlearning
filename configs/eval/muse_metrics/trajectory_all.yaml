@@ -56,6 +56,8 @@ trajectory_config:
   logits_source: sampler
   return_logits: true
   return_fixation_steps: true
+  # full = all positions 0..L (leakage); eos = positions 0..L_eff-1 only (real response). Default both.
+  include_views: [full, eos]
   sampler_kwargs:
     steps: 32  # ceil(128/4)
     temperature: 0.0

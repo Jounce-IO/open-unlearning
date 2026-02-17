@@ -28,6 +28,7 @@ from evals.metrics.trajectory_utils import (
     compute_fixation_end_trajectory,
     compute_fixation_ratio_trajectory,
     trajectories_from_logits,
+    effective_lengths_from_eos,
     extract_logits_at_step,
     decode_logits_to_text,
 )
@@ -1048,6 +1049,76 @@ class TestTrajectoriesFromLogitsGeneratedOnly:
         assert out["S"] == S
         for key in ("steps", "fixation_start", "fixation_end", "fixation_ratio"):
             assert key not in out
+
+
+class TestEffectiveLengthsFromEos:
+    """Tests for effective_lengths_from_eos function."""
+
+    def test_no_eos_returns_full_length(self):
+        """When no EOS in generated region, L_eff = L for all samples."""
+        B, L, pl = 2, 8, 3
+        sequences = torch.randint(0, 100, (B, pl + L))
+        prompt_lens = [pl] * B
+        eos_id = 999
+        out = effective_lengths_from_eos(sequences, prompt_lens, L, eos_id)
+        assert out == [L, L]
+
+    def test_eos_at_position_zero(self):
+        """EOS at first generated position -> L_eff = 1."""
+        B, L, pl = 1, 8, 2
+        sequences = torch.zeros(1, pl + L, dtype=torch.long)
+        sequences[0, pl] = 1  # EOS at first gen position
+        prompt_lens = [pl]
+        out = effective_lengths_from_eos(sequences, prompt_lens, L, 1)
+        assert out == [1]
+
+    def test_eos_at_position_one(self):
+        """EOS at second generated position -> L_eff = 2."""
+        B, L, pl = 1, 8, 2
+        sequences = torch.zeros(1, pl + L, dtype=torch.long)
+        sequences[0, pl + 1] = 2
+        prompt_lens = [pl]
+        out = effective_lengths_from_eos(sequences, prompt_lens, L, 2)
+        assert out == [2]
+
+    def test_eos_at_last_position(self):
+        """EOS at last generated position -> L_eff = L."""
+        B, L, pl = 1, 8, 2
+        sequences = torch.zeros(1, pl + L, dtype=torch.long)
+        sequences[0, pl + L - 1] = 3
+        prompt_lens = [pl]
+        out = effective_lengths_from_eos(sequences, prompt_lens, L, 3)
+        assert out == [L]
+
+    def test_multiple_samples_different_l_eff(self):
+        """Batch with different L_eff per sample."""
+        B, L, pl = 4, 8, 2
+        sequences = torch.zeros(B, pl + L, dtype=torch.long)
+        eos_id = 10
+        sequences[0, pl + 4] = eos_id       # sample 0: EOS at idx 4 -> L_eff=5
+        sequences[1, pl + 2] = eos_id       # sample 1: L_eff=3
+        sequences[2, :] = 1                 # sample 2: no EOS -> L_eff=8
+        sequences[3, pl + 6] = eos_id       # sample 3: L_eff=7
+        prompt_lens = [pl] * B
+        out = effective_lengths_from_eos(sequences, prompt_lens, L, eos_id)
+        assert out == [5, 3, 8, 7]
+
+    def test_eos_token_id_none_returns_full_length(self):
+        """When eos_token_id is None, return [L]*B."""
+        B, L, pl = 3, 6, 1
+        sequences = torch.randint(0, 100, (B, pl + L))
+        prompt_lens = [pl] * B
+        out = effective_lengths_from_eos(sequences, prompt_lens, L, None)
+        assert out == [L, L, L]
+
+    def test_prompt_lens_tensor_accepted(self):
+        """prompt_lens can be a tensor."""
+        B, L, pl = 1, 5, 4
+        sequences = torch.zeros(1, pl + L, dtype=torch.long)
+        sequences[0, pl + 2] = 7
+        prompt_lens = torch.tensor([pl])
+        out = effective_lengths_from_eos(sequences, prompt_lens, L, 7)
+        assert out == [3]
 
 
 class TestExtractLogitsAtStep:
