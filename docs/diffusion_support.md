@@ -53,12 +53,13 @@ model:
     cache_fixation_logits: true  # Cache logits for reuse
 ```
 
-### Example Config
+### Example Configs
+
+**LLaDA** (`configs/model/LLaDA-8B-Instruct.yaml`):
 
 ```yaml
-# configs/model/diffusion_llada.yaml
 model:
-  model_handler: "AutoModelForCausalLM"  # or your custom handler
+  model_handler: "AutoModelForCausalLM"
   model_args:
     pretrained_model_name_or_path: "path/to/llada"
     torch_dtype: "bfloat16"
@@ -70,6 +71,12 @@ model:
     temperature: 0.0
     remasking: "low_confidence"
     max_new_tokens: 128
+```
+
+**Dream** (`configs/model/Dream-Instruct-7B.yaml`): Use a model path containing `dream` (e.g. `Dream-org/Dream-v0-Instruct-7B`). The adapter uses the Dream sampler and trajectory capture; same trajectory metrics as LLaDA.
+
+```bash
+dllm eval dream-tofu-forget10 Dream-org/Dream-v0-Instruct-7B tofu --samples 2
 ```
 
 ## Current Limitations
