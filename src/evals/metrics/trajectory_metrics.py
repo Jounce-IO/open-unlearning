@@ -1353,24 +1353,33 @@ def trajectory_metrics(model, **kwargs):
                     L_eff_b = effective_lengths[sample_idx]
                     effective_length_by_index[idx_str] = L_eff_b
                     prompt_len_by_index[idx_str] = sample_prompt_len
-                    # Log prompt + model response (test/debug; will be removed)
+                    # Log prompt + EOS response vs full response (clear, labeled block per sample)
                     if sequences is not None and tokenizer is not None:
                         pl = prompt_lens[sample_idx]
                         seq = sequences[sample_idx]
-                        prompt_tokens = seq[:pl].tolist()
-                        response_tokens = seq[pl : pl + L].tolist()
-                        full_text = tokenizer.decode(seq.tolist(), skip_special_tokens=True)
-                        prompt_text = tokenizer.decode(prompt_tokens, skip_special_tokens=True)
-                        response_text = tokenizer.decode(response_tokens, skip_special_tokens=True)
+                        prompt_text = tokenizer.decode(seq[:pl].tolist(), skip_special_tokens=True)
+                        response_eos_text = tokenizer.decode(
+                            seq[pl : pl + L_eff_b].tolist(), skip_special_tokens=True
+                        )
+                        response_full_text = tokenizer.decode(
+                            seq[pl : pl + L].tolist(), skip_special_tokens=True
+                        )
                         _max_prompt, _max_resp = 400, 600
+                        _trunc = lambda s, n: s[:n] + ("..." if len(s) > n else "")
                         logger.info(
-                            "[trajectory_response] sample_index=%s L_eff=%s prompt_len=%s | prompt=%s | response=%s | full=%s",
+                            "[trajectory_response] sample_index=%s\n"
+                            "  Prompt length: %s\n"
+                            "  EOS index (L_eff): %s (generated length up to/incl first EOS)\n"
+                            "  Prompt: %s\n"
+                            "  Response up to EOS: %s\n"
+                            "  Full response: %s\n"
+                            "---",
                             idx_str,
-                            L_eff_b,
                             pl,
-                            prompt_text[:_max_prompt] + ("..." if len(prompt_text) > _max_prompt else ""),
-                            response_text[:_max_resp] + ("..." if len(response_text) > _max_resp else ""),
-                            full_text[: _max_prompt + _max_resp] + ("..." if len(full_text) > _max_prompt + _max_resp else ""),
+                            L_eff_b,
+                            _trunc(prompt_text, _max_prompt),
+                            _trunc(response_eos_text, _max_resp),
+                            _trunc(response_full_text, _max_resp),
                         )
                     for traj_name in trajectory_names:
                         for view in include_views:
