@@ -1,3 +1,4 @@
+import gc
 import os
 import sys
 from typing import Dict, List, Optional
@@ -114,6 +115,7 @@ def run_batchwise_evals(model, dataloader, batch_eval_fn, batch_eval_fn_args, ev
         # Free GPU cache between batches to avoid OOM with large models (e.g. 8B diffusion)
         if torch.cuda.is_available():
             torch.cuda.empty_cache()
+            gc.collect()
     # evals looks like {iidx0: {idx453: {prob: 0.1, loss: 1}},
     #                   iidx1: {idx453: {prob: 0.2, loss: 2}}}
     if len(evals) == 1:  # normal single answer dataset, no need for list
@@ -145,6 +147,8 @@ def evaluate_probability(model, batch):
     # Single GPU→CPU transfer per tensor; no GPU-side cache
     avg_losses_list = _tensor_to_list_of_floats(avg_losses)
     normalized_probs_list = _tensor_to_list_of_floats(normalized_probs)
+    # Drop references to free GPU memory before next batch
+    del logits, shifted_labels, losses, avg_losses, normalized_probs
     return [
         {"prob": prob, "avg_loss": avg_loss}
         for prob, avg_loss in zip(normalized_probs_list, avg_losses_list)
