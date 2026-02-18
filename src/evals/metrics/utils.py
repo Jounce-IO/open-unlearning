@@ -111,6 +111,9 @@ def run_batchwise_evals(model, dataloader, batch_eval_fn, batch_eval_fn_args, ev
                 evals[intra_item_idx].keys() & indexwise_batch_evals.keys()
             ), "Data indices repeated while iterating dataloader"
             evals[intra_item_idx] |= indexwise_batch_evals
+        # Free GPU cache between batches to avoid OOM with large models (e.g. 8B diffusion)
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache()
     # evals looks like {iidx0: {idx453: {prob: 0.1, loss: 1}},
     #                   iidx1: {idx453: {prob: 0.2, loss: 2}}}
     if len(evals) == 1:  # normal single answer dataset, no need for list
