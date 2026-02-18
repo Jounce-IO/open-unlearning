@@ -118,6 +118,12 @@ The dllm CLI passes `experiment=unlearn/tofu/diffusion` and the resolved model p
 
 OpenUnlearning's `train.py` accepts a top-level config key **`resume_from_checkpoint`** (e.g. set via Hydra override `+resume_from_checkpoint=/path/to/checkpoint-500`). When set, it calls `trainer.train(resume_from_checkpoint=path)` instead of `trainer.train()`. The dllm CLI discovers the latest checkpoint (or uses `--resume-from`), downloads it from GCS if needed, and passes the path into the config.
 
+### Evaluation during training (eval_strategy and _DummyEvalDataset)
+
+By default, GradAscent (and other unlearn trainers) inherit **eval_strategy=epoch** and **do_eval=True** from the finetune config, while **data/unlearn.yaml** has **datasets@eval: null**, so `get_data()` never returns an eval dataset. In the **original** locuslab open-unlearning repo they use **transformers==4.45.1**, where `Trainer.__init__` does not require an eval_dataset when eval_strategy is set; at the end of each epoch `FinetuneTrainer.evaluate()` runs the **custom evaluators** (TOFU/MUSE metrics) and returns without ever using an eval dataset. In **transformers >= 4.57** (used by the dllm repo), `Trainer.__init__` raises if eval_strategy is not `"no"` and eval_dataset is None, so the Trainer would never be created.
+
+To keep the **same behaviour** as open-unlearning (real per-epoch evaluation via custom evaluators) when using transformers 4.57+, we pass a **dummy eval dataset** in `load_trainer()` whenever eval_dataset is None and eval_strategy is not `"no"`. The dummy is defined in **`trainer/base.py`** as **`_DummyEvalDataset`**: a minimal placeholder (length 0) that satisfies the init check. It is **never used** for any forward pass or metric: `FinetuneTrainer.evaluate()` always runs the custom evaluators first and returns, so the real evaluation (TOFU/MUSE metrics every epoch) is unchanged. See the docstring on `_DummyEvalDataset` in `src/trainer/base.py` for the full explanation.
+
 ## Current Limitations
 
 ### 1. Fixation Logits

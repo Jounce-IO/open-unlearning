@@ -12,6 +12,39 @@ from typing import Any
 logger = logging.getLogger(__name__)
 
 
+class _DummyEvalDataset(Dataset):
+    """
+    Minimal placeholder dataset used only to satisfy Trainer.__init__ when
+    eval_strategy is not "no" but no eval_dataset is provided (e.g. data/unlearn
+    has datasets@eval: null).
+
+    Why this exists:
+    - Open-unlearning defaults: GradAscent inherits finetune config with
+      eval_strategy=epoch and do_eval=True, while data/unlearn.yaml has
+      datasets@eval: null, so get_data() never returns an "eval" key and
+      eval_dataset is always None.
+    - In the original locuslab repo (transformers==4.45.1), Trainer.__init__
+      does not check for eval_dataset when eval_strategy != "no", so the
+      Trainer is created and at the end of each epoch FinetuneTrainer.evaluate()
+      runs the custom evaluators (TOFU/MUSE metrics) and returns without ever
+      needing an eval_dataset.
+    - In transformers >= 4.57 (used by the dllm repo), Trainer.__init__ raises
+      ValueError if eval_strategy is not "no" and eval_dataset is None. So we
+      would fail at Trainer creation and never run the real evaluators.
+    - This dummy is passed only to satisfy that init check. FinetuneTrainer.evaluate()
+      always runs the custom evaluators first and returns; it never calls
+      get_eval_dataloader() or super().evaluate() when evaluators are set, so
+      this dataset is never used for any forward pass or metric. Evaluation
+      remains the real TOFU/MUSE evaluators every epoch, matching open-unlearning.
+    """
+
+    def __len__(self) -> int:
+        return 0
+
+    def __getitem__(self, index: int):
+        raise IndexError(index)
+
+
 class FinetuneTrainer(Trainer):
     def __init__(self, evaluators=None, template_args=None, *args, **kwargs):
         self.evaluators = evaluators

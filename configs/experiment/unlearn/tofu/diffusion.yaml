@@ -46,6 +46,8 @@ data:
       args:
         hf_args:
           name: ${retain_split}
+  # No data.eval (matches data/unlearn.yaml: datasets@eval: null). Per-epoch eval still
+  # runs via custom evaluators (TOFU metrics); see trainer/base.py _DummyEvalDataset.
 
 trainer:
   args:
@@ -56,5 +58,6 @@ trainer:
     save_strategy: "steps"
     save_steps: 100
     save_total_limit: 3
+    # eval_strategy: epoch from finetune default; no eval_dataset needed (dummy used for 4.57+).
 
 task_name: ???
