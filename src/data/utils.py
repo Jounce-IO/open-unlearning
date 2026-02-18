@@ -1,3 +1,4 @@
+import time
 import torch
 import datasets
 import numpy as np
@@ -8,10 +9,27 @@ IGNORE_INDEX = -100  # TODO put in common constants
 
 logger = logging.getLogger("data")
 
+# Retry on HF rate limit (429) or transient errors
+HF_LOAD_RETRIES = 3
+HF_LOAD_BACKOFF = 60  # seconds
+
 
 def load_hf_dataset(path, **kwargs):
-    dataset = datasets.load_dataset(path, **kwargs)
-    return dataset
+    last_err = None
+    for attempt in range(HF_LOAD_RETRIES):
+        try:
+            return datasets.load_dataset(path, **kwargs)
+        except Exception as e:
+            last_err = e
+            err_str = str(e).lower()
+            if "429" in err_str or "too many requests" in err_str or "rate limit" in err_str:
+                if attempt < HF_LOAD_RETRIES - 1:
+                    wait = HF_LOAD_BACKOFF * (attempt + 1)
+                    logger.warning("HF rate limit (429), retry in %ds (attempt %d/%d)", wait, attempt + 1, HF_LOAD_RETRIES)
+                    time.sleep(wait)
+                    continue
+            raise
+    raise last_err
 
 
 def preprocess_chat_instance(
