@@ -57,7 +57,10 @@ def main(cfg: DictConfig):
     )
 
     if trainer_args.do_train:
-        trainer.train()
+        resume_from_checkpoint = cfg.get("resume_from_checkpoint", None)
+        if resume_from_checkpoint:
+            print(f"Resuming training from checkpoint: {resume_from_checkpoint}", flush=True)
+        trainer.train(resume_from_checkpoint=resume_from_checkpoint)
         trainer.save_state()
         trainer.save_model(trainer_args.output_dir)
 

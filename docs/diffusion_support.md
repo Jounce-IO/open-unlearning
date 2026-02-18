@@ -79,6 +79,45 @@ model:
 dllm eval dream-tofu-forget10 Dream-org/Dream-v0-Instruct-7B tofu --samples 2
 ```
 
+## Training mode and unlearning
+
+The adapter supports **training mode** for adapter-based unlearning (GradAscent, GradDiff, WGA). When `diffusion_adapter.training: true` is set in the model config, the adapter's `__call__` performs an MDLM-style forward (single random t per batch, stochastic masking, NLL on masked positions) and returns an output with `.loss` and `.logits` so OpenUnlearning's trainers work unchanged.
+
+### Unlearn CLI (dllm repo)
+
+From the main **dllm** repo, run:
+
+```bash
+dllm unlearn <task_name> [--benchmark tofu] [--model PATH] [--method GradAscent|GradDiff|WGA] [--output-dir DIR] ...
+```
+
+- **Model:** Local path, HuggingFace ID, or **gs://** (downloaded before training).
+- **Output dir:** Local path or **gs://**. When gs://, checkpoints and final model are written locally then uploaded to GCS; a background watcher uploads new checkpoints periodically so runs can resume after spot preemption.
+- **Checkpoint and resume:** Use `--save-steps` and `--save-total-limit` to control checkpointing. If `output_dir` already contains `checkpoint-*` directories, the next run **auto-resumes** from the latest unless you pass `--no-resume`. Use `--resume-from <path>` to resume from a specific checkpoint (gs:// or local).
+- **W&B:** When `WANDB_API_KEY` is set, the run logs to Weights & Biases.
+
+See `dllm unlearn --help` for all flags. When running in K8s with `results.capture=true` and `results.createPr=true`, the job creates a PR that includes the unlearn report (config, model save path, W&B run URL).
+
+### Experiment config
+
+Use the diffusion unlearn experiment so the model is wrapped with training enabled:
+
+```yaml
+# experiment=unlearn/tofu/diffusion (model override + diffusion_adapter)
+model:
+  diffusion_adapter:
+    training: true
+    time_epsilon: 0.001
+    loss_weight_type: "scheduler"
+    loss_normalization_type: "sequence"
+```
+
+The dllm CLI passes `experiment=unlearn/tofu/diffusion` and the resolved model path when you run `dllm unlearn`.
+
+### Resume from checkpoint (train.py)
+
+OpenUnlearning's `train.py` accepts a top-level config key **`resume_from_checkpoint`** (e.g. set via Hydra override `+resume_from_checkpoint=/path/to/checkpoint-500`). When set, it calls `trainer.train(resume_from_checkpoint=path)` instead of `trainer.train()`. The dllm CLI discovers the latest checkpoint (or uses `--resume-from`), downloads it from GCS if needed, and passes the path into the config.
+
 ## Current Limitations
 
 ### 1. Fixation Logits
