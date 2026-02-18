@@ -33,6 +33,8 @@ eval:
     retain_logs_path: ${retain_logs_path}
     overwrite: true
     question_key: ${question_key}
+    # Small batch size for eval to avoid OOM with 8B diffusion model on 40GB GPU
+    batch_size: 1
 
 data:
   anchor: forget
