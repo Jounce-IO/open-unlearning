@@ -89,6 +89,9 @@ trajectory_config:
   return_fixation_steps: true
   # full = all positions 0..L (leakage); eos = positions 0..L_eff-1 only (real response). Default both.
   include_views: [full, eos]
+  # Generalized metrics (dLLM-compatible): step-wise scores at fixation; causal = Dream/AR.
+  use_generalized_sequence_probability: false
+  logit_alignment: causal
   # CPU worker pool for ROUGE (0 = synchronous). Set via override to enable (e.g. 4).
   metric_worker_pool_size: 0
   sampler_kwargs:

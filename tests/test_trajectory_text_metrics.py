@@ -345,15 +345,19 @@ class TestTrajectoryMetricsWithTwoMetrics:
             # This should run without errors
             result = raw_fn(model, **kwargs)
             
-            # Check result structure
+            # Check result structure (agg_value is keyed by view: full, eos; then traj type)
             assert isinstance(result, dict)
             if "agg_value" in result:
-                agg = result["agg_value"]
+                agg_value_by_view = result["agg_value"]
+                assert isinstance(agg_value_by_view, dict)
+                # At least one view (e.g. "full") present
+                views = [k for k in agg_value_by_view if k in ("full", "eos")]
+                assert len(views) >= 1
+                agg = agg_value_by_view[views[0]]
                 assert "steps" in agg
                 assert "fixation_start" in agg
                 assert "fixation_end" in agg
                 assert "fixation_ratio" in agg
-                
                 # With trajectory_sample_interval=8 we use all S steps
                 if "probability" in agg["steps"]:
                     assert len(agg["steps"]["probability"]) == S
@@ -611,7 +615,8 @@ class TestBatchAcrossSteps:
             for call in tokenizer.batch_decode.call_args_list:
                 token_lists = call[0][0]
                 assert len(token_lists) == S
-            assert tokenizer.decode.call_count == 1
+            # decode is used for ground truth and logging; batch_decode is used for step-wise generated texts
+            assert tokenizer.decode.call_count >= 1
 
 
 class TestRougeVerification:

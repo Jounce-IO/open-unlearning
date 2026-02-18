@@ -831,6 +831,87 @@ class TestTrajectoryMetricsIntegration:
             assert "Expected target size" not in str(e)
             assert "shape" not in str(e).lower() or "mismatch" not in str(e).lower()
 
+    def test_trajectory_metrics_generalized_config_produces_valid_metrics(self):
+        """With use_generalized_sequence_probability true, probability and extraction_strength return values in [0,1]."""
+        import numpy as np
+        V, L_gen, S = 100, 10, 8
+        prompt_len = 5
+        full_len = prompt_len + L_gen
+        logits_history = [torch.randn(1, full_len, V) for _ in range(S)]
+        fixation_steps = torch.randint(0, S, (1, full_len))
+
+        class MockSamplerOutput:
+            def __init__(self, sequences, logits_history, fixation_steps):
+                self.sequences = sequences
+                self.histories = None
+                self.logits_history = logits_history
+                self.fixation_steps = fixation_steps
+
+        sampler = Mock()
+        sampler.sample.return_value = MockSamplerOutput(
+            sequences=torch.randint(0, V, (1, full_len)),
+            logits_history=logits_history,
+            fixation_steps=fixation_steps,
+        )
+        model = Mock()
+        model.sampler = sampler
+
+        class MockDataset:
+            def __init__(self):
+                self.data = [
+                    {"input_ids": torch.randint(0, V, (full_len,)), "labels": torch.randint(0, V, (full_len,))}
+                    for _ in range(2)
+                ]
+            def __len__(self):
+                return len(self.data)
+            def __getitem__(self, idx):
+                return self.data[idx]
+
+        def mock_collator(batch):
+            return {
+                "input_ids": torch.stack([b["input_ids"] for b in batch]),
+                "labels": torch.stack([b["labels"] for b in batch]),
+                "indices": torch.tensor([0, 1]),
+            }
+
+        tokenizer = Mock()
+        tokenizer.decode = lambda x, **kwargs: "decoded"
+        tokenizer.eos_token_id = 0
+
+        raw_fn = trajectory_metrics._metric_fn if hasattr(trajectory_metrics, "_metric_fn") else trajectory_metrics
+        result = raw_fn(
+            model,
+            metric_name="trajectory_metrics",
+            cache={},
+            metrics=["probability", "extraction_strength"],
+            data=MockDataset(),
+            collators=mock_collator,
+            tokenizer=tokenizer,
+            batch_size=1,
+            trajectory_config={
+                "return_logits": True,
+                "return_fixation_steps": True,
+                "use_generalized_sequence_probability": True,
+                "logit_alignment": "causal",
+                "sampler_kwargs": {"steps": S, "max_new_tokens": L_gen, "trajectory_sample_interval": 8},
+            },
+        )
+        assert isinstance(result, dict)
+        agg = result.get("agg_value")
+        assert agg is not None
+        for view_name, view_data in agg.items():
+            if not isinstance(view_data, dict):
+                continue
+            for traj_name, traj_data in view_data.items():
+                if not isinstance(traj_data, dict):
+                    continue
+                for metric_name in ("probability", "extraction_strength"):
+                    if metric_name in traj_data:
+                        arr = np.asarray(traj_data[metric_name], dtype=float)
+                        finite = arr[np.isfinite(arr)]
+                        assert len(finite) >= 1, f"{view_name}/{traj_name}/{metric_name} has no finite values"
+                        assert np.all((finite >= 0) & (finite <= 1)), f"{view_name}/{traj_name}/{metric_name} not in [0,1]"
+
     def test_trajectory_metrics_sets_use_fixation_logits_on_adapter(self):
         """When model has adapter_config, trajectory_metrics sets use_fixation_logits from trajectory_config (default True)."""
         # Test the contract: the same logic trajectory_metrics uses to set the flag

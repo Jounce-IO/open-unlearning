@@ -12,24 +12,52 @@ from evals.metrics.utils import (
     tokenwise_vocab_logprobs,
 )
 from evals.metrics.base import unlearning_metric
+from evals.metrics.step_wise_score import (
+    ARStepWiseScoreProvider,
+    evaluate_probability_via_provider,
+)
 
 # Supress the info messages logged while calculating rouge using rouge_scorer
 logging.getLogger("absl").setLevel(logging.WARNING)
 logger = logging.getLogger("evaluator")
 
 
+def _probability_batch_fn_ar_provider(model, batch, **fn_args):
+    """Batch eval fn that uses ARStepWiseScoreProvider (same output format as evaluate_probability)."""
+    provider = fn_args.get("step_wise_score_provider_instance")
+    if provider is None:
+        return evaluate_probability(model, batch)
+    kwargs_provider = {
+        k: v for k, v in fn_args.items() if k != "step_wise_score_provider_instance"
+    }
+    return evaluate_probability_via_provider(provider, model, batch, **kwargs_provider)
+
+
 @unlearning_metric(name="probability")
 def probability(model, **kwargs):
-    """Compute the probabilities by data points and report aggregated average"""
+    """Compute the probabilities by data points and report aggregated average.
+
+    When kwargs contains step_wise_score_provider: "ar", uses ARStepWiseScoreProvider
+    so that sequence probability is the geometric mean of per-position scores (same
+    numeric result as evaluate_probability for AR models).
+    """
     data = kwargs["data"]
     collator = kwargs["collators"]
     batch_size = kwargs["batch_size"]
+    use_ar_provider = kwargs.get("step_wise_score_provider") == "ar"
 
     dataloader = DataLoader(data, batch_size=batch_size, collate_fn=collator)
 
-    fun_args = {}
+    if use_ar_provider:
+        provider = ARStepWiseScoreProvider()
+        fun_args = {"step_wise_score_provider_instance": provider}
+        batch_eval_fn = _probability_batch_fn_ar_provider
+    else:
+        fun_args = {}
+        batch_eval_fn = evaluate_probability
+
     scores_by_index = run_batchwise_evals(
-        model, dataloader, evaluate_probability, fun_args, "Calculating loss"
+        model, dataloader, batch_eval_fn, fun_args, "Calculating loss"
     )
     prob_values = np.array(
         [

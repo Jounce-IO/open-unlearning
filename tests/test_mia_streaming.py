@@ -131,6 +131,21 @@ class TestComputeBatchValuesFromLogits:
         for idx in out_model:
             assert abs(out_model[idx]["score"] - out_logits[idx]["score"]) < 1e-5
 
+    def test_min_k_compute_batch_values_from_per_position_scores(self):
+        """MinKProbAttack.compute_batch_values_from_per_position_scores returns log-probs and compute_score is consistent."""
+        per_position_scores = [[0.5, 0.25, 0.1], [0.8, 0.6]]
+        batch = _make_batch(2, 5, 10)
+        attack = MinKProbAttack(model=None, data=[], collator=lambda x: x, batch_size=1, k=0.4)
+        batch_values = attack.compute_batch_values_from_per_position_scores(batch, per_position_scores)
+        assert len(batch_values) == 2
+        assert batch_values[0].shape[0] == 3
+        assert batch_values[1].shape[0] == 2
+        import numpy as np
+        np.testing.assert_allclose(batch_values[0].numpy(), -np.log([0.5, 0.25, 0.1]), rtol=1e-5)
+        scores = attack.process_batch(batch, batch_values)
+        assert len(scores) == 2
+        assert all("score" in v for v in scores.values())
+
 
 class TestMiaAucFromScoreDicts:
     """Tests for aggregation from score dicts (value_by_index for forget and holdout)."""

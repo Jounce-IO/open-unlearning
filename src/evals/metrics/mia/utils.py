@@ -160,15 +160,29 @@ class MIAStreamingAccumulator:
         self.forget_value_by_index = {}
         self.holdout_value_by_index = {}
 
-    def add_forget_batch(self, batch, logits):
-        """Process one forget batch: compute scores from logits and accumulate."""
-        batch_values = self.attack.compute_batch_values_from_logits(batch, logits)
+    def add_forget_batch(self, batch, logits=None, per_position_scores=None):
+        """Process one forget batch: compute scores from logits or precomputed per-position scores and accumulate."""
+        if per_position_scores is not None and hasattr(
+            self.attack, "compute_batch_values_from_per_position_scores"
+        ):
+            batch_values = self.attack.compute_batch_values_from_per_position_scores(
+                batch, per_position_scores
+            )
+        else:
+            batch_values = self.attack.compute_batch_values_from_logits(batch, logits)
         batch_scores = self.attack.process_batch(batch, batch_values)
         self.forget_value_by_index.update(batch_scores)
 
-    def add_holdout_batch(self, batch, logits):
-        """Process one holdout batch: compute scores from logits and accumulate."""
-        batch_values = self.attack.compute_batch_values_from_logits(batch, logits)
+    def add_holdout_batch(self, batch, logits=None, per_position_scores=None):
+        """Process one holdout batch: compute scores from logits or precomputed per-position scores and accumulate."""
+        if per_position_scores is not None and hasattr(
+            self.attack, "compute_batch_values_from_per_position_scores"
+        ):
+            batch_values = self.attack.compute_batch_values_from_per_position_scores(
+                batch, per_position_scores
+            )
+        else:
+            batch_values = self.attack.compute_batch_values_from_logits(batch, logits)
         batch_scores = self.attack.process_batch(batch, batch_values)
         self.holdout_value_by_index.update(batch_scores)
 
