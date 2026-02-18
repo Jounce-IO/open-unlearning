@@ -60,6 +60,6 @@ trainer:
     save_strategy: "steps"
     save_steps: 100
     save_total_limit: 3
-    # eval_strategy: epoch from finetune default; no eval_dataset needed (dummy used for 4.57+).
+    eval_strategy: "no"  # No eval during training; avoids OOM with 8B on 40GB. Run eval separately if needed.
 
 task_name: ???
