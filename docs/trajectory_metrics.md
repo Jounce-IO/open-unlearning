@@ -262,6 +262,7 @@ metrics:
   # - rouge  # Uncomment for text-based metrics
 
 trajectory_config:
+  evaluation_mode: unguided  # unguided | guided_native | guided_skew (see table below)
   logits_source: sampler  # or "external"
   return_logits: true  # Required: enables logits tracking
   return_fixation_steps: true  # Required: enables fixation tracking
@@ -332,6 +333,7 @@ The system will:
 | `handler` | str | required | Must be `"trajectory_metrics"` |
 | `metrics` | list[str] or dict | required | List of metric names OR dict mapping names to configs |
 | `batch_size` | int | 1 | Batch size for evaluation |
+| `trajectory_config.evaluation_mode` | str | `unguided` | Sampler evaluation mode: **unguided** (no target; default), **guided_native** (same fixation order F as unguided, written token = target), **guided_skew** (position selection by p(a_ℓ), written token = target). For guided modes the pipeline passes `target_sequences` (generated-region labels) to the sampler. |
 | `trajectory_config.return_logits` | bool | true | Enable logits tracking in sampler |
 | `trajectory_config.return_fixation_steps` | bool | true | Enable fixation step tracking |
 | `trajectory_config.include_views` | list | `[full, eos]` | Which views to compute: **full** (all positions 0..L, leakage), **eos** (positions 0..L_eff-1 only, real response up to first EOS). Use `[full]`, `[eos]`, or both. Default both. |

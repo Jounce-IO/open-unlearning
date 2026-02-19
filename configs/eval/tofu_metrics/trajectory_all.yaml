@@ -84,6 +84,8 @@ metric_display_names:
 
 # steps/max_new_tokens match locuslab/open-unlearning: https://github.com/locuslab/open-unlearning/blob/main/configs/generation/default.yaml
 trajectory_config:
+  # Sampler evaluation mode: unguided (no target), guided_native (same F, token=target), guided_skew (F by p(a_ell), token=target).
+  evaluation_mode: unguided
   logits_source: sampler
   return_logits: true
   return_fixation_steps: true

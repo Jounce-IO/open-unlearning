@@ -65,14 +65,25 @@ IGNORE_INDEX = -100
 DEFAULT_TRAJECTORY_SAMPLE_INTERVAL = 8
 
 
+EVALUATION_MODES = ("unguided", "guided_native", "guided_skew")
+
+
 def _trajectory_sampler_kwargs(trajectory_config: Union[Dict, DictConfig]) -> dict:
-    """Return sampler_kwargs with trajectory_sample_interval defaulting to 8 when return_logits is used."""
+    """Return sampler_kwargs with trajectory_sample_interval defaulting to 8 when return_logits is used.
+
+    Also passes evaluation_mode from trajectory_config (default "unguided"); allowed values:
+    unguided, guided_native, guided_skew.
+    """
     kwargs = dict(trajectory_config.get("sampler_kwargs", {}) or {})
     if trajectory_config.get("return_logits") and (
         kwargs.get("trajectory_sample_interval") is None
         or kwargs.get("trajectory_sample_interval", 0) < 1
     ):
         kwargs["trajectory_sample_interval"] = DEFAULT_TRAJECTORY_SAMPLE_INTERVAL
+    mode = trajectory_config.get("evaluation_mode", "unguided")
+    if mode not in EVALUATION_MODES:
+        mode = "unguided"
+    kwargs["evaluation_mode"] = mode
     return kwargs
 
 
@@ -116,6 +127,29 @@ def _build_prompts_for_sampler(
         prompts.append(prompt)
         prompt_lens.append(len(prompt))
     return prompts, prompt_lens
+
+
+def _build_target_sequences_for_sampler(
+    labels: torch.Tensor,
+    prompt_lens: List[int],
+    L: int,
+    ignore_index: int = IGNORE_INDEX,
+) -> List[List[int]]:
+    """Build target token lists for the generated region only (one list per batch sample, length L).
+
+    For each sample j, takes labels[j, prompt_lens[j]:prompt_lens[j]+L]. If the slice is shorter
+    than L, pads with ignore_index so the sampler receives exactly L tokens per sample.
+    """
+    B = labels.shape[0]
+    target_sequences = []
+    for j in range(B):
+        start = prompt_lens[j]
+        end = min(start + L, labels.shape[1])
+        row = labels[j, start:end].cpu().tolist()
+        if len(row) < L:
+            row = row + [ignore_index] * (L - len(row))
+        target_sequences.append(row)
+    return target_sequences
 
 
 def should_run_gc(threshold: float = 0.9) -> bool:
@@ -308,13 +342,27 @@ def _generate_trajectories_for_dataloader(
             prompts.append(input_ids[i, :prompt_end].cpu().tolist())
             prompt_lens.append(len(prompts[-1]))
 
-        sampler_output = sampler.sample(
+        _sampler_kw = _trajectory_sampler_kwargs(trajectory_config)
+        evaluation_mode = _sampler_kw.get("evaluation_mode", "unguided")
+        sample_kw = dict(
             inputs=prompts,
             config=None,
             return_dict=True,
             return_logits=True,
-            **_trajectory_sampler_kwargs(trajectory_config),
+            **_sampler_kw,
         )
+        if evaluation_mode in ("guided_native", "guided_skew") and labels is not None:
+            L_gen = _sampler_kw.get("max_new_tokens")
+            if L_gen is None:
+                L_gen = max(labels.shape[1] - prompt_lens[i] for i in range(B))
+            else:
+                L_gen = int(L_gen)
+            target_sequences = _build_target_sequences_for_sampler(
+                labels, prompt_lens, L_gen, IGNORE_INDEX
+            )
+            sample_kw["target_sequences"] = target_sequences
+            sample_kw["evaluation_mode"] = evaluation_mode
+        sampler_output = sampler.sample(**sample_kw)
         logits_history = sampler_output.logits_history
         fixation_steps = sampler_output.fixation_steps
         if logits_history is None or len(logits_history) == 0:
@@ -1324,16 +1372,31 @@ def trajectory_metrics(model, **kwargs):
                 prompts, prompt_lens = _build_prompts_for_sampler(
                     input_ids, labels, tokenizer, IGNORE_INDEX
                 )
-        
+
                 # Generate using sampler with logits tracking
                 _sampler_kw = _trajectory_sampler_kwargs(trajectory_config)
-                sampler_output = sampler.sample(
+                evaluation_mode = _sampler_kw.get("evaluation_mode", "unguided")
+                sample_kw = dict(
                     inputs=prompts,
                     config=None,  # Use default config
                     return_dict=True,
                     return_logits=True,
                     **_sampler_kw,
                 )
+                if evaluation_mode in ("guided_native", "guided_skew") and labels is not None:
+                    L_gen = _sampler_kw.get("max_new_tokens")
+                    if L_gen is None:
+                        L_gen = max(
+                            labels.shape[1] - prompt_lens[j] for j in range(B)
+                        )
+                    else:
+                        L_gen = int(L_gen)
+                    target_sequences = _build_target_sequences_for_sampler(
+                        labels, prompt_lens, L_gen, IGNORE_INDEX
+                    )
+                    sample_kw["target_sequences"] = target_sequences
+                    sample_kw["evaluation_mode"] = evaluation_mode
+                sampler_output = sampler.sample(**sample_kw)
                 gpu_set_phase("trajectory_after_sampler", batch_idx=batch_idx)
 
                 # Extract logits and fixation steps
@@ -1861,13 +1924,31 @@ def trajectory_metrics(model, **kwargs):
                     h_prompts, h_prompt_lens = _build_prompts_for_sampler(
                         h_input_ids, h_labels, tokenizer, IGNORE_INDEX
                     )
-                    h_sampler_output = sampler.sample(
+                    h_sampler_kw = _trajectory_sampler_kwargs(trajectory_config)
+                    h_eval_mode = h_sampler_kw.get("evaluation_mode", "unguided")
+                    h_sample_kw = dict(
                         inputs=h_prompts,
                         config=None,
                         return_dict=True,
                         return_logits=True,
-                        **_trajectory_sampler_kwargs(trajectory_config),
+                        **h_sampler_kw,
                     )
+                    if h_eval_mode in ("guided_native", "guided_skew") and h_labels is not None:
+                        h_B = h_input_ids.shape[0]
+                        h_L_gen = h_sampler_kw.get("max_new_tokens")
+                        if h_L_gen is None:
+                            h_L_gen = max(
+                                h_labels.shape[1] - h_prompt_lens[j]
+                                for j in range(h_B)
+                            )
+                        else:
+                            h_L_gen = int(h_L_gen)
+                        h_target_sequences = _build_target_sequences_for_sampler(
+                            h_labels, h_prompt_lens, h_L_gen, IGNORE_INDEX
+                        )
+                        h_sample_kw["target_sequences"] = h_target_sequences
+                        h_sample_kw["evaluation_mode"] = h_eval_mode
+                    h_sampler_output = sampler.sample(**h_sample_kw)
                     h_logits_history = h_sampler_output.logits_history
                     h_fixation_steps = h_sampler_output.fixation_steps
                     if h_logits_history is None or len(h_logits_history) == 0 or h_fixation_steps is None:
