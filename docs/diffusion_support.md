@@ -120,7 +120,7 @@ Diffusion unlearning checkpoints use a **single HF-style format**: inner model c
 
 ### Resume from checkpoint (train.py)
 
-OpenUnlearning's `train.py` accepts a top-level config key **`resume_from_checkpoint`** (e.g. set via Hydra override `+resume_from_checkpoint=/path/to/checkpoint-500`). When set, it calls `trainer.train(resume_from_checkpoint=path)` instead of `trainer.train()`. The dllm CLI discovers the latest checkpoint (or uses `--resume-from`), downloads it from GCS if needed, and passes the path into the config. Checkpoints are in the single HF-style format above; the Trainer and the wrapper handle loading (no special steps for diffusion).
+OpenUnlearning's `train.py` accepts a top-level config key **`resume_from_checkpoint`** (e.g. set via Hydra override `+resume_from_checkpoint=/path/to/checkpoint-500`). When set, the **model and tokenizer are loaded from the checkpoint directory** (no HuggingFace download); only training state (optimizer, scheduler, step) is then restored by the Trainer from the same checkpoint. The dllm CLI discovers the latest checkpoint (or uses `--resume-from`), downloads it from GCS if needed, and passes the path into the config. Checkpoints are in the single HF-style format above; the Trainer and the wrapper handle loading (no special steps for diffusion).
 
 ### Eval from checkpoint
 

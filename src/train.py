@@ -51,7 +51,8 @@ def main(cfg: DictConfig):
     model_cfg = cfg.model
     template_args = model_cfg.template_args
     assert model_cfg is not None, "Invalid model yaml passed in train config."
-    model, tokenizer = get_model(model_cfg)
+    resume_from_checkpoint = cfg.get("resume_from_checkpoint", None)
+    model, tokenizer = get_model(model_cfg, resume_from_checkpoint=resume_from_checkpoint)
 
     # Load Dataset
     data_cfg = cfg.data
@@ -91,7 +92,6 @@ def main(cfg: DictConfig):
 
     if trainer_args.do_train:
         trainer.add_callback(_WandbRunIdCallback(trainer_args.output_dir))
-        resume_from_checkpoint = cfg.get("resume_from_checkpoint", None)
         if resume_from_checkpoint:
             print(f"Resuming training from checkpoint: {resume_from_checkpoint}", flush=True)
         trainer.train(resume_from_checkpoint=resume_from_checkpoint)
