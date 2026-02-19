@@ -118,6 +118,19 @@ The dllm CLI passes `experiment=unlearn/tofu/diffusion` and the resolved model p
 
 OpenUnlearning's `train.py` accepts a top-level config key **`resume_from_checkpoint`** (e.g. set via Hydra override `+resume_from_checkpoint=/path/to/checkpoint-500`). When set, it calls `trainer.train(resume_from_checkpoint=path)` instead of `trainer.train()`. The dllm CLI discovers the latest checkpoint (or uses `--resume-from`), downloads it from GCS if needed, and passes the path into the config.
 
+### Transformers 4.57.0
+
+The dllm repo pins **transformers 4.57.0**. Two compatibility points matter for unlearning; below are the **code changes we made** so it works with 4.57+:
+
+1. **eval_dataset requirement**  
+   In transformers 4.57+, `Trainer.__init__` raises if `eval_strategy` is not `"no"` and `eval_dataset` is `None`. Open-unlearning’s unlearn configs use custom evaluators (TOFU/MUSE) and set `datasets@eval: null`, so no real eval dataset is loaded. **Changes made:**  
+   - **`src/trainer/base.py`**: Added **`_DummyEvalDataset`** — a length-0 `Dataset` placeholder. Its docstring explains why it exists (4.45.1 vs 4.57 init behaviour). It is never used for forward or metrics; `FinetuneTrainer.evaluate()` runs the custom evaluators only.  
+   - **`src/trainer/__init__.py`** in **`load_trainer()`**: When `eval_dataset` is `None` and `eval_strategy` is not `None` or `"no"`, we set `eval_dataset_to_pass = _DummyEvalDataset()` and pass that into the Trainer so `Trainer.__init__` succeeds.
+
+2. **compute_loss signature**  
+   Newer Trainer code may call `compute_loss(..., num_items_in_batch=..., **kwargs)`.  
+   **Changes made:** All unlearn trainers (e.g. **`src/trainer/unlearn/grad_ascent.py`**, **`grad_diff.py`**, **`wga.py`**, and the rest in `trainer/unlearn/`) implement **`compute_loss(self, model, inputs, return_outputs=False, num_items_in_batch=None, **kwargs)`** so they accept the 4.57+ call signature while remaining compatible with older call sites.
+
 ### Evaluation during training (eval_strategy and _DummyEvalDataset)
 
 By default, GradAscent (and other unlearn trainers) inherit **eval_strategy=epoch** and **do_eval=True** from the finetune config, while **data/unlearn.yaml** has **datasets@eval: null**, so `get_data()` never returns an eval dataset. In the **original** locuslab open-unlearning repo they use **transformers==4.45.1**, where `Trainer.__init__` does not require an eval_dataset when eval_strategy is set; at the end of each epoch `FinetuneTrainer.evaluate()` runs the **custom evaluators** (TOFU/MUSE metrics) and returns without ever using an eval dataset. In **transformers >= 4.57** (used by the dllm repo), `Trainer.__init__` raises if eval_strategy is not `"no"` and eval_dataset is None, so the Trainer would never be created.
