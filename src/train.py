@@ -40,45 +40,6 @@ class _WandbRunIdCallback(TrainerCallback):
         return control
 
 
-def _save_inner_model_for_eval(model, save_dir: str) -> bool:
-    """
-    If model is a wrapper with an inner PreTrainedModel (e.g. DiffusionModelAdapter),
-    save the inner model with save_pretrained so the checkpoint is loadable for eval.
-    Unwraps DDP (model.module) if present. Returns True if saved, False if not applicable.
-    """
-    # Unwrap DDP / FSDP if present
-    base = getattr(model, "module", model)
-    inner = getattr(base, "model", base)
-    if inner is base:
-        return False
-    if not hasattr(inner, "save_pretrained"):
-        return False
-    try:
-        inner.save_pretrained(save_dir)
-        print(f"Saved inner model for eval (config + weights) to {save_dir}", flush=True)
-        return True
-    except Exception as e:
-        print(f"Warning: could not save inner model for eval to {save_dir}: {e}", flush=True)
-        return False
-
-
-class _SaveInnerModelForEvalCallback(TrainerCallback):
-    """
-    After each checkpoint save, saves the inner PreTrainedModel (e.g. under
-    DiffusionModelAdapter) with save_pretrained so the checkpoint dir is loadable
-    for evaluation (config.json + weights in HF format).
-    """
-
-    def __init__(self, trainer):
-        self.trainer = trainer
-
-    def on_save(self, args, state, control, **kwargs):
-        checkpoint_dir = os.path.join(args.output_dir, f"checkpoint-{state.global_step}")
-        if os.path.isdir(checkpoint_dir):
-            _save_inner_model_for_eval(self.trainer.model, checkpoint_dir)
-        return control
-
-
 @hydra.main(version_base=None, config_path="../configs", config_name="train.yaml")
 def main(cfg: DictConfig):
     """Entry point of the code to train models
@@ -130,15 +91,12 @@ def main(cfg: DictConfig):
 
     if trainer_args.do_train:
         trainer.add_callback(_WandbRunIdCallback(trainer_args.output_dir))
-        trainer.add_callback(_SaveInnerModelForEvalCallback(trainer))
         resume_from_checkpoint = cfg.get("resume_from_checkpoint", None)
         if resume_from_checkpoint:
             print(f"Resuming training from checkpoint: {resume_from_checkpoint}", flush=True)
         trainer.train(resume_from_checkpoint=resume_from_checkpoint)
         trainer.save_state()
         trainer.save_model(trainer_args.output_dir)
-        # Save inner model in HF format so final output dir is loadable for eval
-        _save_inner_model_for_eval(trainer.model, trainer_args.output_dir)
         # Write W&B run URL so parent (e.g. dllm unlearn) can include it in the report
         try:
             import wandb

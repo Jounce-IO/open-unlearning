@@ -114,9 +114,21 @@ model:
 
 The dllm CLI passes `experiment=unlearn/tofu/diffusion` and the resolved model path when you run `dllm unlearn`.
 
+### Checkpoint format
+
+Diffusion unlearning checkpoints use a **single HF-style format**: inner model config + weights + tokenizer (no separate wrapper state_dict). The `DiffusionModelAdapter` is a `PreTrainedModel`; the Trainer calls `model.save_pretrained(output_dir)`, and the wrapper delegates to the inner model so only the inner's config and weights are written. There is one writer and one weight format per checkpoint. For the authoritative layout (file list, resume, eval, publishing), see the main repo: [docs/integrations/checkpoint-format.md](../../docs/integrations/checkpoint-format.md).
+
 ### Resume from checkpoint (train.py)
 
-OpenUnlearning's `train.py` accepts a top-level config key **`resume_from_checkpoint`** (e.g. set via Hydra override `+resume_from_checkpoint=/path/to/checkpoint-500`). When set, it calls `trainer.train(resume_from_checkpoint=path)` instead of `trainer.train()`. The dllm CLI discovers the latest checkpoint (or uses `--resume-from`), downloads it from GCS if needed, and passes the path into the config.
+OpenUnlearning's `train.py` accepts a top-level config key **`resume_from_checkpoint`** (e.g. set via Hydra override `+resume_from_checkpoint=/path/to/checkpoint-500`). When set, it calls `trainer.train(resume_from_checkpoint=path)` instead of `trainer.train()`. The dllm CLI discovers the latest checkpoint (or uses `--resume-from`), downloads it from GCS if needed, and passes the path into the config. Checkpoints are in the single HF-style format above; the Trainer and the wrapper handle loading (no special steps for diffusion).
+
+### Eval from checkpoint
+
+The same checkpoint directory can be used for open-unlearning eval: load the inner model from the dir (e.g. `from_pretrained(path)`), then optionally wrap with `DiffusionModelAdapter` for trajectory metrics.
+
+### Removed behavior (one-format change)
+
+The per-checkpoint callback **`_SaveInnerModelForEvalCallback`** and the final **`_save_inner_model_for_eval()`** call have been removed. The wrapper's **`save_pretrained`** is the only model save path; it writes the inner model's HF layout so checkpoints are both resume- and eval-valid without a second writer.
 
 ### Transformers 4.57.0
 
