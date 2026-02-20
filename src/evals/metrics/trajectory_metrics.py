@@ -30,6 +30,13 @@ from evals.metrics.utils import (
     _tensor_to_list_of_floats,
 )
 from rouge_score import rouge_scorer
+from evals.metrics.step_wise_score import (
+    FixationStepWiseScoreProvider,
+    build_effective_step_fixation_logits,
+    build_fixation_logits_from_R_F,
+    sequence_probability_from_scores,
+    extraction_strength_from_fixation,
+)
 from evals.metrics.trajectory_utils import (
     trajectories_from_logits,
     effective_lengths_from_eos,
@@ -58,14 +65,25 @@ IGNORE_INDEX = -100
 DEFAULT_TRAJECTORY_SAMPLE_INTERVAL = 8
 
 
+EVALUATION_MODES = ("unguided", "guided_native", "guided_skew")
+
+
 def _trajectory_sampler_kwargs(trajectory_config: Union[Dict, DictConfig]) -> dict:
-    """Return sampler_kwargs with trajectory_sample_interval defaulting to 8 when return_logits is used."""
+    """Return sampler_kwargs with trajectory_sample_interval defaulting to 8 when return_logits is used.
+
+    Also passes evaluation_mode from trajectory_config (default "unguided"); allowed values:
+    unguided, guided_native, guided_skew.
+    """
     kwargs = dict(trajectory_config.get("sampler_kwargs", {}) or {})
     if trajectory_config.get("return_logits") and (
         kwargs.get("trajectory_sample_interval") is None
         or kwargs.get("trajectory_sample_interval", 0) < 1
     ):
         kwargs["trajectory_sample_interval"] = DEFAULT_TRAJECTORY_SAMPLE_INTERVAL
+    mode = trajectory_config.get("evaluation_mode", "unguided")
+    if mode not in EVALUATION_MODES:
+        mode = "unguided"
+    kwargs["evaluation_mode"] = mode
     return kwargs
 
 
@@ -109,6 +127,29 @@ def _build_prompts_for_sampler(
         prompts.append(prompt)
         prompt_lens.append(len(prompt))
     return prompts, prompt_lens
+
+
+def _build_target_sequences_for_sampler(
+    labels: torch.Tensor,
+    prompt_lens: List[int],
+    L: int,
+    ignore_index: int = IGNORE_INDEX,
+) -> List[List[int]]:
+    """Build target token lists for the generated region only (one list per batch sample, length L).
+
+    For each sample j, takes labels[j, prompt_lens[j]:prompt_lens[j]+L]. If the slice is shorter
+    than L, pads with ignore_index so the sampler receives exactly L tokens per sample.
+    """
+    B = labels.shape[0]
+    target_sequences = []
+    for j in range(B):
+        start = prompt_lens[j]
+        end = min(start + L, labels.shape[1])
+        row = labels[j, start:end].cpu().tolist()
+        if len(row) < L:
+            row = row + [ignore_index] * (L - len(row))
+        target_sequences.append(row)
+    return target_sequences
 
 
 def should_run_gc(threshold: float = 0.9) -> bool:
@@ -157,6 +198,40 @@ def _compute_prob_from_fixation_logits(
             {"prob": prob, "avg_loss": avg_loss}
             for prob, avg_loss in zip(normalized_probs_list, avg_losses_list)
         ]
+
+
+def _per_position_scores_from_R_F_batch(
+    R: torch.Tensor,
+    F: torch.Tensor,
+    labels: Optional[torch.Tensor],
+    prompt_lens: List[int],
+    L: int,
+    trajectory_config: Dict[str, Any],
+    report_step: Optional[int] = None,
+) -> Optional[List[List[float]]]:
+    """Build per-sample per-position probability scores from R, F for use with Min-K etc.
+
+    If report_step is set, uses effective-step logits at that step (s_eff(ell,s)=min(s,F[ell])).
+    Returns list of list of float (one list per sample), or None if labels missing.
+    """
+    if labels is None:
+        return None
+    B = R.shape[0]
+    logit_alignment = trajectory_config.get("logit_alignment", "causal")
+    provider = FixationStepWiseScoreProvider(logit_alignment=logit_alignment)
+    out: List[List[float]] = []
+    for i in range(B):
+        pl = prompt_lens[i] if isinstance(prompt_lens[i], int) else int(prompt_lens[i].item())
+        gen_labels = labels[i, pl : pl + L]
+        batch_prov = {"labels": gen_labels.unsqueeze(0)}
+        model_or_logits: Dict[str, Any] = {"R": R[i].unsqueeze(0), "F": F[i].unsqueeze(0)}
+        if report_step is not None:
+            model_or_logits["report_step"] = report_step
+        results = provider.get_per_position_scores(
+            model_or_logits, batch_prov, ignore_index=IGNORE_INDEX
+        )
+        out.append(results[0][0] if results and results[0][0] else [])
+    return out
 
 
 def _derive_steps_to_use(
@@ -267,13 +342,27 @@ def _generate_trajectories_for_dataloader(
             prompts.append(input_ids[i, :prompt_end].cpu().tolist())
             prompt_lens.append(len(prompts[-1]))
 
-        sampler_output = sampler.sample(
+        _sampler_kw = _trajectory_sampler_kwargs(trajectory_config)
+        evaluation_mode = _sampler_kw.get("evaluation_mode", "unguided")
+        sample_kw = dict(
             inputs=prompts,
             config=None,
             return_dict=True,
             return_logits=True,
-            **_trajectory_sampler_kwargs(trajectory_config),
+            **_sampler_kw,
         )
+        if evaluation_mode in ("guided_native", "guided_skew") and labels is not None:
+            L_gen = _sampler_kw.get("max_new_tokens")
+            if L_gen is None:
+                L_gen = max(labels.shape[1] - prompt_lens[i] for i in range(B))
+            else:
+                L_gen = int(L_gen)
+            target_sequences = _build_target_sequences_for_sampler(
+                labels, prompt_lens, L_gen, IGNORE_INDEX
+            )
+            sample_kw["target_sequences"] = target_sequences
+            sample_kw["evaluation_mode"] = evaluation_mode
+        sampler_output = sampler.sample(**sample_kw)
         logits_history = sampler_output.logits_history
         fixation_steps = sampler_output.fixation_steps
         if logits_history is None or len(logits_history) == 0:
@@ -336,11 +425,13 @@ def _compute_pre_compute_metrics_at_step(
     sample_prompt_len: int,
     sample_idx: str,
     model_wrapper_override: Optional[Any] = None,
+    trajectory_config: Optional[Dict[str, Any]] = None,
+    sample_traj: Optional[Dict[str, Any]] = None,
     **kwargs
 ) -> Dict[str, Any]:
     """
     Compute pre-compute metrics at a specific trajectory step.
-    
+
     Args:
         pre_compute_config: Config dict mapping pre_compute metric names to their configs
             Example: {"forget_Q_A_PARA_Prob": {"access_key": "correct", ...}}
@@ -360,8 +451,10 @@ def _compute_pre_compute_metrics_at_step(
             "wrong": {"agg_value": ..., "value_by_index": {sample_idx: {...}}}
         }
     """
+    trajectory_config = trajectory_config or kwargs.get("trajectory_config")
+    sample_traj = sample_traj or kwargs.get("sample_traj")
     pre_compute_results = {}
-    
+
     for pre_metric_name, pre_metric_cfg in pre_compute_config.items():
         # Get access key (defaults to metric name)
         access_key = pre_metric_cfg.get("access_key", pre_metric_name)
@@ -395,7 +488,62 @@ def _compute_pre_compute_metrics_at_step(
                 f"Tried handler: {handler_name}. "
                 f"Available metrics: {list(METRICS_REGISTRY.keys())}"
             )
-        
+
+        use_generalized = (
+            trajectory_config is not None
+            and trajectory_config.get("use_generalized_sequence_probability", False)
+            and sample_traj is not None
+            and handler_name == "probability"
+        )
+        if use_generalized:
+            try:
+                R = sample_traj["R"]
+                F = sample_traj["F"]
+                logit_alignment = trajectory_config.get("logit_alignment", "causal")
+                provider = FixationStepWiseScoreProvider(logit_alignment=logit_alignment)
+                lab = batch_template.get(labels_field if labels_field else "labels")
+                if lab is not None:
+                    lab = lab.squeeze(0) if lab.dim() > 1 else lab
+                    batch_prov = {"labels": lab.unsqueeze(0)}
+                    model_or_logits = {
+                        "R": R.unsqueeze(0),
+                        "F": F.unsqueeze(0),
+                        "report_step": step,
+                    }
+                    results = provider.get_per_position_scores(
+                        model_or_logits, batch_prov, ignore_index=IGNORE_INDEX
+                    )
+                    if results and results[0][0]:
+                        prob_val = sequence_probability_from_scores(results[0][0])
+                        avg_loss_val = float(-np.log(prob_val + 1e-12))
+                        pre_result = {
+                            "agg_value": prob_val,
+                            "value_by_index": {
+                                sample_idx: {"prob": prob_val, "avg_loss": avg_loss_val},
+                            },
+                        }
+                    else:
+                        pre_result = {
+                            "agg_value": None,
+                            "value_by_index": {sample_idx: {"prob": None, "avg_loss": None}},
+                        }
+                else:
+                    pre_result = {
+                        "agg_value": None,
+                        "value_by_index": {sample_idx: {"prob": None, "avg_loss": None}},
+                    }
+                pre_compute_results[access_key] = pre_result
+            except Exception as e:
+                logger.warning(
+                    f"Error computing generalized pre-compute probability for {pre_metric_name}: {e}",
+                    exc_info=True,
+                )
+                pre_compute_results[access_key] = {
+                    "agg_value": None,
+                    "value_by_index": {sample_idx: {"prob": None, "avg_loss": None}},
+                }
+            continue
+
         # Compute pre-compute metric at this step
         # Note: Pre-compute metrics might have their own pre_compute requirements
         # We handle this recursively
@@ -753,7 +901,35 @@ def _call_metric_at_step(
     # Some metrics iterate over data (like `probability`), so we need to use
     # their underlying batch functions instead. Map known metrics to their batch functions.
     metric_name = metric.name
-    
+
+    trajectory_config = kwargs.get("trajectory_config")
+    sample_traj = kwargs.get("sample_traj")
+    if (
+        metric_name == "extraction_strength"
+        and trajectory_config is not None
+        and trajectory_config.get("use_generalized_sequence_probability", False)
+        and sample_traj is not None
+    ):
+        R = sample_traj["R"]
+        F = sample_traj["F"]
+        S_val = int(sample_traj["S"])
+        report_step = kwargs.get("step")
+        lab = batch.get("labels")
+        if lab is not None:
+            lab = lab.squeeze(0) if lab.dim() > 1 else lab
+            if report_step is not None:
+                fixation_logits = build_effective_step_fixation_logits(
+                    R, F, int(report_step)
+                ).squeeze(0)
+            else:
+                fixation_logits = build_fixation_logits_from_R_F(R, F).squeeze(0)
+            logit_alignment = trajectory_config.get("logit_alignment", "causal")
+            F_sq = F.squeeze(0) if F.dim() > 1 else F
+            es_val = extraction_strength_from_fixation(
+                fixation_logits, lab, F_sq, S_val, logit_alignment, IGNORE_INDEX
+            )
+            return [{"score": es_val}]
+
     def _exact_memorization_batch_fn(model, batch, **kwargs):
         """Compute exact memorization for a single batch."""
         log_probs_batch, labels_batch = tokenwise_vocab_logprobs(
@@ -1196,16 +1372,31 @@ def trajectory_metrics(model, **kwargs):
                 prompts, prompt_lens = _build_prompts_for_sampler(
                     input_ids, labels, tokenizer, IGNORE_INDEX
                 )
-        
+
                 # Generate using sampler with logits tracking
                 _sampler_kw = _trajectory_sampler_kwargs(trajectory_config)
-                sampler_output = sampler.sample(
+                evaluation_mode = _sampler_kw.get("evaluation_mode", "unguided")
+                sample_kw = dict(
                     inputs=prompts,
                     config=None,  # Use default config
                     return_dict=True,
                     return_logits=True,
                     **_sampler_kw,
                 )
+                if evaluation_mode in ("guided_native", "guided_skew") and labels is not None:
+                    L_gen = _sampler_kw.get("max_new_tokens")
+                    if L_gen is None:
+                        L_gen = max(
+                            labels.shape[1] - prompt_lens[j] for j in range(B)
+                        )
+                    else:
+                        L_gen = int(L_gen)
+                    target_sequences = _build_target_sequences_for_sampler(
+                        labels, prompt_lens, L_gen, IGNORE_INDEX
+                    )
+                    sample_kw["target_sequences"] = target_sequences
+                    sample_kw["evaluation_mode"] = evaluation_mode
+                sampler_output = sampler.sample(**sample_kw)
                 gpu_set_phase("trajectory_after_sampler", batch_idx=batch_idx)
 
                 # Extract logits and fixation steps
@@ -1262,21 +1453,38 @@ def trajectory_metrics(model, **kwargs):
                         for step in run_steps_to_use
                     }
                 if privleak_accumulators is not None and _key is None:
+                    use_generalized_privleak = trajectory_config.get(
+                        "use_generalized_sequence_probability", False
+                    )
                     for step in steps_to_use:
-                        logits_list = [
-                            _get_logits_at_step(
-                                {"R": R[i], "F": F[i], "S": S, "L": L}, "steps", step
-                            ).T
-                            for i in range(B)
-                        ]
-                        logits_batch = torch.stack(logits_list, dim=0)
-                        privleak_accumulators[step].add_forget_batch(batch, logits_batch)
+                        if use_generalized_privleak:
+                            per_position_scores_forget = _per_position_scores_from_R_F_batch(
+                                R, F, labels, prompt_lens, L, trajectory_config,
+                                report_step=step,
+                            )
+                            if per_position_scores_forget is not None:
+                                privleak_accumulators[step].add_forget_batch(
+                                    batch, per_position_scores=per_position_scores_forget
+                                )
+                        else:
+                            logits_list = [
+                                _get_logits_at_step(
+                                    {"R": R[i], "F": F[i], "S": S, "L": L}, "steps", step
+                                ).T
+                                for i in range(B)
+                            ]
+                            logits_batch = torch.stack(logits_list, dim=0)
+                            privleak_accumulators[step].add_forget_batch(batch, logits_batch)
                 gpu_set_phase("trajectory_after_trajectories", batch_idx=batch_idx)
 
                 # Process each sample in batch (each sample uses its own R, F; logits computed on-demand)
                 for sample_idx in range(B):
                     idx_str = str(indices[sample_idx].item() if torch.is_tensor(indices[sample_idx]) else indices[sample_idx])
                     sample_traj = {"R": R[sample_idx], "F": F[sample_idx], "S": S, "L": L}
+                    use_generalized = (
+                        trajectory_config.get("use_generalized_sequence_probability", False)
+                        if trajectory_config else False
+                    )
 
                     # Get ground truth for this sample
                     sample_labels = labels[sample_idx] if labels is not None else None
@@ -1457,49 +1665,94 @@ def trajectory_metrics(model, **kwargs):
                                     )
 
                         if "probability" in metrics_to_run and generated_labels is not None:
-                            logits_list = [
-                                _get_logits_at_step(sample_traj, traj_name, step)
-                                for step in steps_to_use
-                            ]
-                            device = logits_list[0].device
-                            logits_stacked = torch.stack(
-                                [l.t() for l in logits_list], dim=0
+                            use_generalized = trajectory_config.get(
+                                "use_generalized_sequence_probability", False
                             )
-                            labels_batch_full = generated_labels.unsqueeze(0).expand(
-                                len(steps_to_use), -1
-                            ).to(device=device, dtype=torch.long)
-                            for view in include_views:
-                                if view == "full":
-                                    prob_results = _compute_prob_from_fixation_logits(
-                                        logits_stacked, labels_batch_full, device, IGNORE_INDEX
-                                    )
-                                else:
-                                    L_eff_slice = min(L_eff_b, logits_stacked.shape[1])
-                                    prob_results = _compute_prob_from_fixation_logits(
-                                        logits_stacked[:, :L_eff_slice, :],
-                                        labels_batch_full[:, :L_eff_slice],
-                                        device,
-                                        IGNORE_INDEX,
-                                    )
-                                for i, step in enumerate(steps_to_use):
-                                    if i < len(prob_results) and "prob" in prob_results[i]:
-                                        step_values_by_view[view][traj_name][step]["probability"].append(
-                                            prob_results[i]["prob"]
+                            logit_alignment = trajectory_config.get(
+                                "logit_alignment", "causal"
+                            )
+                            if use_generalized:
+                                provider = FixationStepWiseScoreProvider(
+                                    logit_alignment=logit_alignment
+                                )
+                                for step in steps_to_use:
+                                    for view in include_views:
+                                        if view == "full":
+                                            R_v, F_v = sample_traj["R"], sample_traj["F"]
+                                            lab_v = generated_labels
+                                        else:
+                                            L_eff_slice = min(L_eff_b, sample_traj["R"].shape[1])
+                                            R_v = sample_traj["R"][:, :L_eff_slice, :]
+                                            F_v = sample_traj["F"][:L_eff_slice]
+                                            lab_v = generated_labels[:L_eff_slice]
+                                        batch_prov = {"labels": lab_v.unsqueeze(0)}
+                                        model_or_logits = {
+                                            "R": R_v.unsqueeze(0),
+                                            "F": F_v.unsqueeze(0),
+                                            "report_step": step,
+                                        }
+                                        results = provider.get_per_position_scores(
+                                            model_or_logits, batch_prov, ignore_index=IGNORE_INDEX
                                         )
-                                # Free GPU memory after first view so second view (eos) does not OOM (two-view doubles prob work per sample).
-                                if len(include_views) > 1 and torch.cuda.is_available():
-                                    del prob_results
+                                        if results and results[0][0]:
+                                            prob_val = sequence_probability_from_scores(
+                                                results[0][0]
+                                            )
+                                            step_values_by_view[view][traj_name][step][
+                                                "probability"
+                                            ].append(prob_val)
+                                if torch.cuda.is_available():
                                     torch.cuda.synchronize()
                                     torch.cuda.empty_cache()
-                            # Free stacked logits and eos allocation before next traj_name (full run: 4 traj types × 2 views can OOM otherwise).
-                            if torch.cuda.is_available():
-                                del logits_stacked, labels_batch_full
-                                torch.cuda.synchronize()
-                                torch.cuda.empty_cache()
+                            else:
+                                logits_list = [
+                                    _get_logits_at_step(sample_traj, traj_name, step)
+                                    for step in steps_to_use
+                                ]
+                                device = logits_list[0].device
+                                logits_stacked = torch.stack(
+                                    [l.t() for l in logits_list], dim=0
+                                )
+                                labels_batch_full = generated_labels.unsqueeze(0).expand(
+                                    len(steps_to_use), -1
+                                ).to(device=device, dtype=torch.long)
+                                for view in include_views:
+                                    if view == "full":
+                                        prob_results = _compute_prob_from_fixation_logits(
+                                            logits_stacked, labels_batch_full, device, IGNORE_INDEX
+                                        )
+                                    else:
+                                        L_eff_slice = min(L_eff_b, logits_stacked.shape[1])
+                                        prob_results = _compute_prob_from_fixation_logits(
+                                            logits_stacked[:, :L_eff_slice, :],
+                                            labels_batch_full[:, :L_eff_slice],
+                                            device,
+                                            IGNORE_INDEX,
+                                        )
+                                    for i, step in enumerate(steps_to_use):
+                                        if i < len(prob_results) and "prob" in prob_results[i]:
+                                            step_values_by_view[view][traj_name][step]["probability"].append(
+                                                prob_results[i]["prob"]
+                                            )
+                                    if len(include_views) > 1 and torch.cuda.is_available():
+                                        del prob_results
+                                        torch.cuda.synchronize()
+                                        torch.cuda.empty_cache()
+                                if torch.cuda.is_available():
+                                    del logits_stacked, labels_batch_full
+                                    torch.cuda.synchronize()
+                                    torch.cuda.empty_cache()
 
                         for step in steps_to_use:
                             # Get logits at this step (on-demand from R, F)
-                            logits = _get_logits_at_step(sample_traj, traj_name, step)  # [V, L]
+                            if use_generalized:
+                                R_st = sample_traj["R"].unsqueeze(0)
+                                F_st = sample_traj["F"].unsqueeze(0)
+                                logits = build_effective_step_fixation_logits(
+                                    R_st, F_st, step
+                                ).squeeze(0).T
+                            else:
+                                logits = _get_logits_at_step(sample_traj, traj_name, step)  # [V, L]
 
                             # Build eos batch_template (sliced to L_eff_b) for eos view
                             L_eff_slice = min(L_eff_b, batch_template["input_ids"].shape[1])
@@ -1531,6 +1784,10 @@ def trajectory_metrics(model, **kwargs):
                                         kwargs_clean["data"] = primary_data
                                     kwargs_clean["ground_truth"] = ground_truth_str
                                     kwargs_clean["rouge_scorer"] = rouge_scorer_instance
+                                    kwargs_clean["sample_traj"] = sample_traj
+                                    kwargs_clean["step"] = step
+                                    if trajectory_config is not None:
+                                        kwargs_clean["trajectory_config"] = trajectory_config
 
                                     for view in include_views:
                                         bt = batch_template if view == "full" else batch_template_eos
@@ -1667,13 +1924,31 @@ def trajectory_metrics(model, **kwargs):
                     h_prompts, h_prompt_lens = _build_prompts_for_sampler(
                         h_input_ids, h_labels, tokenizer, IGNORE_INDEX
                     )
-                    h_sampler_output = sampler.sample(
+                    h_sampler_kw = _trajectory_sampler_kwargs(trajectory_config)
+                    h_eval_mode = h_sampler_kw.get("evaluation_mode", "unguided")
+                    h_sample_kw = dict(
                         inputs=h_prompts,
                         config=None,
                         return_dict=True,
                         return_logits=True,
-                        **_trajectory_sampler_kwargs(trajectory_config),
+                        **h_sampler_kw,
                     )
+                    if h_eval_mode in ("guided_native", "guided_skew") and h_labels is not None:
+                        h_B = h_input_ids.shape[0]
+                        h_L_gen = h_sampler_kw.get("max_new_tokens")
+                        if h_L_gen is None:
+                            h_L_gen = max(
+                                h_labels.shape[1] - h_prompt_lens[j]
+                                for j in range(h_B)
+                            )
+                        else:
+                            h_L_gen = int(h_L_gen)
+                        h_target_sequences = _build_target_sequences_for_sampler(
+                            h_labels, h_prompt_lens, h_L_gen, IGNORE_INDEX
+                        )
+                        h_sample_kw["target_sequences"] = h_target_sequences
+                        h_sample_kw["evaluation_mode"] = h_eval_mode
+                    h_sampler_output = sampler.sample(**h_sample_kw)
                     h_logits_history = h_sampler_output.logits_history
                     h_fixation_steps = h_sampler_output.fixation_steps
                     if h_logits_history is None or len(h_logits_history) == 0 or h_fixation_steps is None:
@@ -1683,18 +1958,32 @@ def trajectory_metrics(model, **kwargs):
                     )
                     h_R, h_F, h_S, h_L = h_out["R"], h_out["F"], h_out["S"], h_out["L"]
                     del h_logits_history, h_out
+                    h_B = h_R.shape[0] if hasattr(h_R, "shape") else len(h_R)
                     h_steps_to_use = [s for s in run_steps_to_use if s < h_S]
+                    use_generalized_privleak = trajectory_config.get(
+                        "use_generalized_sequence_probability", False
+                    )
                     for step in h_steps_to_use:
-                        h_logits_list = [
-                            _get_logits_at_step(
-                                {"R": h_R[i], "F": h_F[i], "S": h_S, "L": h_L}, "steps", step
-                            ).T
-                            for i in range(h_B)
-                        ]
-                        h_logits_batch = torch.stack(h_logits_list, dim=0)
-                        privleak_accumulators[step].add_holdout_batch(
-                            h_batch, h_logits_batch
-                        )
+                        if use_generalized_privleak:
+                            per_position_scores_holdout = _per_position_scores_from_R_F_batch(
+                                h_R, h_F, h_batch.get("labels"), h_prompt_lens, h_L, trajectory_config,
+                                report_step=step,
+                            )
+                            if per_position_scores_holdout is not None:
+                                privleak_accumulators[step].add_holdout_batch(
+                                    h_batch, per_position_scores=per_position_scores_holdout
+                                )
+                        else:
+                            h_logits_list = [
+                                _get_logits_at_step(
+                                    {"R": h_R[i], "F": h_F[i], "S": h_S, "L": h_L}, "steps", step
+                                ).T
+                                for i in range(h_B)
+                            ]
+                            h_logits_batch = torch.stack(h_logits_list, dim=0)
+                            privleak_accumulators[step].add_holdout_batch(
+                                h_batch, h_logits_batch
+                            )
                     del h_R, h_F
                     if should_run_gc(0.9):
                         gc.collect()
