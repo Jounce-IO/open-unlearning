@@ -276,6 +276,22 @@ class Evaluator:
                 {metric_name: self.eval_cfg.metrics[metric_name]},
                 self.eval_cfg.get("retain_logs_path"),
             )
+            # Phase 1: adapter path and cache; Phase 2: memory at metric start
+            if os.environ.get("OOM_INVESTIGATION", "").lower() in ("1", "true", "yes"):
+                if hasattr(model, "adapter_config"):
+                    use_fix = getattr(model.adapter_config, "use_fixation_logits", None)
+                    cache_len = len(getattr(model, "_fixation_cache", {}))
+                    logger.info(
+                        f"[OOM_INVESTIGATION] metric_start {metric_name}: "
+                        f"adapter use_fixation_logits={use_fix} _fixation_cache len={cache_len}"
+                    )
+                if torch.cuda.is_available():
+                    alloc = torch.cuda.memory_allocated() / (1024**2)
+                    res = torch.cuda.memory_reserved() / (1024**2)
+                    logger.info(
+                        f"[OOM_INVESTIGATION] metric_start {metric_name}: "
+                        f"memory_allocated_MiB={alloc:.0f} memory_reserved_MiB={res:.0f}"
+                    )
             kwargs = {
                 "tokenizer": kwargs.get("tokenizer", None),
                 "template_args": kwargs.get("template_args", None),
@@ -297,5 +313,13 @@ class Evaluator:
             if torch.cuda.is_available():
                 torch.cuda.empty_cache()
                 gc.collect()
+            # Phase 2: memory at metric end (after empty_cache)
+            if os.environ.get("OOM_INVESTIGATION", "").lower() in ("1", "true", "yes") and torch.cuda.is_available():
+                alloc = torch.cuda.memory_allocated() / (1024**2)
+                res = torch.cuda.memory_reserved() / (1024**2)
+                logger.info(
+                    f"[OOM_INVESTIGATION] metric_end {metric_name}: "
+                    f"memory_allocated_MiB={alloc:.0f} memory_reserved_MiB={res:.0f}"
+                )
 
         return self.summarize(logs)

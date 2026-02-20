@@ -4,6 +4,7 @@ from typing import Dict, List, Optional, Union
 
 import os
 import logging
+import torch
 from transformers import Trainer
 from torch.utils.data import Dataset
 from transformers.trainer_utils import PREFIX_CHECKPOINT_DIR
@@ -61,6 +62,13 @@ class FinetuneTrainer(Trainer):
         # Run a custom evaluator and save results
         if self.evaluators:
             if self.accelerator.is_local_main_process:
+                # Phase 2: trainer baseline memory when eval runs (OOM investigation)
+                if os.environ.get("OOM_INVESTIGATION", "").lower() in ("1", "true", "yes") and torch.cuda.is_available():
+                    alloc = torch.cuda.memory_allocated() / (1024**2)
+                    res = torch.cuda.memory_reserved() / (1024**2)
+                    logger.info(
+                        f"[OOM_INVESTIGATION] evaluate_entry: memory_allocated_MiB={alloc:.0f} memory_reserved_MiB={res:.0f}"
+                    )
                 eval_metrics = {}
                 if self.accelerator.num_processes == 1:
                     run_dir = self._get_output_dir(trial=trial)

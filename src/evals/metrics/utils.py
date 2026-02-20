@@ -116,6 +116,19 @@ def run_batchwise_evals(model, dataloader, batch_eval_fn, batch_eval_fn_args, ev
         if torch.cuda.is_available():
             torch.cuda.empty_cache()
             gc.collect()
+        # Phase 3: per-batch memory when OOM investigation enabled
+        if (
+            os.environ.get("OOM_INVESTIGATION", "").lower() in ("1", "true", "yes")
+            and torch.cuda.is_available()
+            and (batch_idx % 10 == 0 or batch_idx == total - 1)
+        ):
+            alloc = torch.cuda.memory_allocated() / (1024**2)
+            res = torch.cuda.memory_reserved() / (1024**2)
+            import logging
+            logging.getLogger("metrics").info(
+                f"[OOM_INVESTIGATION] batch {batch_idx + 1}/{total}: "
+                f"memory_allocated_MiB={alloc:.0f} memory_reserved_MiB={res:.0f}"
+            )
     # evals looks like {iidx0: {idx453: {prob: 0.1, loss: 1}},
     #                   iidx1: {idx453: {prob: 0.2, loss: 2}}}
     if len(evals) == 1:  # normal single answer dataset, no need for list

@@ -1,6 +1,7 @@
 import os
 
 import hydra
+import torch
 from omegaconf import DictConfig
 from transformers import TrainerCallback
 from data import get_data, get_collators
@@ -53,6 +54,16 @@ def main(cfg: DictConfig):
     assert model_cfg is not None, "Invalid model yaml passed in train config."
     resume_from_checkpoint = cfg.get("resume_from_checkpoint", None)
     model, tokenizer = get_model(model_cfg, resume_from_checkpoint=resume_from_checkpoint)
+
+    # Phase 2: memory after model load (OOM investigation)
+    if os.environ.get("OOM_INVESTIGATION", "").lower() in ("1", "true", "yes") and torch.cuda.is_available():
+        import logging
+        _oom_log = logging.getLogger(__name__)
+        alloc = torch.cuda.memory_allocated() / (1024**2)
+        res = torch.cuda.memory_reserved() / (1024**2)
+        _oom_log.info(
+            f"[OOM_INVESTIGATION] after_model_load: memory_allocated_MiB={alloc:.0f} memory_reserved_MiB={res:.0f}"
+        )
 
     # Load Dataset
     data_cfg = cfg.data
