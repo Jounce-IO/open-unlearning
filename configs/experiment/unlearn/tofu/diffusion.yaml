@@ -19,6 +19,7 @@ model:
     time_epsilon: 0.001
     loss_weight_type: "scheduler"
     loss_normalization_type: "sequence"
+    tokens_per_step: 4  # Eval: steps = ceil(max_new_tokens / tokens_per_step); same as trajectory default
 
 forget_split: forget10
 retain_split: retain90
