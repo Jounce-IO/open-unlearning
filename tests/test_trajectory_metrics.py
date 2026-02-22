@@ -22,6 +22,7 @@ sys.path.insert(0, str(repo_root / "src"))
 
 from evals.metrics.trajectory_metrics import (
     _build_prompts_for_sampler,
+    _build_target_sequences_for_sampler,
     _get_sampler_from_model,
     _get_metric_from_registry,
     _call_metric_at_step,
@@ -655,6 +656,62 @@ class TestTrajectorySamplerKwargs:
         kwargs = _trajectory_sampler_kwargs(config)
         assert "trajectory_sample_interval" not in kwargs or kwargs.get("trajectory_sample_interval") is None
 
+    def test_evaluation_mode_default_unguided(self):
+        """When evaluation_mode is absent, returned kwargs include evaluation_mode='unguided'."""
+        config = {"sampler_kwargs": {"steps": 16}}
+        kwargs = _trajectory_sampler_kwargs(config)
+        assert kwargs.get("evaluation_mode") == "unguided"
+
+    def test_evaluation_mode_passed_when_set(self):
+        """When evaluation_mode is set to guided_native or guided_skew, it is included in kwargs."""
+        for mode in ("guided_native", "guided_skew"):
+            config = {"evaluation_mode": mode, "sampler_kwargs": {"steps": 16}}
+            kwargs = _trajectory_sampler_kwargs(config)
+            assert kwargs.get("evaluation_mode") == mode
+
+    def test_evaluation_mode_invalid_falls_back_to_unguided(self):
+        """When evaluation_mode is invalid, falls back to 'unguided'."""
+        config = {"evaluation_mode": "invalid", "sampler_kwargs": {}}
+        kwargs = _trajectory_sampler_kwargs(config)
+        assert kwargs.get("evaluation_mode") == "unguided"
+
+
+class TestBuildTargetSequencesForSampler:
+    """Tests for _build_target_sequences_for_sampler (target tokens for generated region only)."""
+
+    def test_single_sample_generated_region_extracted(self):
+        """Labels with IGNORE for prompt; generated region [10, 20, 30] -> [[10, 20, 30]]."""
+        P, L = 2, 3
+        labels = torch.full((1, P + L), IGNORE_INDEX)
+        labels[0, P:] = torch.tensor([10, 20, 30])
+        prompt_lens = [P]
+        out = _build_target_sequences_for_sampler(labels, prompt_lens, L, IGNORE_INDEX)
+        assert len(out) == 1
+        assert out[0] == [10, 20, 30]
+
+    def test_batch_two_variable_prompt_lens(self):
+        """Batch of 2: different prompt_lens; each row has length L."""
+        # Sample 0: prompt_len 2, generated [1, 2, 3]; Sample 1: prompt_len 1, generated [4, 5, 6]
+        labels = torch.tensor([
+            [IGNORE_INDEX, IGNORE_INDEX, 1, 2, 3],
+            [IGNORE_INDEX, 4, 5, 6, 0],
+        ])
+        prompt_lens = [2, 1]
+        L = 3
+        out = _build_target_sequences_for_sampler(labels, prompt_lens, L, IGNORE_INDEX)
+        assert len(out) == 2
+        assert out[0] == [1, 2, 3]
+        assert out[1] == [4, 5, 6]
+
+    def test_padding_when_slice_shorter_than_L(self):
+        """When labels row has fewer than L generated tokens, pad with ignore_index."""
+        labels = torch.tensor([[IGNORE_INDEX, IGNORE_INDEX, 10, 20]])  # only 2 generated
+        prompt_lens = [2]
+        L = 4
+        out = _build_target_sequences_for_sampler(labels, prompt_lens, L, IGNORE_INDEX)
+        assert len(out) == 1
+        assert out[0] == [10, 20, IGNORE_INDEX, IGNORE_INDEX]
+
 
 class TestTrajectoryMetricsIndexErrorRepro:
     """Reproduces IndexError when a batch has fewer steps than run_steps_to_use (for debug instrumentation)."""
@@ -830,6 +887,325 @@ class TestTrajectoryMetricsIntegration:
             # Check that it's not a shape mismatch error
             assert "Expected target size" not in str(e)
             assert "shape" not in str(e).lower() or "mismatch" not in str(e).lower()
+
+    def test_guided_mode_passes_target_sequences_and_evaluation_mode_to_sampler(self):
+        """When evaluation_mode is guided_native or guided_skew, sampler.sample receives target_sequences and evaluation_mode."""
+        V, L_gen, S = 100, 5, 8
+        prompt_len = 3
+        full_len = prompt_len + L_gen
+        logits_history = [torch.randn(1, full_len, V) for _ in range(S)]
+        fixation_steps = torch.randint(0, S, (1, full_len))
+
+        class MockSamplerOutput:
+            def __init__(self, sequences, logits_history, fixation_steps):
+                self.sequences = sequences
+                self.histories = None
+                self.logits_history = logits_history
+                self.fixation_steps = fixation_steps
+
+        captured = []
+
+        def capture_sample(**kwargs):
+            captured.append(dict(kwargs))
+            return MockSamplerOutput(
+                sequences=torch.randint(0, V, (1, full_len)),
+                logits_history=logits_history,
+                fixation_steps=fixation_steps,
+            )
+
+        sampler = Mock()
+        sampler.sample.side_effect = capture_sample
+        model = Mock()
+        model.sampler = sampler
+
+        # Training-style: IGNORE for prompt, real tokens for generated
+        input_ids_row = torch.randint(0, V, (full_len,))
+        labels_row = torch.full((full_len,), IGNORE_INDEX)
+        labels_row[prompt_len:] = torch.tensor([10, 20, 30, 40, 50])
+
+        class MockDataset:
+            def __init__(self):
+                self.data = [
+                    {"input_ids": input_ids_row.clone(), "labels": labels_row.clone()}
+                ]
+
+            def __len__(self):
+                return len(self.data)
+
+            def __getitem__(self, idx):
+                return self.data[idx]
+
+        def mock_collator(batch):
+            return {
+                "input_ids": torch.stack([b["input_ids"] for b in batch]),
+                "labels": torch.stack([b["labels"] for b in batch]),
+                "indices": torch.tensor([0]),
+            }
+
+        tokenizer = Mock()
+        tokenizer.decode = lambda x, **kwargs: "decoded"
+        tokenizer.eos_token_id = None
+
+        raw_fn = trajectory_metrics._metric_fn if hasattr(trajectory_metrics, "_metric_fn") else trajectory_metrics
+        raw_fn(
+            model,
+            metric_name="trajectory_metrics",
+            cache={},
+            metrics=["probability"],
+            data=MockDataset(),
+            collators=mock_collator,
+            tokenizer=tokenizer,
+            batch_size=1,
+            trajectory_config={
+                "return_logits": True,
+                "evaluation_mode": "guided_native",
+                "sampler_kwargs": {"steps": S, "max_new_tokens": L_gen},
+            },
+        )
+        assert len(captured) >= 1
+        call_kw = captured[0]
+        assert "target_sequences" in call_kw
+        assert call_kw["evaluation_mode"] == "guided_native"
+        assert call_kw["target_sequences"] == [[10, 20, 30, 40, 50]]
+
+    def test_unguided_mode_does_not_pass_target_sequences(self):
+        """When evaluation_mode is unguided or absent, sampler.sample is not given target_sequences."""
+        V, L_gen, S = 100, 5, 8
+        prompt_len = 3
+        full_len = prompt_len + L_gen
+        logits_history = [torch.randn(1, full_len, V) for _ in range(S)]
+        fixation_steps = torch.randint(0, S, (1, full_len))
+
+        class MockSamplerOutput:
+            def __init__(self, sequences, logits_history, fixation_steps):
+                self.sequences = sequences
+                self.histories = None
+                self.logits_history = logits_history
+                self.fixation_steps = fixation_steps
+
+        captured = []
+
+        def capture_sample(**kwargs):
+            captured.append(dict(kwargs))
+            return MockSamplerOutput(
+                sequences=torch.randint(0, V, (1, full_len)),
+                logits_history=logits_history,
+                fixation_steps=fixation_steps,
+            )
+
+        sampler = Mock()
+        sampler.sample.side_effect = capture_sample
+        model = Mock()
+        model.sampler = sampler
+
+        input_ids_row = torch.randint(0, V, (full_len,))
+        labels_row = torch.full((full_len,), IGNORE_INDEX)
+        labels_row[prompt_len:] = torch.tensor([10, 20, 30, 40, 50])
+
+        class MockDataset:
+            def __init__(self):
+                self.data = [
+                    {"input_ids": input_ids_row.clone(), "labels": labels_row.clone()}
+                ]
+
+            def __len__(self):
+                return len(self.data)
+
+            def __getitem__(self, idx):
+                return self.data[idx]
+
+        def mock_collator(batch):
+            return {
+                "input_ids": torch.stack([b["input_ids"] for b in batch]),
+                "labels": torch.stack([b["labels"] for b in batch]),
+                "indices": torch.tensor([0]),
+            }
+
+        tokenizer = Mock()
+        tokenizer.decode = lambda x, **kwargs: "decoded"
+        tokenizer.eos_token_id = None
+
+        raw_fn = trajectory_metrics._metric_fn if hasattr(trajectory_metrics, "_metric_fn") else trajectory_metrics
+        raw_fn(
+            model,
+            metric_name="trajectory_metrics",
+            cache={},
+            metrics=["probability"],
+            data=MockDataset(),
+            collators=mock_collator,
+            tokenizer=tokenizer,
+            batch_size=1,
+            trajectory_config={
+                "return_logits": True,
+                "evaluation_mode": "unguided",
+                "sampler_kwargs": {"steps": S, "max_new_tokens": L_gen},
+            },
+        )
+        assert len(captured) >= 1
+        call_kw = captured[0]
+        assert "target_sequences" not in call_kw
+
+    def test_trajectory_metrics_guided_modes_produce_valid_step_wise_metrics(self):
+        """With evaluation_mode=guided_native or guided_skew and use_generalized_sequence_probability, metrics run and return valid values."""
+        import numpy as np
+        V, L_gen, S = 100, 10, 8
+        prompt_len = 5
+        full_len = prompt_len + L_gen
+        logits_history = [torch.randn(1, full_len, V) for _ in range(S)]
+        fixation_steps = torch.randint(0, S, (1, full_len))
+
+        class MockSamplerOutput:
+            def __init__(self, sequences, logits_history, fixation_steps):
+                self.sequences = sequences
+                self.histories = None
+                self.logits_history = logits_history
+                self.fixation_steps = fixation_steps
+
+        for evaluation_mode in ("guided_native", "guided_skew"):
+            sampler = Mock()
+            sampler.sample.return_value = MockSamplerOutput(
+                sequences=torch.randint(0, V, (1, full_len)),
+                logits_history=logits_history,
+                fixation_steps=fixation_steps,
+            )
+            model = Mock()
+            model.sampler = sampler
+
+            class MockDataset:
+                def __init__(self):
+                    self.data = [
+                        {
+                            "input_ids": torch.randint(0, V, (full_len,)),
+                            "labels": torch.randint(0, V, (full_len,)),
+                        }
+                        for _ in range(2)
+                    ]
+
+                def __len__(self):
+                    return len(self.data)
+
+                def __getitem__(self, idx):
+                    return self.data[idx]
+
+            def mock_collator(batch):
+                return {
+                    "input_ids": torch.stack([b["input_ids"] for b in batch]),
+                    "labels": torch.stack([b["labels"] for b in batch]),
+                    "indices": torch.tensor([0, 1]),
+                }
+
+            tokenizer = Mock()
+            tokenizer.decode = lambda x, **kwargs: "decoded"
+            tokenizer.eos_token_id = 0
+
+            raw_fn = trajectory_metrics._metric_fn if hasattr(trajectory_metrics, "_metric_fn") else trajectory_metrics
+            result = raw_fn(
+                model,
+                metric_name="trajectory_metrics",
+                cache={},
+                metrics=["probability", "extraction_strength"],
+                data=MockDataset(),
+                collators=mock_collator,
+                tokenizer=tokenizer,
+                batch_size=1,
+                trajectory_config={
+                    "return_logits": True,
+                    "use_generalized_sequence_probability": True,
+                    "evaluation_mode": evaluation_mode,
+                    "sampler_kwargs": {"steps": S, "max_new_tokens": L_gen},
+                },
+            )
+            assert result is not None
+            assert isinstance(result, dict)
+            if "probability" in result:
+                for v in result["probability"] if isinstance(result["probability"], list) else [result["probability"]]:
+                    if isinstance(v, dict) and "prob" in v and v["prob"] is not None:
+                        assert 0 <= v["prob"] <= 1.0 or np.isfinite(v["prob"])
+            if "extraction_strength" in result:
+                for v in result["extraction_strength"] if isinstance(result["extraction_strength"], list) else [result["extraction_strength"]]:
+                    if isinstance(v, dict) and "extraction_strength" in v and v["extraction_strength"] is not None:
+                        assert np.isfinite(v["extraction_strength"])
+
+    def test_trajectory_metrics_generalized_config_produces_valid_metrics(self):
+        """With use_generalized_sequence_probability true, probability and extraction_strength return values in [0,1]."""
+        import numpy as np
+        V, L_gen, S = 100, 10, 8
+        prompt_len = 5
+        full_len = prompt_len + L_gen
+        logits_history = [torch.randn(1, full_len, V) for _ in range(S)]
+        fixation_steps = torch.randint(0, S, (1, full_len))
+
+        class MockSamplerOutput:
+            def __init__(self, sequences, logits_history, fixation_steps):
+                self.sequences = sequences
+                self.histories = None
+                self.logits_history = logits_history
+                self.fixation_steps = fixation_steps
+
+        sampler = Mock()
+        sampler.sample.return_value = MockSamplerOutput(
+            sequences=torch.randint(0, V, (1, full_len)),
+            logits_history=logits_history,
+            fixation_steps=fixation_steps,
+        )
+        model = Mock()
+        model.sampler = sampler
+
+        class MockDataset:
+            def __init__(self):
+                self.data = [
+                    {"input_ids": torch.randint(0, V, (full_len,)), "labels": torch.randint(0, V, (full_len,))}
+                    for _ in range(2)
+                ]
+            def __len__(self):
+                return len(self.data)
+            def __getitem__(self, idx):
+                return self.data[idx]
+
+        def mock_collator(batch):
+            return {
+                "input_ids": torch.stack([b["input_ids"] for b in batch]),
+                "labels": torch.stack([b["labels"] for b in batch]),
+                "indices": torch.tensor([0, 1]),
+            }
+
+        tokenizer = Mock()
+        tokenizer.decode = lambda x, **kwargs: "decoded"
+        tokenizer.eos_token_id = 0
+
+        raw_fn = trajectory_metrics._metric_fn if hasattr(trajectory_metrics, "_metric_fn") else trajectory_metrics
+        result = raw_fn(
+            model,
+            metric_name="trajectory_metrics",
+            cache={},
+            metrics=["probability", "extraction_strength"],
+            data=MockDataset(),
+            collators=mock_collator,
+            tokenizer=tokenizer,
+            batch_size=1,
+            trajectory_config={
+                "return_logits": True,
+                "return_fixation_steps": True,
+                "use_generalized_sequence_probability": True,
+                "logit_alignment": "causal",
+                "sampler_kwargs": {"steps": S, "max_new_tokens": L_gen, "trajectory_sample_interval": 8},
+            },
+        )
+        assert isinstance(result, dict)
+        agg = result.get("agg_value")
+        assert agg is not None
+        for view_name, view_data in agg.items():
+            if not isinstance(view_data, dict):
+                continue
+            for traj_name, traj_data in view_data.items():
+                if not isinstance(traj_data, dict):
+                    continue
+                for metric_name in ("probability", "extraction_strength"):
+                    if metric_name in traj_data:
+                        arr = np.asarray(traj_data[metric_name], dtype=float)
+                        finite = arr[np.isfinite(arr)]
+                        assert len(finite) >= 1, f"{view_name}/{traj_name}/{metric_name} has no finite values"
+                        assert np.all((finite >= 0) & (finite <= 1)), f"{view_name}/{traj_name}/{metric_name} not in [0,1]"
 
     def test_trajectory_metrics_sets_use_fixation_logits_on_adapter(self):
         """When model has adapter_config, trajectory_metrics sets use_fixation_logits from trajectory_config (default True)."""
