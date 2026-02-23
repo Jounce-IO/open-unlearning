@@ -88,7 +88,7 @@ The adapter supports **training mode** for adapter-based unlearning (GradAscent,
 From the main **dllm** repo, run with a **config file** (run identity and hyperparameters come from the config):
 
 ```bash
-dllm unlearn CONFIG [--output-dir DIR] [--no-resume] [--resume-from PATH] [--dry-run] [--report-output-path PATH]
+dllm unlearn CONFIG [--output-dir DIR] [--resume-latest] [--resume-from PATH] [--dry-run] [--report-output-path PATH]
 ```
 
 Example:
@@ -100,7 +100,7 @@ dllm unlearn configs/unlearn/llada-8b/TOFU/forget01/WGA/wga-beta05.yaml --output
 - **CONFIG:** Path to run config YAML (local or `gs://`). Convention: `configs/unlearn/<model>/<benchmark>/<split>/<method>/<name>.yaml`. Config must include `model`, `benchmark`, `split`, `method`; optional `trainer.args`, `trainer.method_args`, `output_dir`, etc. See the main repo [Configuration guide](../../docs/configuration.md#config-only-dllm-unlearn).
 - **Model:** Set in config (local path, HuggingFace ID, or **gs://**; downloaded before training).
 - **Output dir:** Default from path convention or config `output_dir`; override with `--output-dir`. A timestamp subdir (YYYYMMDDHHMMSS) is always added. When gs://, checkpoints and final model are written locally then uploaded to GCS; a background watcher uploads new checkpoints so runs can resume after spot preemption.
-- **Resume:** If the run dir already has checkpoints, the next run **auto-resumes** unless you pass `--no-resume`. Use `--resume-from <path>` to resume from a specific checkpoint (gs:// or local).
+- **Resume:** By default runs start from scratch. Pass **`--resume-latest`** to resume from the latest checkpoint under the output parent (e.g. after spot preemption), or **`--resume-from <path>`** to resume from a specific path (gs:// or local).
 - **Logging (report_to):** Controlled by `trainer.args.report_to` (default `wandb`). In K8s the chart injects `WANDB_API_KEY` from the wandb secret. Disable W&B with `report_to: none` in config or `--report-to none`.
 
 See `dllm unlearn --help` for all flags. When running in K8s with `results.capture=true` and `results.createPr=true`, the job creates a PR that includes the unlearn report (config, model save path, W&B run URL).
