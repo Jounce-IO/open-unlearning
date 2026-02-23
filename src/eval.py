@@ -87,6 +87,13 @@ def main(cfg: DictConfig):
         if world_size > 1 and isinstance(logs, dict) and "config" in logs and output_dir:
             # Data parallel: each rank writes its own file so the report can merge and show true run_info.
             samples_this_rank = _total_samples_from_merged_logs(logs) or 0
+            if samples_this_rank == 0:
+                # Trajectory metrics don't fill value_by_index; infer from config (DistributedSampler split).
+                total = getattr(evaluator.eval_cfg, "samples", None)
+                if total is not None:
+                    total = int(total)
+                    base, rem = divmod(total, world_size)
+                    samples_this_rank = base + (1 if rank < rem else 0)
             logs["run_info"] = {
                 "rank": rank,
                 "world_size": world_size,
