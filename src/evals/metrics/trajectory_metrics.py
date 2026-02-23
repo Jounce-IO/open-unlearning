@@ -1118,7 +1118,7 @@ def trajectory_metrics(model, **kwargs):
         # Extract config
         metrics_config = kwargs.get("metrics", [])
         trajectory_config = kwargs.get("trajectory_config", {})
-        metric_worker_pool_size = trajectory_config.get("metric_worker_pool_size", 0)
+        metric_worker_pool_size = trajectory_config.get("metric_worker_pool_size", 4)
         executor = (
             ProcessPoolExecutor(max_workers=metric_worker_pool_size)
             if metric_worker_pool_size > 0
