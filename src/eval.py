@@ -8,7 +8,12 @@ from model import get_model
 from evals import get_evaluators
 from evals.metrics.privacy import log_retain_logs_path_none_if_needed
 from evals.gpu_phase_logger import set_phase as gpu_set_phase
-from evals.distributed import get_rank, get_world_size, gather_logs_to_rank0
+from evals.distributed import (
+    get_rank,
+    get_world_size,
+    gather_logs_to_rank0,
+    _total_samples_from_merged_logs,
+)
 
 # Set up logging
 logging.basicConfig(
@@ -84,14 +89,7 @@ def main(cfg: DictConfig):
             merged_logs = gather_logs_to_rank0(logs, rank, world_size)
             if rank == 0 and merged_logs is not None:
                 # Always set run_info before save so report PRs can verify data-parallel (no duplication).
-                total_indices = None
-                for key, value in merged_logs.items():
-                    if key == "config" or not isinstance(value, dict):
-                        continue
-                    vbi = value.get("value_by_index")
-                    if isinstance(vbi, dict) and vbi:
-                        total_indices = len(vbi)
-                        break
+                total_indices = _total_samples_from_merged_logs(merged_logs)
                 if total_indices is not None:
                     merged_logs["run_info"] = {
                         "world_size": world_size,

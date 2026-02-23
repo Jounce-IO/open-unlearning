@@ -63,9 +63,28 @@ class Evaluator:
         else:
             return obj
 
+    def _total_samples_from_logs(self, logs):
+        """Find total sample count from first non-empty value_by_index in logs."""
+        for key, value in logs.items():
+            if key == "config" or not isinstance(value, dict):
+                continue
+            vbi = value.get("value_by_index")
+            if isinstance(vbi, dict) and len(vbi) > 0:
+                return len(vbi)
+        return None
+
     def save_logs(self, logs, file):
         """Save the logs in a json file"""
         logs = dict(sorted(logs.items()))
+        # Ensure run_info is present so report PRs can show data-parallel info (eval.py sets it for distributed).
+        if "run_info" not in logs:
+            total = self._total_samples_from_logs(logs)
+            if total is not None:
+                logs["run_info"] = {
+                    "world_size": 1,
+                    "total_samples": total,
+                    "data_parallel": False,
+                }
         # Remove value_by_index (used for calculations but not needed in final JSON)
         logs = self._remove_value_by_index(logs)
         # Convert numpy arrays to lists for JSON serialization

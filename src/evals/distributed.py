@@ -10,6 +10,17 @@ import torch
 logger = logging.getLogger(__name__)
 
 
+def _total_samples_from_merged_logs(merged: dict) -> int | None:
+    """Find total unique sample count from merged logs (first non-empty value_by_index)."""
+    for key, value in merged.items():
+        if key == "config" or not isinstance(value, dict):
+            continue
+        vbi = value.get("value_by_index")
+        if isinstance(vbi, dict) and len(vbi) > 0:
+            return len(vbi)
+    return None
+
+
 def get_rank() -> int:
     """Return global rank (0..world_size-1). Returns 0 if not in a distributed run."""
     if torch.distributed.is_initialized():
