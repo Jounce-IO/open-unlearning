@@ -104,6 +104,9 @@ class Evaluator:
     def evaluate(self, model, output_dir=None, overwrite=None, **kwargs):
         # set flag to overwrite metrics
         overwrite = self.eval_cfg.overwrite if overwrite is None else overwrite
+        rank = kwargs.get("rank", 0)
+        world_size = kwargs.get("world_size", 1)
+        is_distributed = world_size > 1
 
         # Prepare model for evaluation
         model = self.prepare_model(model)
@@ -112,10 +115,13 @@ class Evaluator:
         output_dir = output_dir if output_dir else self.eval_cfg.output_dir
         logs_file_path = self.get_logs_file_path(output_dir)
 
-        # Load existing results from file if any.
-        logs = self.load_logs_from_file(logs_file_path) if not overwrite else {}
-        
-        # Save config information (only once, at the start)
+        # Load existing results from file if any (only rank 0 when distributed, to avoid conflict)
+        if not is_distributed or rank == 0:
+            logs = self.load_logs_from_file(logs_file_path) if not overwrite else {}
+        else:
+            logs = {}
+
+        # Save config information (only once, at the start); only rank 0 saves when distributed
         if "config" not in logs or overwrite:
             from omegaconf import OmegaConf
             config_dict = {
@@ -128,7 +134,8 @@ class Evaluator:
             elif hasattr(model, "model") and hasattr(model.model, "config") and hasattr(model.model.config, "_name_or_path"):
                 config_dict["model_name"] = model.model.config._name_or_path
             logs["config"] = config_dict
-            self.save_logs(logs, logs_file_path)
+            if not is_distributed:
+                self.save_logs(logs, logs_file_path)
 
         logger.info(f"***** Running {self.name} evaluation suite *****")
         log_retain_logs_path_none_if_needed(
@@ -160,7 +167,7 @@ class Evaluator:
                         logger.info(
                             f"Result for metric {metric_name}:\t{logs[metric_name]['agg_value']}"
                         )
-                return self.summarize(logs)
+                return logs
             for m in self.metrics:
                 _ = logs.pop(m, None)
             first_name = next(iter(self.metrics))
@@ -236,8 +243,9 @@ class Evaluator:
             for metric_name in self.metrics:
                 if logs.get(metric_name, {}).get("agg_value") is not None:
                     logger.info(f"Result for metric {metric_name}:\t{logs[metric_name]['agg_value']}")
-            self.save_logs(logs, logs_file_path)
-            return self.summarize(logs)
+            if not is_distributed:
+                self.save_logs(logs, logs_file_path)
+            return logs
 
         for metric_name, metric_fn in self.metrics.items():
             metric_cfg = self.eval_cfg.metrics[metric_name]
@@ -290,6 +298,7 @@ class Evaluator:
             )
             if "agg_value" in result:
                 logger.info(f"Result for metric {metric_name}:\t{result['agg_value']}")
-            self.save_logs(logs, logs_file_path)
+            if not is_distributed:
+                self.save_logs(logs, logs_file_path)
 
-        return self.summarize(logs)
+        return logs

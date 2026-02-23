@@ -8,6 +8,7 @@ from model import get_model
 from evals import get_evaluators
 from evals.metrics.privacy import log_retain_logs_path_none_if_needed
 from evals.gpu_phase_logger import set_phase as gpu_set_phase
+from evals.distributed import get_rank, get_world_size, gather_logs_to_rank0
 
 # Set up logging
 logging.basicConfig(
@@ -21,13 +22,19 @@ logger = logging.getLogger(__name__)
 os.environ.setdefault("TRANSFORMERS_VERBOSITY", "info")
 os.environ.setdefault("HF_HUB_VERBOSITY", "1")  # 1=info, 2=debug
 
+
 @hydra.main(version_base=None, config_path="../configs", config_name="eval.yaml")
 def main(cfg: DictConfig):
     """Entry point of the code to evaluate models
     Args:
         cfg (DictConfig): Config to train
     """
-    logger.info("=== Starting evaluation ===")
+    rank = get_rank()
+    world_size = get_world_size()
+    if world_size > 1:
+        logger.info("=== Starting evaluation (distributed: rank %s / %s) ===", rank, world_size)
+    else:
+        logger.info("=== Starting evaluation ===")
     gpu_set_phase("eval_start")
     seed_everything(cfg.seed)
     model_cfg = cfg.model
@@ -68,12 +75,23 @@ def main(cfg: DictConfig):
             "template_args": template_args,
             "model": model,
             "tokenizer": tokenizer,
+            "rank": rank,
+            "world_size": world_size,
         }
-        _ = evaluator.evaluate(**eval_args)
+        logs = evaluator.evaluate(**eval_args)
+        # When distributed, gather partial logs to rank 0 and save once (base Evaluator with trajectory)
+        if world_size > 1 and isinstance(logs, dict) and "config" in logs:
+            merged_logs = gather_logs_to_rank0(logs, rank, world_size)
+            if rank == 0 and merged_logs is not None:
+                output_dir = getattr(evaluator.eval_cfg, "output_dir", None) or evaluator.eval_cfg.get("output_dir")
+                if output_dir:
+                    logs_file_path = evaluator.get_logs_file_path(output_dir)
+                    evaluator.save_logs(merged_logs, logs_file_path)
         gpu_set_phase("evaluator_end", metric=evaluator_name)
         logger.info(f"Evaluator {evaluator_name} completed")
     gpu_set_phase("eval_complete")
-    logger.info("=== Evaluation complete ===")
+    if rank == 0:
+        logger.info("=== Evaluation complete ===")
 
 
 if __name__ == "__main__":
