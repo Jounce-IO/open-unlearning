@@ -97,11 +97,11 @@ Example:
 dllm unlearn configs/unlearn/llada-8b/TOFU/forget01/WGA/wga-beta05.yaml --output-dir gs://your-bucket/unlearn-runs
 ```
 
-- **CONFIG:** Path to run config YAML (local or `gs://`). Convention: `configs/unlearn/<model>/<benchmark>/<split>/<method>/<name>.yaml`. Config must include `model`, `benchmark`, `split`, `method`; optional `trainer.args`, `trainer.method_args`, `output_dir`, `wandb: false`, etc. See the main repo [Configuration guide](../../docs/configuration.md#config-only-dllm-unlearn).
+- **CONFIG:** Path to run config YAML (local or `gs://`). Convention: `configs/unlearn/<model>/<benchmark>/<split>/<method>/<name>.yaml`. Config must include `model`, `benchmark`, `split`, `method`; optional `trainer.args`, `trainer.method_args`, `output_dir`, etc. See the main repo [Configuration guide](../../docs/configuration.md#config-only-dllm-unlearn).
 - **Model:** Set in config (local path, HuggingFace ID, or **gs://**; downloaded before training).
 - **Output dir:** Default from path convention or config `output_dir`; override with `--output-dir`. A timestamp subdir (YYYYMMDDHHMMSS) is always added. When gs://, checkpoints and final model are written locally then uploaded to GCS; a background watcher uploads new checkpoints so runs can resume after spot preemption.
 - **Resume:** If the run dir already has checkpoints, the next run **auto-resumes** unless you pass `--no-resume`. Use `--resume-from <path>` to resume from a specific checkpoint (gs:// or local).
-- **W&B:** Enabled by default when `WANDB_API_KEY` is set; disable with `wandb: false` in config.
+- **Logging (report_to):** Controlled by `trainer.args.report_to` (default `wandb`). In K8s the chart injects `WANDB_API_KEY` from the wandb secret. Disable W&B with `report_to: none` in config or `--report-to none`.
 
 See `dllm unlearn --help` for all flags. When running in K8s with `results.capture=true` and `results.createPr=true`, the job creates a PR that includes the unlearn report (config, model save path, W&B run URL).
 
