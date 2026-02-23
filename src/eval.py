@@ -83,22 +83,26 @@ def main(cfg: DictConfig):
         if world_size > 1 and isinstance(logs, dict) and "config" in logs:
             merged_logs = gather_logs_to_rank0(logs, rank, world_size)
             if rank == 0 and merged_logs is not None:
-                # Ensure run_info is present so report PRs can verify data-parallel (no duplication).
-                if "run_info" not in merged_logs:
-                    total_indices = None
-                    for key, value in merged_logs.items():
-                        if key == "config" or not isinstance(value, dict):
-                            continue
-                        vbi = value.get("value_by_index")
-                        if isinstance(vbi, dict) and vbi:
-                            total_indices = len(vbi)
-                            break
-                    if total_indices is not None:
-                        merged_logs["run_info"] = {
-                            "world_size": world_size,
-                            "total_samples": total_indices,
-                            "data_parallel": True,
-                        }
+                # Always set run_info before save so report PRs can verify data-parallel (no duplication).
+                total_indices = None
+                for key, value in merged_logs.items():
+                    if key == "config" or not isinstance(value, dict):
+                        continue
+                    vbi = value.get("value_by_index")
+                    if isinstance(vbi, dict) and vbi:
+                        total_indices = len(vbi)
+                        break
+                if total_indices is not None:
+                    merged_logs["run_info"] = {
+                        "world_size": world_size,
+                        "total_samples": total_indices,
+                        "data_parallel": True,
+                    }
+                    logger.info(
+                        "run_info set for distributed save: world_size=%s, total_samples=%s",
+                        world_size,
+                        total_indices,
+                    )
                 output_dir = getattr(evaluator.eval_cfg, "output_dir", None) or evaluator.eval_cfg.get("output_dir")
                 if output_dir:
                     logs_file_path = evaluator.get_logs_file_path(output_dir)
