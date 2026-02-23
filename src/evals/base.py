@@ -73,8 +73,9 @@ class Evaluator:
                 return len(vbi)
         return None
 
-    def save_logs(self, logs, file):
-        """Save the logs in a json file"""
+    def save_logs(self, logs, file, keep_value_by_index=False):
+        """Save the logs in a json file.
+        When keep_value_by_index is True (e.g. per-rank files for later merge), value_by_index is kept."""
         logs = dict(sorted(logs.items()))
         # Ensure run_info is present so report PRs can show data-parallel info (eval.py sets it for distributed).
         if "run_info" not in logs:
@@ -85,8 +86,9 @@ class Evaluator:
                     "total_samples": total,
                     "data_parallel": False,
                 }
-        # Remove value_by_index (used for calculations but not needed in final JSON)
-        logs = self._remove_value_by_index(logs)
+        if not keep_value_by_index:
+            # Remove value_by_index (used for calculations but not needed in final JSON)
+            logs = self._remove_value_by_index(logs)
         # Convert numpy arrays to lists for JSON serialization
         logs = self._convert_numpy_to_list(logs)
         os.makedirs(os.path.dirname(file), exist_ok=True)

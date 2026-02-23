@@ -11,7 +11,6 @@ from evals.gpu_phase_logger import set_phase as gpu_set_phase
 from evals.distributed import (
     get_rank,
     get_world_size,
-    gather_logs_to_rank0,
     _total_samples_from_merged_logs,
 )
 
@@ -84,27 +83,25 @@ def main(cfg: DictConfig):
             "world_size": world_size,
         }
         logs = evaluator.evaluate(**eval_args)
-        # When distributed, gather partial logs to rank 0 and save once (base Evaluator with trajectory)
-        if world_size > 1 and isinstance(logs, dict) and "config" in logs:
-            merged_logs = gather_logs_to_rank0(logs, rank, world_size)
-            if rank == 0 and merged_logs is not None:
-                # Always set run_info before save so report PRs can verify data-parallel (no duplication).
-                total_indices = _total_samples_from_merged_logs(merged_logs)
-                if total_indices is not None:
-                    merged_logs["run_info"] = {
-                        "world_size": world_size,
-                        "total_samples": total_indices,
-                        "data_parallel": True,
-                    }
-                    logger.info(
-                        "run_info set for distributed save: world_size=%s, total_samples=%s",
-                        world_size,
-                        total_indices,
-                    )
-                output_dir = getattr(evaluator.eval_cfg, "output_dir", None) or evaluator.eval_cfg.get("output_dir")
-                if output_dir:
-                    logs_file_path = evaluator.get_logs_file_path(output_dir)
-                    evaluator.save_logs(merged_logs, logs_file_path)
+        output_dir = getattr(evaluator.eval_cfg, "output_dir", None) or evaluator.eval_cfg.get("output_dir")
+        if world_size > 1 and isinstance(logs, dict) and "config" in logs and output_dir:
+            # Data parallel: each rank writes its own file so the report can merge and show true run_info.
+            samples_this_rank = _total_samples_from_merged_logs(logs) or 0
+            logs["run_info"] = {
+                "rank": rank,
+                "world_size": world_size,
+                "samples_this_rank": samples_this_rank,
+                "data_parallel": True,
+            }
+            logger.info(
+                "rank %s/%s saving %s samples to per-rank file",
+                rank,
+                world_size,
+                samples_this_rank,
+            )
+            logs_file_path = evaluator.get_logs_file_path(output_dir, suffix=f"EVAL_rank{rank}")
+            evaluator.save_logs(logs, logs_file_path, keep_value_by_index=True)
+        # Single process: base evaluator already saves in evaluate()
         gpu_set_phase("evaluator_end", metric=evaluator_name)
         logger.info(f"Evaluator {evaluator_name} completed")
     gpu_set_phase("eval_complete")
