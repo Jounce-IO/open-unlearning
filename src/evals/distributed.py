@@ -72,7 +72,23 @@ def gather_logs_to_rank0(logs: dict, rank: int, world_size: int) -> dict | None:
         obj_list = [None] * world_size
         dist.all_gather_object(obj_list, logs)
         if rank == 0:
-            return _merge_value_by_index(obj_list)
+            merged = _merge_value_by_index(obj_list)
+            # Set run_info for distributed run (total_samples = unique indices across ranks).
+            total_indices = None
+            for key, value in (merged or {}).items():
+                if key == "config" or not isinstance(value, dict):
+                    continue
+                vbi = value.get("value_by_index")
+                if isinstance(vbi, dict) and vbi:
+                    total_indices = len(vbi)
+                    break
+            if merged is not None and total_indices is not None:
+                merged["run_info"] = {
+                    "world_size": world_size,
+                    "total_samples": total_indices,
+                    "data_parallel": True,
+                }
+            return merged
     except Exception as e:
         logger.warning("Failed to gather logs: %s", e)
         return logs if rank == 0 else None

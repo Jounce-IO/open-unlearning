@@ -1383,12 +1383,20 @@ def trajectory_metrics(model, **kwargs):
             if not metrics_to_run:
                 continue
 
-            n_samples = len(dataloader.dataset)
+            n_samples = (
+                len(dataloader.sampler)
+                if use_distributed_sampler and getattr(dataloader, "sampler", None) is not None
+                else len(dataloader.dataset)
+            )
             expected_batches = (n_samples + batch_size - 1) // batch_size
             logger.info(
                 f"Trajectory forget dataset: {n_samples} samples, batch_size {batch_size}, "
                 f"expected batches: {expected_batches} (last batch index: {expected_batches - 1})"
             )
+            if use_distributed_sampler:
+                logger.info(
+                    f"Data parallel: rank {rank}/{world_size} processes {n_samples} samples (no duplication)"
+                )
             all_rouge_futures: list = []
             effective_length_by_index: dict[str, int] = {}
             prompt_len_by_index: dict[str, int] = {}
