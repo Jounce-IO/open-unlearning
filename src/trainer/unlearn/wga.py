@@ -8,7 +8,8 @@ class WGA(GradDiff):
         self.gamma = gamma
         self.alpha = alpha
         self.beta = beta
-        if self.ref_model is None:
+        # Ref model only needed for KL retain; NLL retain and WGA forget loss use the training model only.
+        if self.ref_model is None and self.retain_loss_type == "KL":
             self.ref_model = self._prepare_ref_model(self.model)
 
     def compute_loss(self, model, inputs, return_outputs=False, num_items_in_batch=None, **kwargs):
