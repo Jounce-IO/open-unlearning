@@ -16,6 +16,7 @@ import numpy as np
 import torch
 from typing import Dict, List, Any, Optional, Union
 from torch.utils.data import DataLoader
+from torch.utils.data.distributed import DistributedSampler
 from omegaconf import ListConfig, DictConfig
 
 from evals.metrics.base import unlearning_metric
@@ -1117,7 +1118,7 @@ def trajectory_metrics(model, **kwargs):
         # Extract config
         metrics_config = kwargs.get("metrics", [])
         trajectory_config = kwargs.get("trajectory_config", {})
-        metric_worker_pool_size = trajectory_config.get("metric_worker_pool_size", 0)
+        metric_worker_pool_size = trajectory_config.get("metric_worker_pool_size", 4)
         executor = (
             ProcessPoolExecutor(max_workers=metric_worker_pool_size)
             if metric_worker_pool_size > 0
@@ -1130,7 +1131,10 @@ def trajectory_metrics(model, **kwargs):
         sort_by_length = kwargs.get("sort_by_length", False)
         tokenizer = kwargs.get("tokenizer")
         generation_args = kwargs.get("generation_args", {})
-    
+        rank = kwargs.get("rank", 0)
+        world_size = kwargs.get("world_size", 1)
+        use_distributed_sampler = world_size > 1
+
         if not metrics_config:
             raise ValueError("No metrics specified in config")
     
@@ -1219,9 +1223,19 @@ def trajectory_metrics(model, **kwargs):
 
         single_dataset_keys = [k for k in data if k not in ("forget", "holdout")] if multi_dataset else []
 
-        # Create dataloader(s)
+        # Create dataloader(s). When distributed (world_size > 1), use DistributedSampler per rank.
         if not multi_dataset:
-            if sort_by_length:
+            if use_distributed_sampler:
+                sampler_primary = DistributedSampler(
+                    primary_data, num_replicas=world_size, rank=rank, shuffle=False
+                )
+                dataloader = DataLoader(
+                    primary_data,
+                    batch_size=batch_size,
+                    sampler=sampler_primary,
+                    collate_fn=collator,
+                )
+            elif sort_by_length:
                 dataloader = DataLoader(
                     primary_data,
                     batch_size=batch_size,
@@ -1235,7 +1249,17 @@ def trajectory_metrics(model, **kwargs):
         else:
             dataloader = None  # created per key in loop
         if secondary_data is not None:
-            if sort_by_length:
+            if use_distributed_sampler:
+                sampler_holdout = DistributedSampler(
+                    secondary_data, num_replicas=world_size, rank=rank, shuffle=False
+                )
+                holdout_dataloader = DataLoader(
+                    secondary_data,
+                    batch_size=batch_size,
+                    sampler=sampler_holdout,
+                    collate_fn=collator,
+                )
+            elif sort_by_length:
                 holdout_dataloader = DataLoader(
                     secondary_data,
                     batch_size=batch_size,
@@ -1326,7 +1350,17 @@ def trajectory_metrics(model, **kwargs):
         for _key in keys_to_process:
             if _key is not None:
                 primary_data = data[_key]
-                if sort_by_length:
+                if use_distributed_sampler:
+                    sampler_primary = DistributedSampler(
+                        primary_data, num_replicas=world_size, rank=rank, shuffle=False
+                    )
+                    dataloader = DataLoader(
+                        primary_data,
+                        batch_size=batch_size,
+                        sampler=sampler_primary,
+                        collate_fn=collator,
+                    )
+                elif sort_by_length:
                     dataloader = DataLoader(
                         primary_data,
                         batch_size=batch_size,
@@ -1349,12 +1383,20 @@ def trajectory_metrics(model, **kwargs):
             if not metrics_to_run:
                 continue
 
-            n_samples = len(dataloader.dataset)
+            n_samples = (
+                len(dataloader.sampler)
+                if use_distributed_sampler and getattr(dataloader, "sampler", None) is not None
+                else len(dataloader.dataset)
+            )
             expected_batches = (n_samples + batch_size - 1) // batch_size
             logger.info(
                 f"Trajectory forget dataset: {n_samples} samples, batch_size {batch_size}, "
                 f"expected batches: {expected_batches} (last batch index: {expected_batches - 1})"
             )
+            if use_distributed_sampler:
+                logger.info(
+                    f"Data parallel: rank {rank}/{world_size} processes {n_samples} samples (no duplication)"
+                )
             all_rouge_futures: list = []
             effective_length_by_index: dict[str, int] = {}
             prompt_len_by_index: dict[str, int] = {}
@@ -2011,7 +2053,20 @@ def trajectory_metrics(model, **kwargs):
         if multi_dataset and "forget" in data and "holdout" in data and "privleak" in loaded_metrics and privleak_needs_dual:
             primary_data = data["forget"]
             secondary_data = data["holdout"]
-            if sort_by_length:
+            if use_distributed_sampler:
+                dataloader = DataLoader(
+                    primary_data,
+                    batch_size=batch_size,
+                    sampler=DistributedSampler(primary_data, num_replicas=world_size, rank=rank, shuffle=False),
+                    collate_fn=collator,
+                )
+                holdout_dataloader = DataLoader(
+                    secondary_data,
+                    batch_size=batch_size,
+                    sampler=DistributedSampler(secondary_data, num_replicas=world_size, rank=rank, shuffle=False),
+                    collate_fn=collator,
+                )
+            elif sort_by_length:
                 dataloader = DataLoader(
                     primary_data,
                     batch_size=batch_size,
