@@ -65,11 +65,32 @@ class Evaluator:
         else:
             return obj
 
-    def save_logs(self, logs, file):
-        """Save the logs in a json file"""
+    def _total_samples_from_logs(self, logs):
+        """Find total sample count from first non-empty value_by_index in logs."""
+        for key, value in logs.items():
+            if key == "config" or not isinstance(value, dict):
+                continue
+            vbi = value.get("value_by_index")
+            if isinstance(vbi, dict) and len(vbi) > 0:
+                return len(vbi)
+        return None
+
+    def save_logs(self, logs, file, keep_value_by_index=False):
+        """Save the logs in a json file.
+        When keep_value_by_index is True (e.g. per-rank files for later merge), value_by_index is kept."""
         logs = dict(sorted(logs.items()))
-        # Remove value_by_index (used for calculations but not needed in final JSON)
-        logs = self._remove_value_by_index(logs)
+        # Ensure run_info is present so report PRs can show data-parallel info (eval.py sets it for distributed).
+        if "run_info" not in logs:
+            total = self._total_samples_from_logs(logs)
+            if total is not None:
+                logs["run_info"] = {
+                    "world_size": 1,
+                    "total_samples": total,
+                    "data_parallel": False,
+                }
+        if not keep_value_by_index:
+            # Remove value_by_index (used for calculations but not needed in final JSON)
+            logs = self._remove_value_by_index(logs)
         # Convert numpy arrays to lists for JSON serialization
         logs = self._convert_numpy_to_list(logs)
         os.makedirs(os.path.dirname(file), exist_ok=True)
@@ -106,6 +127,9 @@ class Evaluator:
     def evaluate(self, model, output_dir=None, overwrite=None, **kwargs):
         # set flag to overwrite metrics
         overwrite = self.eval_cfg.overwrite if overwrite is None else overwrite
+        rank = kwargs.get("rank", 0)
+        world_size = kwargs.get("world_size", 1)
+        is_distributed = world_size > 1
 
         # Prepare model for evaluation
         model = self.prepare_model(model)
@@ -114,10 +138,13 @@ class Evaluator:
         output_dir = output_dir if output_dir else self.eval_cfg.output_dir
         logs_file_path = self.get_logs_file_path(output_dir)
 
-        # Load existing results from file if any.
-        logs = self.load_logs_from_file(logs_file_path) if not overwrite else {}
-        
-        # Save config information (only once, at the start)
+        # Load existing results from file if any (only rank 0 when distributed, to avoid conflict)
+        if not is_distributed or rank == 0:
+            logs = self.load_logs_from_file(logs_file_path) if not overwrite else {}
+        else:
+            logs = {}
+
+        # Save config information (only once, at the start); only rank 0 saves when distributed
         if "config" not in logs or overwrite:
             from omegaconf import OmegaConf
             config_dict = {
@@ -130,7 +157,8 @@ class Evaluator:
             elif hasattr(model, "model") and hasattr(model.model, "config") and hasattr(model.model.config, "_name_or_path"):
                 config_dict["model_name"] = model.model.config._name_or_path
             logs["config"] = config_dict
-            self.save_logs(logs, logs_file_path)
+            if not is_distributed:
+                self.save_logs(logs, logs_file_path)
 
         logger.info(f"***** Running {self.name} evaluation suite *****")
         log_retain_logs_path_none_if_needed(
@@ -162,7 +190,7 @@ class Evaluator:
                         logger.info(
                             f"Result for metric {metric_name}:\t{logs[metric_name]['agg_value']}"
                         )
-                return self.summarize(logs)
+                return logs
             for m in self.metrics:
                 _ = logs.pop(m, None)
             first_name = next(iter(self.metrics))
@@ -238,8 +266,9 @@ class Evaluator:
             for metric_name in self.metrics:
                 if logs.get(metric_name, {}).get("agg_value") is not None:
                     logger.info(f"Result for metric {metric_name}:\t{logs[metric_name]['agg_value']}")
-            self.save_logs(logs, logs_file_path)
-            return self.summarize(logs)
+            if not is_distributed:
+                self.save_logs(logs, logs_file_path)
+            return logs
 
         for metric_name, metric_fn in self.metrics.items():
             metric_cfg = self.eval_cfg.metrics[metric_name]
@@ -308,7 +337,8 @@ class Evaluator:
             )
             if "agg_value" in result:
                 logger.info(f"Result for metric {metric_name}:\t{result['agg_value']}")
-            self.save_logs(logs, logs_file_path)
+            if not is_distributed:
+                self.save_logs(logs, logs_file_path)
             # Free GPU memory between metrics to avoid OOM with large models
             if torch.cuda.is_available():
                 torch.cuda.empty_cache()
@@ -322,4 +352,4 @@ class Evaluator:
                     f"memory_allocated_MiB={alloc:.0f} memory_reserved_MiB={res:.0f}"
                 )
 
-        return self.summarize(logs)
+        return logs
