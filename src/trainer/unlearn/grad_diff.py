@@ -10,6 +10,7 @@ class GradDiff(UnlearnTrainer):
         self.alpha = alpha
         self.retain_loss_type = retain_loss_type
         self.ref_model = None
+        # Ref model only needed for KL retain; NLL retain uses the training model only.
         if retain_loss_type == "KL":
             self.ref_model = self._prepare_ref_model(self.model)
 
@@ -38,7 +39,7 @@ class GradDiff(UnlearnTrainer):
             )
         return retain_loss
 
-    def compute_loss(self, model, inputs, return_outputs=False):
+    def compute_loss(self, model, inputs, return_outputs=False, num_items_in_batch=None, **kwargs):
         forget_inputs = inputs["forget"]
         forget_inputs = {
             "input_ids": forget_inputs["input_ids"],

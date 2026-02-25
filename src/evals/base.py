@@ -1,7 +1,9 @@
+import gc
 import os
 import json
 import logging
 import numpy as np
+import torch
 from evals.metrics import get_metrics
 from evals.metrics.privacy import log_retain_logs_path_none_if_needed
 
@@ -321,5 +323,9 @@ class Evaluator:
                 logger.info(f"Result for metric {metric_name}:\t{result['agg_value']}")
             if not is_distributed:
                 self.save_logs(logs, logs_file_path)
+            # Free GPU memory between metrics to avoid OOM with large models
+            if torch.cuda.is_available():
+                torch.cuda.empty_cache()
+                gc.collect()
 
         return logs

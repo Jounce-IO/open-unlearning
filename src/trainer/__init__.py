@@ -3,7 +3,7 @@ from typing import Dict, Any
 from omegaconf import DictConfig
 from transformers import Trainer, TrainingArguments
 
-from trainer.base import FinetuneTrainer
+from trainer.base import FinetuneTrainer, _DummyEvalDataset
 from trainer.unlearn.grad_ascent import GradAscent
 from trainer.unlearn.grad_diff import GradDiff
 from trainer.unlearn.npo import NPO
@@ -57,6 +57,15 @@ def load_trainer(
 ):
     trainer_args = trainer_cfg.args
     method_args = trainer_cfg.get("method_args", {})
+    # When eval_dataset is None but eval_strategy is not "no", Trainer.__init__ in
+    # transformers >= 4.57 raises. We pass a dummy so init succeeds; FinetuneTrainer
+    # runs custom evaluators every epoch and never uses the dummy. See _DummyEvalDataset.
+    eval_dataset_to_pass = eval_dataset
+    if eval_dataset_to_pass is None:
+        args_dict = dict(trainer_cfg.args)
+        eval_strategy = args_dict.get("eval_strategy", None)
+        if eval_strategy not in (None, "no"):
+            eval_dataset_to_pass = _DummyEvalDataset()
     trainer_args = load_trainer_args(trainer_args, train_dataset)
     trainer_handler_name = trainer_cfg.get("handler")
     assert trainer_handler_name is not None, ValueError(
@@ -69,7 +78,7 @@ def load_trainer(
     trainer = trainer_cls(
         model=model,
         train_dataset=train_dataset,
-        eval_dataset=eval_dataset,
+        eval_dataset=eval_dataset_to_pass,
         tokenizer=tokenizer,
         data_collator=data_collator,
         args=trainer_args,

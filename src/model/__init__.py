@@ -1,4 +1,4 @@
-from transformers import AutoModelForCausalLM, AutoTokenizer
+from transformers import AutoModel, AutoModelForCausalLM, AutoTokenizer
 from omegaconf import DictConfig, open_dict, OmegaConf
 from typing import Dict, Any
 import os
@@ -58,7 +58,7 @@ def get_dtype(model_args):
     return torch.float32
 
 
-def get_model(model_cfg: DictConfig):
+def get_model(model_cfg: DictConfig, resume_from_checkpoint: str | None = None):
     assert model_cfg is not None, ValueError("Model config not found.")
     logger.info("=== Starting model loading ===")
     with open_dict(model_cfg):
@@ -66,61 +66,73 @@ def get_model(model_cfg: DictConfig):
         assert model_args_dict is not None, ValueError("model_args absent in configs/model.")
         tokenizer_args = model_cfg.get("tokenizer_args", None)
         model_handler = model_cfg.get("model_handler", "AutoModelForCausalLM")
-    # Keep as DictConfig for get_dtype, but extract path first
-    model_args = model_args_dict
-    with open_dict(model_args):
-        # Try direct access first, then fallback to get()
-        try:
-            model_path = model_args.pretrained_model_name_or_path
-            del model_args["pretrained_model_name_or_path"]
-        except (AttributeError, KeyError):
-            model_path = model_args.get("pretrained_model_name_or_path", None)
-            if model_path is not None:
-                del model_args["pretrained_model_name_or_path"]
-    logger.info(f"Model path: {model_path}")
-    logger.info(f"Model handler: {model_handler}")
-    torch_dtype = get_dtype(model_args)
-    logger.info(f"Torch dtype: {torch_dtype}")
-    model_cls = MODEL_REGISTRY[model_handler]
-    # Convert to regular dict for **model_args unpacking
-    model_args_dict_final = OmegaConf.to_container(model_args, resolve=True) if isinstance(model_args, DictConfig) else model_args
-    logger.info(f"Calling {model_handler}.from_pretrained()...")
-    logger.info(f"Model args: {list(model_args_dict_final.keys())}")
-    logger.info(f"Cache dir: {hf_home if hf_home else 'default (~/.cache/huggingface)'}")
-    try:
+
+    if resume_from_checkpoint:
+        # Load model and tokenizer from checkpoint (no HuggingFace download).
+        logger.info("Resuming: loading model and tokenizer from checkpoint (no HF download): %s", resume_from_checkpoint)
+        model_args_copy = OmegaConf.create(OmegaConf.to_container(model_args_dict, resolve=True)) if isinstance(model_args_dict, DictConfig) else OmegaConf.create(dict(model_args_dict))
+        torch_dtype = get_dtype(model_args_copy)
         import time
         start_time = time.time()
-        logger.info("Starting model download/loading (this may take several minutes)...")
-        logger.info("HuggingFace will download model weights if not cached")
-        
-        # Check cache before loading
-        from pathlib import Path
-        if hf_home:
-            cache_path = Path(hf_home) / "hub" / f"models--{model_path.replace('/', '--')}"
-            if cache_path.exists():
-                logger.info(f"Model cache directory exists: {cache_path}")
-            else:
-                logger.info(f"Model cache directory does not exist, will download")
-        
-        model = model_cls.from_pretrained(
-            pretrained_model_name_or_path=model_path,
-            dtype=torch_dtype,  # Use dtype instead of deprecated torch_dtype
-            **model_args_dict_final,
-            cache_dir=hf_home,
+        model = AutoModel.from_pretrained(
+            resume_from_checkpoint,
+            torch_dtype=torch_dtype,
         )
         elapsed = time.time() - start_time
-        logger.info(f"Model loaded successfully in {elapsed:.2f} seconds")
-    except Exception as e:
-        logger.error(f"Model {model_path} requested with {model_cfg.model_args}")
-        logger.error(f"Error details: {type(e).__name__}: {str(e)}")
-        import traceback
-        logger.error(traceback.format_exc())
-        raise ValueError(
-            f"Error {e} while fetching model using {model_handler}.from_pretrained()."
-        )
-    logger.info("Loading tokenizer...")
-    tokenizer = get_tokenizer(tokenizer_args)
-    logger.info("Tokenizer loaded successfully")
+        logger.info("Model loaded from checkpoint in %.2f seconds", elapsed)
+        tokenizer = AutoTokenizer.from_pretrained(resume_from_checkpoint)
+        logger.info("Tokenizer loaded from checkpoint")
+    else:
+        # Load from config (HuggingFace or local path).
+        model_args = model_args_dict
+        with open_dict(model_args):
+            try:
+                model_path = model_args.pretrained_model_name_or_path
+                del model_args["pretrained_model_name_or_path"]
+            except (AttributeError, KeyError):
+                model_path = model_args.get("pretrained_model_name_or_path", None)
+                if model_path is not None:
+                    del model_args["pretrained_model_name_or_path"]
+        logger.info(f"Model path: {model_path}")
+        logger.info(f"Model handler: {model_handler}")
+        torch_dtype = get_dtype(model_args)
+        logger.info(f"Torch dtype: {torch_dtype}")
+        model_cls = MODEL_REGISTRY[model_handler]
+        model_args_dict_final = OmegaConf.to_container(model_args, resolve=True) if isinstance(model_args, DictConfig) else model_args
+        logger.info(f"Calling {model_handler}.from_pretrained()...")
+        logger.info(f"Model args: {list(model_args_dict_final.keys())}")
+        logger.info(f"Cache dir: {hf_home if hf_home else 'default (~/.cache/huggingface)'}")
+        try:
+            import time
+            start_time = time.time()
+            logger.info("Starting model download/loading (this may take several minutes)...")
+            logger.info("HuggingFace will download model weights if not cached")
+            from pathlib import Path
+            if hf_home:
+                cache_path = Path(hf_home) / "hub" / f"models--{model_path.replace('/', '--')}"
+                if cache_path.exists():
+                    logger.info(f"Model cache directory exists: {cache_path}")
+                else:
+                    logger.info(f"Model cache directory does not exist, will download")
+            model = model_cls.from_pretrained(
+                pretrained_model_name_or_path=model_path,
+                dtype=torch_dtype,
+                **model_args_dict_final,
+                cache_dir=hf_home,
+            )
+            elapsed = time.time() - start_time
+            logger.info(f"Model loaded successfully in {elapsed:.2f} seconds")
+        except Exception as e:
+            logger.error(f"Model {model_path} requested with {model_cfg.model_args}")
+            logger.error(f"Error details: {type(e).__name__}: {str(e)}")
+            import traceback
+            logger.error(traceback.format_exc())
+            raise ValueError(
+                f"Error {e} while fetching model using {model_handler}.from_pretrained()."
+            )
+        logger.info("Loading tokenizer...")
+        tokenizer = get_tokenizer(tokenizer_args)
+        logger.info("Tokenizer loaded successfully")
     
     # Auto-wrap diffusion models to be compatible with AR-based metrics
     # (only if adapter is available from main dllm repo)

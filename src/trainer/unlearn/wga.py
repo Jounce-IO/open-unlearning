@@ -1,5 +1,5 @@
 from trainer.unlearn.grad_diff import GradDiff
-from trainer.utils import compute_wga_loss
+from trainer.utils import compute_wga_loss, compute_wga_loss_dllm
 
 
 class WGA(GradDiff):
@@ -8,19 +8,37 @@ class WGA(GradDiff):
         self.gamma = gamma
         self.alpha = alpha
         self.beta = beta
-        if self.ref_model is None:
+        # Ref model only needed for KL retain; NLL retain and WGA forget loss use the training model only.
+        if self.ref_model is None and self.retain_loss_type == "KL":
             self.ref_model = self._prepare_ref_model(self.model)
 
-    def compute_loss(self, model, inputs, return_outputs=False):
+    def compute_loss(self, model, inputs, return_outputs=False, num_items_in_batch=None, **kwargs):
         forget_inputs = inputs["forget"]
         forget_inputs = {
             "input_ids": forget_inputs["input_ids"],
             "attention_mask": forget_inputs["attention_mask"],
             "labels": forget_inputs["labels"],
         }
-        forget_loss, forget_outputs = compute_wga_loss(
-            model=model, inputs=forget_inputs, beta=self.beta
-        )
+        adapter_config = getattr(model, "adapter_config", None)
+        if adapter_config is not None:
+            prev = getattr(adapter_config, "return_per_token_loss", False)
+            adapter_config.return_per_token_loss = True
+            try:
+                outputs = model(**forget_inputs)
+            finally:
+                adapter_config.return_per_token_loss = prev
+            if getattr(outputs, "per_token_nll", None) is not None and getattr(
+                outputs, "masked_indices", None
+            ) is not None:
+                forget_loss, forget_outputs = compute_wga_loss_dllm(outputs, self.beta)
+            else:
+                forget_loss, forget_outputs = compute_wga_loss(
+                    model=model, inputs=forget_inputs, beta=self.beta
+                )
+        else:
+            forget_loss, forget_outputs = compute_wga_loss(
+                model=model, inputs=forget_inputs, beta=self.beta
+            )
 
         retain_inputs = inputs["retain"]
         retain_inputs = {

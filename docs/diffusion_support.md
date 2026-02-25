@@ -79,6 +79,83 @@ model:
 dllm eval dream-tofu-forget10 Dream-org/Dream-v0-Instruct-7B tofu --samples 2
 ```
 
+## Training mode and unlearning
+
+The adapter supports **training mode** for adapter-based unlearning (GradAscent, GradDiff, WGA). When `diffusion_adapter.training: true` is set in the model config, the adapter's `__call__` performs an MDLM-style forward (single random t per batch, stochastic masking, NLL on masked positions) and returns an output with `.loss` and `.logits` so OpenUnlearning's trainers work unchanged.
+
+### Unlearn CLI (dllm repo)
+
+From the main **dllm** repo, run with a **config file** (run identity and hyperparameters come from the config):
+
+```bash
+dllm unlearn CONFIG [--output-dir DIR] [--resume-latest] [--resume-from PATH] [--dry-run] [--report-output-path PATH]
+```
+
+Example:
+
+```bash
+dllm unlearn configs/unlearn/llada-8b/TOFU/forget01/WGA/wga-beta05.yaml --output-dir gs://your-bucket/unlearn-runs
+```
+
+- **CONFIG:** Path to run config YAML (local or `gs://`). Convention: `configs/unlearn/<model>/<benchmark>/<split>/<method>/<name>.yaml`. Config must include `model`, `benchmark`, `split`, `method`; optional `trainer.args`, `trainer.method_args`, `output_dir`, etc. See the main repo [Configuration guide](../../docs/configuration.md#config-only-dllm-unlearn).
+- **Model:** Set in config (local path, HuggingFace ID, or **gs://**; downloaded before training).
+- **Output dir:** Default from path convention or config `output_dir`; override with `--output-dir`. A timestamp subdir (YYYYMMDDHHMMSS) is always added. When gs://, checkpoints and final model are written locally then uploaded to GCS; a background watcher uploads new checkpoints so runs can resume after spot preemption.
+- **Resume:** By default runs start from scratch. Pass **`--resume-latest`** to resume from the latest checkpoint under the output parent (e.g. after spot preemption), or **`--resume-from <path>`** to resume from a specific path (gs:// or local).
+- **Logging (report_to):** Controlled by `trainer.args.report_to` (default `wandb`). In K8s the chart injects `WANDB_API_KEY` from the wandb secret. Disable W&B with `report_to: none` in config or `--report-to none`.
+
+See `dllm unlearn --help` for all flags. When running in K8s with `results.capture=true` and `results.createPr=true`, the job creates a PR that includes the unlearn report (config, model save path, W&B run URL).
+
+### Experiment config
+
+Use the diffusion unlearn experiment so the model is wrapped with training enabled:
+
+```yaml
+# experiment=unlearn/tofu/diffusion (model override + diffusion_adapter)
+model:
+  diffusion_adapter:
+    training: true
+    time_epsilon: 0.001
+    loss_weight_type: "scheduler"
+    loss_normalization_type: "sequence"
+```
+
+The dllm CLI passes `experiment=unlearn/tofu/diffusion` and the resolved model path when you run `dllm unlearn`.
+
+### Checkpoint format
+
+Diffusion unlearning checkpoints use a **single HF-style format**: inner model config + weights + tokenizer (no separate wrapper state_dict). The `DiffusionModelAdapter` is a `PreTrainedModel`; the Trainer calls `model.save_pretrained(output_dir)`, and the wrapper delegates to the inner model so only the inner's config and weights are written. There is one writer and one weight format per checkpoint. For the authoritative layout (file list, resume, eval, publishing), see the main repo: [docs/integrations/checkpoint-format.md](../../docs/integrations/checkpoint-format.md).
+
+### Resume from checkpoint (train.py)
+
+OpenUnlearning's `train.py` accepts a top-level config key **`resume_from_checkpoint`** (e.g. set via Hydra override `+resume_from_checkpoint=/path/to/checkpoint-500`). When set, the **model and tokenizer are loaded from the checkpoint directory** (no HuggingFace download); only training state (optimizer, scheduler, step) is then restored by the Trainer from the same checkpoint. The dllm CLI discovers the latest checkpoint (or uses `--resume-from`), downloads it from GCS if needed, and passes the path into the config. Checkpoints are in the single HF-style format above; the Trainer and the wrapper handle loading (no special steps for diffusion).
+
+### Eval from checkpoint
+
+The same checkpoint directory can be used for open-unlearning eval: load the inner model from the dir (e.g. `from_pretrained(path)`), then optionally wrap with `DiffusionModelAdapter` for trajectory metrics.
+
+### Removed behavior (one-format change)
+
+The per-checkpoint callback **`_SaveInnerModelForEvalCallback`** and the final **`_save_inner_model_for_eval()`** call have been removed. The wrapper's **`save_pretrained`** is the only model save path; it writes the inner model's HF layout so checkpoints are both resume- and eval-valid without a second writer.
+
+### Transformers 4.57.0
+
+The dllm repo pins **transformers 4.57.0**. Two compatibility points matter for unlearning; below are the **code changes we made** so it works with 4.57+:
+
+1. **eval_dataset requirement**  
+   In transformers 4.57+, `Trainer.__init__` raises if `eval_strategy` is not `"no"` and `eval_dataset` is `None`. Open-unlearning’s unlearn configs use custom evaluators (TOFU/MUSE) and set `datasets@eval: null`, so no real eval dataset is loaded. **Changes made:**  
+   - **`src/trainer/base.py`**: Added **`_DummyEvalDataset`** — a length-0 `Dataset` placeholder. Its docstring explains why it exists (4.45.1 vs 4.57 init behaviour). It is never used for forward or metrics; `FinetuneTrainer.evaluate()` runs the custom evaluators only.  
+   - **`src/trainer/__init__.py`** in **`load_trainer()`**: When `eval_dataset` is `None` and `eval_strategy` is not `None` or `"no"`, we set `eval_dataset_to_pass = _DummyEvalDataset()` and pass that into the Trainer so `Trainer.__init__` succeeds.
+
+2. **compute_loss signature**  
+   Newer Trainer code may call `compute_loss(..., num_items_in_batch=..., **kwargs)`.  
+   **Changes made:** All unlearn trainers (e.g. **`src/trainer/unlearn/grad_ascent.py`**, **`grad_diff.py`**, **`wga.py`**, and the rest in `trainer/unlearn/`) implement **`compute_loss(self, model, inputs, return_outputs=False, num_items_in_batch=None, **kwargs)`** so they accept the 4.57+ call signature while remaining compatible with older call sites.
+
+### Evaluation during training (eval_strategy and _DummyEvalDataset)
+
+By default, GradAscent (and other unlearn trainers) inherit **eval_strategy=epoch** and **do_eval=True** from the finetune config, while **data/unlearn.yaml** has **datasets@eval: null**, so `get_data()` never returns an eval dataset. In the **original** locuslab open-unlearning repo they use **transformers==4.45.1**, where `Trainer.__init__` does not require an eval_dataset when eval_strategy is set; at the end of each epoch `FinetuneTrainer.evaluate()` runs the **custom evaluators** (TOFU/MUSE metrics) and returns without ever using an eval dataset. In **transformers >= 4.57** (used by the dllm repo), `Trainer.__init__` raises if eval_strategy is not `"no"` and eval_dataset is None, so the Trainer would never be created.
+
+To keep the **same behaviour** as open-unlearning (real per-epoch evaluation via custom evaluators) when using transformers 4.57+, we pass a **dummy eval dataset** in `load_trainer()` whenever eval_dataset is None and eval_strategy is not `"no"`. The dummy is defined in **`trainer/base.py`** as **`_DummyEvalDataset`**: a minimal placeholder (length 0) that satisfies the init check. It is **never used** for any forward pass or metric: `FinetuneTrainer.evaluate()` always runs the custom evaluators first and returns, so the real evaluation (TOFU/MUSE metrics every epoch) is unchanged. See the docstring on `_DummyEvalDataset` in `src/trainer/base.py` for the full explanation.
+
 ## Current Limitations
 
 ### 1. Fixation Logits

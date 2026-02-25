@@ -115,6 +115,23 @@ def compute_wga_loss(model, inputs, beta):
     return forget_loss, outputs
 
 
+def compute_wga_loss_dllm(outputs, beta):
+    """WGA forget loss for diffusion adapters (masked positions only).
+
+    Use when the model is a diffusion adapter that returns per_token_nll (1D, per
+    masked token) and masked_indices. Computes WGA on masked positions only.
+    Empty per_token_nll (no masked tokens in batch) returns forget_loss = 0.0.
+    Contrast with compute_wga_loss, which is for AR models (shifted logits/labels
+    over the full sequence).
+    """
+    per_token_nll = getattr(outputs, "per_token_nll", None)
+    if per_token_nll is None or per_token_nll.numel() == 0:
+        return 0.0 * (outputs.logits.sum() if hasattr(outputs, "logits") else 0.0), outputs
+    weight_ce = ((-per_token_nll).exp().detach()) ** beta
+    forget_loss = -(weight_ce * per_token_nll).mean()
+    return forget_loss, outputs
+
+
 def compute_satimp_loss(model, inputs, beta1, beta2):
     outputs = model(**inputs)
     labels = inputs["labels"]
