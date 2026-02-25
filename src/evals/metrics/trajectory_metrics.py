@@ -74,6 +74,8 @@ def _trajectory_sampler_kwargs(trajectory_config: Union[Dict, DictConfig]) -> di
 
     Also passes evaluation_mode from trajectory_config (default "unguided"); allowed values:
     unguided, guided_native, guided_skew.
+    We set right_shift_logits=False so all dLLM backends (Dream, LLaDA) return same-position
+    logits; trajectory metrics then apply one AR shift before probability computation.
     """
     kwargs = dict(trajectory_config.get("sampler_kwargs", {}) or {})
     if trajectory_config.get("return_logits") and (
@@ -85,6 +87,7 @@ def _trajectory_sampler_kwargs(trajectory_config: Union[Dict, DictConfig]) -> di
     if mode not in EVALUATION_MODES:
         mode = "unguided"
     kwargs["evaluation_mode"] = mode
+    kwargs["right_shift_logits"] = False
     return kwargs
 
 
@@ -1754,6 +1757,10 @@ def trajectory_metrics(model, **kwargs):
                                 device = logits_list[0].device
                                 logits_stacked = torch.stack(
                                     [l.t() for l in logits_list], dim=0
+                                )
+                                # Convert same-position logits to AR format so _compute_prob_from_fixation_logits (logits[t] predicts label[t+1]) receives the correct convention.
+                                logits_stacked = torch.cat(
+                                    [logits_stacked[:, :1, :], logits_stacked[:, :-1, :]], dim=1
                                 )
                                 labels_batch_full = generated_labels.unsqueeze(0).expand(
                                     len(steps_to_use), -1

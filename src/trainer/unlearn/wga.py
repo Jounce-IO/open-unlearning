@@ -1,5 +1,5 @@
 from trainer.unlearn.grad_diff import GradDiff
-from trainer.utils import compute_wga_loss
+from trainer.utils import compute_wga_loss, compute_wga_loss_dllm
 
 
 class WGA(GradDiff):
@@ -19,9 +19,26 @@ class WGA(GradDiff):
             "attention_mask": forget_inputs["attention_mask"],
             "labels": forget_inputs["labels"],
         }
-        forget_loss, forget_outputs = compute_wga_loss(
-            model=model, inputs=forget_inputs, beta=self.beta
-        )
+        adapter_config = getattr(model, "adapter_config", None)
+        if adapter_config is not None:
+            prev = getattr(adapter_config, "return_per_token_loss", False)
+            adapter_config.return_per_token_loss = True
+            try:
+                outputs = model(**forget_inputs)
+            finally:
+                adapter_config.return_per_token_loss = prev
+            if getattr(outputs, "per_token_nll", None) is not None and getattr(
+                outputs, "masked_indices", None
+            ) is not None:
+                forget_loss, forget_outputs = compute_wga_loss_dllm(outputs, self.beta)
+            else:
+                forget_loss, forget_outputs = compute_wga_loss(
+                    model=model, inputs=forget_inputs, beta=self.beta
+                )
+        else:
+            forget_loss, forget_outputs = compute_wga_loss(
+                model=model, inputs=forget_inputs, beta=self.beta
+            )
 
         retain_inputs = inputs["retain"]
         retain_inputs = {
