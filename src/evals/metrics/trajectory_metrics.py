@@ -17,7 +17,7 @@ import torch
 from typing import Dict, List, Any, Optional, Union
 from torch.utils.data import DataLoader
 from torch.utils.data.distributed import DistributedSampler
-from omegaconf import ListConfig, DictConfig
+from omegaconf import DictConfig, ListConfig, OmegaConf
 
 from evals.metrics.base import unlearning_metric
 from evals.metrics.samplers import LengthSortedSampler
@@ -56,6 +56,11 @@ from evals.metrics.trajectory_adapters import (
 )
 from evals.metrics.mia.utils import get_attacker, MIAStreamingAccumulator
 from evals.gpu_phase_logger import set_phase as gpu_set_phase
+from evals.guardrails import (
+    load_icul_pools,
+    transform_output_text,
+    transform_prompts,
+)
 
 logger = logging.getLogger("evaluator")
 
@@ -699,6 +704,14 @@ def _handle_text_based_metric(logits, tokenizer, sample_labels, sample_input_ids
         logits = logits[0]  # [L, V]
     predicted_tokens = torch.argmax(logits, dim=-1)  # [L]
     gen_text = tokenizer.decode(predicted_tokens.tolist(), skip_special_tokens=True)
+    guardrail_config = kwargs.get("guardrail_config")
+    if guardrail_config is not None:
+        gen_text = transform_output_text(
+            gen_text,
+            kwargs.get("batch") or {},
+            kwargs.get("sample_idx"),
+            {"guardrail": guardrail_config},
+        )
 
     ground_truth = kwargs.get("ground_truth")
     rouge_scorer_instance = kwargs.get("rouge_scorer")
@@ -1021,6 +1034,7 @@ def _call_metric_at_step(
                     original_logits = original_logits[0]  # [L, V]
                 original_logits = original_logits.transpose(0, 1)  # [V, L] for decode function
                 
+                text_kw = {**kwargs, "batch": batch, "sample_idx": sample_idx}
                 result = _handle_text_based_metric(
                     logits=original_logits,
                     tokenizer=tokenizer,
@@ -1029,7 +1043,7 @@ def _call_metric_at_step(
                     sample_prompt_len=sample_prompt_len,
                     metric_name=metric_name,
                     metric_config=metric_config,
-                    **kwargs
+                    **text_kw
                 )
                 return result
             except Exception as text_e:
@@ -1058,7 +1072,7 @@ def _call_metric_at_step(
                 if original_logits.dim() == 3:
                     original_logits = original_logits[0]  # [L, V]
                 original_logits = original_logits.transpose(0, 1)  # [V, L]
-                
+                text_kw = {**kwargs, "batch": batch, "sample_idx": sample_idx}
                 result = _handle_text_based_metric(
                     logits=original_logits,
                     tokenizer=tokenizer,
@@ -1067,7 +1081,7 @@ def _call_metric_at_step(
                     sample_prompt_len=sample_prompt_len,
                     metric_name=metric_name,
                     metric_config=metric_config,
-                    **kwargs
+                    **text_kw
                 )
                 return result
             except Exception as text_e:
@@ -1137,6 +1151,39 @@ def trajectory_metrics(model, **kwargs):
         rank = kwargs.get("rank", 0)
         world_size = kwargs.get("world_size", 1)
         use_distributed_sampler = world_size > 1
+
+        # Input-output baselines: build guardrail config and load ICUL pools once per run
+        guardrail_config_with_pools: Optional[dict] = None
+        if trajectory_config:
+            guard_raw = trajectory_config.get("guardrail")
+            guard = (
+                OmegaConf.to_container(guard_raw, resolve=True) or {}
+                if guard_raw is not None
+                else {}
+            )
+            if guard:
+                icul = (guard.get("icul") or {}) if isinstance(guard.get("icul"), dict) else {}
+                if icul.get("enabled") and guard.get("benchmark"):
+                    benchmark = (guard.get("benchmark") or "").lower()
+                    if benchmark in ("tofu", "muse", "wmdp"):
+                        full_cfg = OmegaConf.to_container(trajectory_config, resolve=True) or {}
+                        merged_cfg = {**full_cfg, **(full_cfg.get("guardrail") or {})}
+                        try:
+                            forget_pool, retain_pool = load_icul_pools(
+                                benchmark,
+                                tokenizer,
+                                kwargs.get("template_args"),
+                                merged_cfg,
+                            )
+                            if forget_pool and retain_pool:
+                                guard = dict(guard)
+                                guard["icul_forget_pool"] = forget_pool
+                                guard["icul_retain_pool"] = retain_pool
+                                guardrail_config_with_pools = guard
+                        except Exception as e:
+                            logger.warning("ICUL pool load failed: %s", e)
+                if guardrail_config_with_pools is None and guard:
+                    guardrail_config_with_pools = dict(guard)
 
         if not metrics_config:
             raise ValueError("No metrics specified in config")
@@ -1417,6 +1464,14 @@ def trajectory_metrics(model, **kwargs):
                 prompts, prompt_lens = _build_prompts_for_sampler(
                     input_ids, labels, tokenizer, IGNORE_INDEX
                 )
+                if guardrail_config_with_pools is not None:
+                    prompts, prompt_lens = transform_prompts(
+                        prompts,
+                        prompt_lens,
+                        batch,
+                        tokenizer,
+                        config={"guardrail": guardrail_config_with_pools},
+                    )
 
                 # Generate using sampler with logits tracking
                 _sampler_kw = _trajectory_sampler_kwargs(trajectory_config)
@@ -1837,6 +1892,8 @@ def trajectory_metrics(model, **kwargs):
                                     kwargs_clean["step"] = step
                                     if trajectory_config is not None:
                                         kwargs_clean["trajectory_config"] = trajectory_config
+                                    if guardrail_config_with_pools is not None:
+                                        kwargs_clean["guardrail_config"] = guardrail_config_with_pools
 
                                     for view in include_views:
                                         bt = batch_template if view == "full" else batch_template_eos
