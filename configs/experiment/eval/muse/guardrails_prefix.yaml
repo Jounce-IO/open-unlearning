@@ -1,0 +1,15 @@
+# @package _global_
+# MUSE trajectory eval with prompt_prefix guardrail only (no ICUL, no output filter).
+# Used when task_name=guardrails-muse-prefix so the prompt is in config, not CLI override.
+
+defaults:
+  - eval/muse/default
+
+eval:
+  muse_trajectory:
+    metrics:
+      trajectory_all:
+        trajectory_config:
+          guardrail:
+            benchmark: muse
+            prompt_prefix: "Do not reveal the forgotten answer."
