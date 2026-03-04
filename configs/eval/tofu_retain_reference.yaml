@@ -1,0 +1,14 @@
+# @package eval.tofu_retain_reference
+# Retain reference suite: metrics needed for FQ, PrivLeak, and MU reference.
+# Use with retain model; save_logs keeps value_by_index when retain_reference_mode is true.
+
+defaults:
+  - tofu
+  - tofu_metrics:
+      - mia_min_k
+      - forget_Truth_Ratio
+      - retain_Q_A_Prob
+      - retain_Q_A_ROUGE
+      - retain_Truth_Ratio
+
+retain_reference_mode: true

@@ -28,6 +28,7 @@ from evals.metrics.trajectory_metrics import (
     _call_metric_at_step,
     _compute_pre_compute_metrics_at_step,
     _derive_steps_to_use,
+    _extract_metric_scalar,
     _get_logits_at_step,
     _trajectory_sampler_kwargs,
     DEFAULT_TRAJECTORY_SAMPLE_INTERVAL,
@@ -428,6 +429,29 @@ class TestGetSamplerFromModel:
         
         # Should take model.sampler (first check)
         assert result is sampler1
+
+
+class TestExtractMetricScalar:
+    """Tests for _extract_metric_scalar (used by retain MU pass)."""
+
+    def test_extract_none(self):
+        assert _extract_metric_scalar(None) is None
+
+    def test_extract_list_agg_value(self):
+        assert _extract_metric_scalar([{"agg_value": 0.5}]) == 0.5
+
+    def test_extract_list_score(self):
+        assert _extract_metric_scalar([{"score": 0.3}]) == 0.3
+
+    def test_extract_dict_prob(self):
+        assert _extract_metric_scalar({"prob": 0.1}) == 0.1
+
+    def test_extract_empty_list(self):
+        assert _extract_metric_scalar([]) is None
+
+    def test_extract_tensor_value(self):
+        got = _extract_metric_scalar([{"agg_value": torch.tensor(0.7)}])
+        assert got is not None and abs(got - 0.7) < 1e-5
 
 
 class TestGetMetricFromRegistry:
@@ -2659,6 +2683,44 @@ class TestReproductionBugs:
         score = result[0]["score"] if isinstance(result, list) else result.get("agg_value")
         assert score is not None
         assert 0 <= score <= 1
+
+    def test_hm_aggregate_uses_retain_agg_by_step_not_reference_logs(self):
+        """trajectory_model_utility: hm_aggregate at step uses retain_agg_by_step (current model), not reference_logs."""
+        if "hm_aggregate" not in METRICS_REGISTRY:
+            pytest.skip("hm_aggregate not registered")
+        from scipy.stats import hmean
+        hm_metric = METRICS_REGISTRY["hm_aggregate"]
+        V, L = 100, 10
+        logits = torch.randn(V, L)
+        batch_template = {
+            "input_ids": torch.zeros((1, L), dtype=torch.long),
+            "labels": torch.zeros((1, L), dtype=torch.long),
+            "attention_mask": torch.ones((1, L), dtype=torch.long),
+        }
+        tokenizer = Mock()
+        # retain_agg_by_step for step_index=0: three scalars -> hmean
+        a, b, c = 0.5, 0.3, 0.9
+        retain_agg_by_step = {
+            "0": {
+                "retain_Q_A_Prob": {"agg_value": a},
+                "retain_Q_A_ROUGE": {"agg_value": b},
+                "retain_Truth_Ratio": {"agg_value": c},
+            }
+        }
+        result = _call_metric_at_step(
+            metric=hm_metric,
+            logits=logits,
+            batch_template=batch_template,
+            tokenizer=tokenizer,
+            metric_config={},
+            sample_idx="0",
+            step_index=0,
+            retain_agg_by_step=retain_agg_by_step,
+        )
+        expected_hmean = hmean([a, b, c])
+        assert result is not None and isinstance(result, dict)
+        assert "agg_value" in result and result["agg_value"] is not None
+        assert abs(result["agg_value"] - expected_hmean) < 1e-6
 
     def test_model_utility_pre_compute_uses_same_batch_for_all_metrics(self):
         """trajectory_model_utility: _compute_pre_compute_metrics_at_step uses same batch_template for all metrics."""
