@@ -259,6 +259,10 @@ def extraction_strength_from_fixation(
     L, V = fixation_logits.shape
     if L == 0 or S <= 0:
         return 0.0
+    L_lab = labels.shape[0]
+    L_use = min(L, L_lab)
+    if L_use == 0:
+        return 0.0
     preds = torch.zeros(L, dtype=torch.long, device=fixation_logits.device)
     for ell in range(L):
         logit_idx = max(0, ell - 1) if logit_alignment == "causal" else ell
@@ -275,7 +279,7 @@ def extraction_strength_from_fixation(
     best_t = S
     for t in range(S):
         match = True
-        for ell in range(L):
+        for ell in range(L_use):
             if not valid_np[ell]:
                 continue
             if F_np[ell] >= t:
