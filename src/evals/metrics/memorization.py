@@ -201,13 +201,31 @@ def truth_ratio(model, **kwargs):
     wrong_indices = list(wrong_answer_results.keys())
     assert correct_indices == wrong_indices
 
-    # Filter out None values from both correct and wrong answers
+    # Filter out None: whole result or avg_loss can be None when probability
+    # wasn't computed (e.g. empty scores, fixation L_use=0, tokenization mismatch).
+    # See evaluation-notes.md "Truth ratio and None pre_compute".
     filtered_indices = [
         idx
         for idx in correct_indices
         if correct_answer_results[idx] is not None
         and wrong_answer_results[idx] is not None
+        and correct_answer_results[idx].get("avg_loss") is not None
+        and wrong_answer_results[idx].get("avg_loss") is not None
     ]
+    n_total = len(correct_indices)
+    n_excluded = n_total - len(filtered_indices)
+    if n_excluded > 0:
+        logger.info(
+            "truth_ratio: excluded %s of %s indices (None avg_loss); pre_compute logs indicate why",
+            n_excluded,
+            n_total,
+        )
+    if not filtered_indices:
+        logger.warning(
+            "truth_ratio: no valid pre_compute (correct/wrong avg_loss) for any index; returning None"
+        )
+        return {"agg_value": None, "value_by_index": {}}
+
     correct_avg_losses = [
         correct_answer_results[idx]["avg_loss"] for idx in filtered_indices
     ]
@@ -228,9 +246,7 @@ def truth_ratio(model, **kwargs):
         # New definition from OpenUnlearning: correct / (correct + wrong)
         truth_ratios = correct_prob / (correct_prob + wrong_prob + 1e-10)
 
-    value_by_index = dict(
-        zip(correct_indices, [{"score": val} for val in truth_ratios])
-    )
+    value_by_index = {idx: {"score": truth_ratios} for idx in filtered_indices}
     truth_ratio_stats = np.array([evals["score"] for evals in value_by_index.values()])
     forget_tr_avg = aggregator(truth_ratio_stats)
     return {"agg_value": forget_tr_avg, "value_by_index": value_by_index}

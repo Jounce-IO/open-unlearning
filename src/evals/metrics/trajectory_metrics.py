@@ -769,11 +769,25 @@ def _compute_pre_compute_metrics_at_step(
                             },
                         }
                     else:
+                        logger.info(
+                            "pre_compute probability (generalized): no scores from fixation "
+                            "provider — empty scores or L_use=0 (sample_idx=%s, step=%s, labels_field=%s)",
+                            sample_idx,
+                            step,
+                            labels_field,
+                        )
                         pre_result = {
                             "agg_value": None,
                             "value_by_index": {sample_idx: {"prob": None, "avg_loss": None}},
                         }
                 else:
+                    logger.info(
+                        "pre_compute probability (generalized): labels missing "
+                        "(labels_field=%s, sample_idx=%s, step=%s)",
+                        labels_field,
+                        sample_idx,
+                        step,
+                    )
                     pre_result = {
                         "agg_value": None,
                         "value_by_index": {sample_idx: {"prob": None, "avg_loss": None}},
@@ -781,7 +795,11 @@ def _compute_pre_compute_metrics_at_step(
                 pre_compute_results[access_key] = pre_result
             except Exception as e:
                 logger.warning(
-                    f"Error computing generalized pre-compute probability for {pre_metric_name}: {e}",
+                    "pre_compute probability (generalized): exception — %s (sample_idx=%s, step=%s, labels_field=%s)",
+                    e,
+                    sample_idx,
+                    step,
+                    labels_field,
                     exc_info=True,
                 )
                 pre_compute_results[access_key] = {

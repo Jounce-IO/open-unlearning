@@ -12,12 +12,15 @@ or their geometric mean; they are agnostic to model type or alignment.
 
 from __future__ import annotations
 
+import logging
 from typing import Any, Optional, Protocol
 
 import numpy as np
 import torch
 
 from data.utils import IGNORE_INDEX
+
+logger = logging.getLogger("evaluator")
 
 
 class StepWiseScoreProvider(Protocol):
@@ -73,8 +76,13 @@ def evaluate_probability_via_provider(
         model, batch, ignore_index=ignore_index
     )
     out = []
-    for scores, _ in results:
+    for i, (scores, _) in enumerate(results):
         if not scores:
+            logger.info(
+                "pre_compute probability (via provider): empty scores for sample %s — "
+                "provider returned no per-position scores (no valid positions or L_use=0)",
+                i,
+            )
             out.append({"prob": None, "avg_loss": None})
             continue
         prob = sequence_probability_from_scores(scores)

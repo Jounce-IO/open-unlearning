@@ -1,8 +1,11 @@
 import gc
+import logging
 import os
 import sys
 from typing import Dict, List, Optional
 from tqdm import tqdm
+
+logger = logging.getLogger("evaluator")
 from rouge_score import rouge_scorer
 from collections import defaultdict
 from omegaconf import OmegaConf
@@ -181,6 +184,11 @@ def evaluate_probability_confidence_ordered(model, batch):
             lp = log_probs[i, pos, y].item()
             pos_probs.append(np.exp(lp))
         if not pos_probs:
+            logger.info(
+                "pre_compute probability (confidence_ordered): no valid target positions "
+                "for sample %s — all positions are ignore_index",
+                i,
+            )
             results.append({"prob": None, "avg_loss": None})
             continue
         pos_probs = np.array(pos_probs)
