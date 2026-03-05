@@ -21,6 +21,7 @@ sys.path.insert(0, str(repo_root / "src"))
 
 from evals.metrics.trajectory_metrics import (
     _compute_pre_compute_metrics_at_step,
+    _slice_labels_by_content_start,
     IGNORE_INDEX,
 )
 
@@ -261,3 +262,34 @@ class TestTrajectoryConfigDualAnswerDataset:
             pytest.skip("trajectory_forget_quality.yaml not found")
         text = yaml_path.read_text()
         assert "TOFU_QA_forget_para_pert" in text or "correct_answer_key" in text
+
+
+class TestSliceLabelsByContentStart:
+    """Regression: left-padded rows must use own content start for labels_correct/labels_wrong."""
+
+    def test_left_padded_row_uses_content_start(self):
+        # Simulate left-padded row: content [1, 2, 3, 4, 5] at indices 2..6, L=3
+        max_len = 10
+        row = torch.full((max_len,), IGNORE_INDEX, dtype=torch.long)
+        content = torch.tensor([1, 2, 3, 4, 5])
+        row[5:10] = content  # content at indices 5..9
+        out = _slice_labels_by_content_start(row, L=3, ignore_index=IGNORE_INDEX)
+        assert out.shape == (3,)
+        # Should be first 3 tokens of content: [1, 2, 3]
+        assert (out != IGNORE_INDEX).all()
+        assert out.tolist() == [1, 2, 3]
+
+    def test_all_ignore_returns_ignore_slice(self):
+        row = torch.full((10,), IGNORE_INDEX, dtype=torch.long)
+        out = _slice_labels_by_content_start(row, L=5, ignore_index=IGNORE_INDEX)
+        assert out.shape == (5,)
+        assert (out == IGNORE_INDEX).all()
+
+    def test_short_content_pads_with_ignore(self):
+        # Content [7, 8] at indices 3, 4; L=5
+        row = torch.full((10,), IGNORE_INDEX, dtype=torch.long)
+        row[3:5] = torch.tensor([7, 8])
+        out = _slice_labels_by_content_start(row, L=5, ignore_index=IGNORE_INDEX)
+        assert out.shape == (5,)
+        assert out.tolist()[:2] == [7, 8]
+        assert (out[2:] == IGNORE_INDEX).all()

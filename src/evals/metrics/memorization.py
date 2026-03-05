@@ -40,11 +40,15 @@ def probability(model, **kwargs):
     When kwargs contains step_wise_score_provider: "ar", uses ARStepWiseScoreProvider
     so that sequence probability is the geometric mean of per-position scores (same
     numeric result as evaluate_probability for AR models).
+    When labels_field is set (e.g. for truth_ratio pre_compute) and the batch has
+    3D labels (e.g. [B, N, L] for N wrong options), returns a list of N result dicts
+    so truth_ratio can average over options.
     """
     data = kwargs["data"]
     collator = kwargs["collators"]
     batch_size = kwargs["batch_size"]
     use_ar_provider = kwargs.get("step_wise_score_provider") == "ar"
+    labels_field = kwargs.get("labels_field")
 
     dataloader = DataLoader(data, batch_size=batch_size, collate_fn=collator)
 
@@ -53,12 +57,19 @@ def probability(model, **kwargs):
         fun_args = {"step_wise_score_provider_instance": provider}
         batch_eval_fn = _probability_batch_fn_ar_provider
     else:
-        fun_args = {}
+        fun_args = {"labels_field": labels_field} if labels_field else {}
         batch_eval_fn = evaluate_probability
 
     scores_by_index = run_batchwise_evals(
         model, dataloader, batch_eval_fn, fun_args, "Calculating loss"
     )
+    if isinstance(scores_by_index, list):
+        out = []
+        for d in scores_by_index:
+            probs = [v["prob"] for v in d.values() if v.get("prob") is not None]
+            agg = float(np.mean(aggregate_to_1D(np.array(probs)))) if probs else None
+            out.append({"agg_value": agg, "value_by_index": d})
+        return out
     prob_values = np.array(
         [
             evals["prob"]
@@ -195,23 +206,56 @@ def truth_ratio(model, **kwargs):
         raise ValueError(f"Invalid truth ratio aggregator: {kwargs['aggregator']}")
 
     correct_answer_results = kwargs["pre_compute"]["correct"]["value_by_index"]
-    wrong_answer_results = kwargs["pre_compute"]["wrong"]["value_by_index"]
+    wrong_input = kwargs["pre_compute"]["wrong"]
 
     correct_indices = list(correct_answer_results.keys())
-    wrong_indices = list(wrong_answer_results.keys())
-    assert correct_indices == wrong_indices
 
-    # Filter out None: whole result or avg_loss can be None when probability
-    # wasn't computed (e.g. empty scores, fixation L_use=0, tokenization mismatch).
-    # See evaluation-notes.md "Truth ratio and None pre_compute".
-    filtered_indices = [
-        idx
-        for idx in correct_indices
-        if correct_answer_results[idx] is not None
-        and wrong_answer_results[idx] is not None
-        and correct_answer_results[idx].get("avg_loss") is not None
-        and wrong_answer_results[idx].get("avg_loss") is not None
-    ]
+    if isinstance(wrong_input, list):
+        wrong_answer_results = None
+        n_wrong_options = len(wrong_input)
+        wrong_indices = (
+            list(wrong_input[0]["value_by_index"].keys())
+            if n_wrong_options > 0 and "value_by_index" in wrong_input[0]
+            else []
+        )
+        assert correct_indices == wrong_indices, (
+            "truth_ratio: correct and wrong pre_compute must have same indices"
+        )
+        filtered_indices = [
+            idx
+            for idx in correct_indices
+            if correct_answer_results[idx] is not None
+            and correct_answer_results[idx].get("avg_loss") is not None
+        ]
+        wrong_probs_per_idx = {}
+        for idx in filtered_indices:
+            wrong_avg_losses = [
+                wrong_input[k]["value_by_index"][idx]["avg_loss"]
+                for k in range(n_wrong_options)
+                if idx in wrong_input[k].get("value_by_index", {})
+                and wrong_input[k]["value_by_index"][idx] is not None
+                and wrong_input[k]["value_by_index"][idx].get("avg_loss") is not None
+            ]
+            if not wrong_avg_losses:
+                continue
+            wrong_probs_per_idx[idx] = float(
+                np.mean(np.exp(-np.array(wrong_avg_losses, dtype=np.float64)))
+            )
+        filtered_indices = [idx for idx in filtered_indices if idx in wrong_probs_per_idx]
+    else:
+        wrong_answer_results = wrong_input["value_by_index"]
+        wrong_indices = list(wrong_answer_results.keys())
+        assert correct_indices == wrong_indices
+        filtered_indices = [
+            idx
+            for idx in correct_indices
+            if correct_answer_results[idx] is not None
+            and wrong_answer_results[idx] is not None
+            and correct_answer_results[idx].get("avg_loss") is not None
+            and wrong_answer_results[idx].get("avg_loss") is not None
+        ]
+        wrong_probs_per_idx = None
+
     n_total = len(correct_indices)
     n_excluded = n_total - len(filtered_indices)
     if n_excluded > 0:
@@ -229,15 +273,19 @@ def truth_ratio(model, **kwargs):
     correct_avg_losses = [
         correct_answer_results[idx]["avg_loss"] for idx in filtered_indices
     ]
-    wrong_avg_losses = [
-        wrong_answer_results[idx]["avg_loss"] for idx in filtered_indices
-    ]
-
     correct_avg_losses = aggregate_to_1D(np.array(correct_avg_losses))
-    wrong_avg_losses = aggregate_to_1D(np.array(wrong_avg_losses))
-
     correct_prob = np.exp(-correct_avg_losses)
-    wrong_prob = np.exp(-wrong_avg_losses)
+
+    if wrong_probs_per_idx is not None:
+        wrong_prob = np.array(
+            [wrong_probs_per_idx[idx] for idx in filtered_indices], dtype=np.float64
+        )
+    else:
+        wrong_avg_losses = [
+            wrong_answer_results[idx]["avg_loss"] for idx in filtered_indices
+        ]
+        wrong_avg_losses = aggregate_to_1D(np.array(wrong_avg_losses))
+        wrong_prob = np.exp(-wrong_avg_losses)
 
     if kwargs["aggregator"] != "prob_mean":
         # Original definition from TOFU: wrong / correct

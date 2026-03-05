@@ -58,7 +58,44 @@ class DataCollatorForSupervisedDataset(object):
                     extra_labels = [
                         instance[extra_label_key] for instance in instances
                     ]
-                    extra_labels = self._pad_tokens(extra_labels, IGNORE_INDEX)
+                    first = extra_labels[0]
+                    if isinstance(first, list):
+                        max_N = max(len(x) for x in extra_labels)
+                        all_tensors = []
+                        for inst in extra_labels:
+                            for t in inst:
+                                all_tensors.append(t.view(-1) if t.dim() > 1 else t)
+                        max_L = max(t.numel() for t in all_tensors)
+                        padded = []
+                        for inst in extra_labels:
+                            tensors = inst
+                            rows = []
+                            for t in tensors:
+                                t_flat = t.view(-1) if t.dim() > 1 else t
+                                if t_flat.numel() < max_L:
+                                    row = torch.full(
+                                        (max_L,),
+                                        IGNORE_INDEX,
+                                        dtype=t_flat.dtype,
+                                        device=t_flat.device,
+                                    )
+                                    row[: t_flat.numel()] = t_flat
+                                else:
+                                    row = t_flat[:max_L]
+                                rows.append(row)
+                            mat = torch.stack(rows)
+                            if len(rows) < max_N:
+                                pad = torch.full(
+                                    (max_N - len(rows), max_L),
+                                    IGNORE_INDEX,
+                                    dtype=mat.dtype,
+                                    device=mat.device,
+                                )
+                                mat = torch.cat([mat, pad], dim=0)
+                            padded.append(mat)
+                        extra_labels = torch.stack(padded)
+                    else:
+                        extra_labels = self._pad_tokens(extra_labels, IGNORE_INDEX)
                     return_dct.update({extra_label_key: extra_labels})
             if self.index:
                 if self.index in instances[0]:

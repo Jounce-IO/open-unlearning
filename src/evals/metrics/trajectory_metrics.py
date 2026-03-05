@@ -166,6 +166,50 @@ def _build_target_sequences_for_sampler(
     return target_sequences
 
 
+def _slice_labels_by_content_start(
+    row: torch.Tensor, L: int, ignore_index: int = IGNORE_INDEX
+) -> torch.Tensor:
+    """Slice the first L tokens of the content (non-ignore region) from a labels row.
+
+    With left padding, each row's content starts at a different index. Using the
+    same start (e.g. from the correct item) for labels_wrong can make the slice
+    fall entirely in padding when the wrong item is shorter, causing truth_ratio
+    to get no valid positions. This uses this row's own content start.
+    """
+    if row.dim() > 1:
+        row = row.squeeze(0)
+    mask = row != ignore_index
+    if not mask.any():
+        return torch.full((L,), ignore_index, dtype=row.dtype, device=row.device)
+    content_start = mask.nonzero(as_tuple=True)[0][0].item()
+    end = min(content_start + L, row.shape[0])
+    gen_alt = row[content_start:end].clone()
+    if gen_alt.shape[0] < L:
+        padding = torch.full(
+            (L - gen_alt.shape[0],), ignore_index, dtype=gen_alt.dtype, device=gen_alt.device
+        )
+        gen_alt = torch.cat([gen_alt, padding])
+    return gen_alt
+
+
+def _batch_template_dual_labels(
+    batch: dict,
+    sample_idx: int,
+    key: str,
+    L: int,
+    ignore_index: int = IGNORE_INDEX,
+) -> Any:
+    """Build batch_template[key] for labels_correct or labels_wrong. Handles N wrong options (3D [B,N,L])."""
+    tensor = batch[key]
+    if key == "labels_wrong" and tensor.dim() == 3:
+        N = tensor.shape[1]
+        return [
+            _slice_labels_by_content_start(tensor[sample_idx][k], L, ignore_index).unsqueeze(0)
+            for k in range(N)
+        ]
+    return _slice_labels_by_content_start(tensor[sample_idx], L, ignore_index).unsqueeze(0)
+
+
 def should_run_gc(threshold: float = 0.9) -> bool:
     """Return True if CUDA is available and VRAM usage (allocated/total) is >= threshold."""
     if not torch.cuda.is_available():
@@ -585,11 +629,9 @@ def _compute_retain_mu_by_step(
             }
             for key in ("labels_correct", "labels_wrong"):
                 if key in batch:
-                    gen_alt = batch[key][sample_idx][sample_prompt_len : sample_prompt_len + L]
-                    if gen_alt.shape[0] < L:
-                        padding = torch.full((L - gen_alt.shape[0],), IGNORE_INDEX, dtype=gen_alt.dtype, device=gen_alt.device)
-                        gen_alt = torch.cat([gen_alt, padding])
-                    batch_template[key] = gen_alt.unsqueeze(0)
+                    batch_template[key] = _batch_template_dual_labels(
+                        batch, sample_idx, key, L, IGNORE_INDEX
+                    )
             ground_truth_str = ""
             if generated_labels is not None:
                 valid = generated_labels[generated_labels != IGNORE_INDEX]
@@ -749,7 +791,36 @@ def _compute_pre_compute_metrics_at_step(
                 logit_alignment = trajectory_config.get("logit_alignment", "causal")
                 provider = FixationStepWiseScoreProvider(logit_alignment=logit_alignment)
                 lab = batch_template.get(labels_field if labels_field else "labels")
-                if lab is not None:
+
+                if isinstance(lab, list):
+                    wrong_results = []
+                    for lab_t in lab:
+                        lab_flat = lab_t.squeeze(0) if lab_t.dim() > 1 else lab_t
+                        batch_prov = {"labels": lab_flat.unsqueeze(0)}
+                        model_or_logits = {
+                            "R": R.unsqueeze(0),
+                            "F": F.unsqueeze(0),
+                            "report_step": step,
+                        }
+                        results = provider.get_per_position_scores(
+                            model_or_logits, batch_prov, ignore_index=IGNORE_INDEX
+                        )
+                        if results and results[0][0]:
+                            prob_val = sequence_probability_from_scores(results[0][0])
+                            avg_loss_val = float(-np.log(prob_val + 1e-12))
+                            wrong_results.append({
+                                "agg_value": prob_val,
+                                "value_by_index": {
+                                    sample_idx: {"prob": prob_val, "avg_loss": avg_loss_val},
+                                },
+                            })
+                        else:
+                            wrong_results.append({
+                                "agg_value": None,
+                                "value_by_index": {sample_idx: {"prob": None, "avg_loss": None}},
+                            })
+                    pre_compute_results[access_key] = wrong_results
+                elif lab is not None:
                     lab = lab.squeeze(0) if lab.dim() > 1 else lab
                     batch_prov = {"labels": lab.unsqueeze(0)}
                     model_or_logits = {
@@ -781,6 +852,7 @@ def _compute_pre_compute_metrics_at_step(
                             "agg_value": None,
                             "value_by_index": {sample_idx: {"prob": None, "avg_loss": None}},
                         }
+                    pre_compute_results[access_key] = pre_result
                 else:
                     logger.info(
                         "pre_compute probability (generalized): labels missing "
@@ -793,7 +865,7 @@ def _compute_pre_compute_metrics_at_step(
                         "agg_value": None,
                         "value_by_index": {sample_idx: {"prob": None, "avg_loss": None}},
                     }
-                pre_compute_results[access_key] = pre_result
+                    pre_compute_results[access_key] = pre_result
             except Exception as e:
                 logger.warning(
                     "pre_compute probability (generalized): exception — %s (sample_idx=%s, step=%s, labels_field=%s)",
@@ -813,7 +885,33 @@ def _compute_pre_compute_metrics_at_step(
         # Note: Pre-compute metrics might have their own pre_compute requirements
         # We handle this recursively
         try:
-            # Substitute labels with labels_field if specified (for truth_ratio dual-answer)
+            labels_val = batch_template.get(labels_field) if labels_field else batch_template.get("labels")
+            if labels_field and labels_field in batch_template and isinstance(labels_val, list):
+                wrong_results = []
+                for lab_tensor in labels_val:
+                    pre_bt = {**batch_template, "labels": lab_tensor}
+                    kwargs_clean = {k: v for k, v in kwargs.items() if k not in ("tokenizer", "model_wrapper_override")}
+                    pre_result_k = _call_metric_at_step(
+                        metric=pre_metric,
+                        logits=logits,
+                        batch_template=pre_bt,
+                        tokenizer=tokenizer,
+                        sample_labels=sample_labels,
+                        sample_input_ids=sample_input_ids,
+                        sample_prompt_len=sample_prompt_len,
+                        metric_config=pre_metric_cfg,
+                        sample_idx=sample_idx,
+                        model_wrapper_override=model_wrapper_override,
+                        **kwargs_clean
+                    )
+                    vbi = pre_result_k.get("value_by_index", {}) if isinstance(pre_result_k, dict) else {}
+                    if vbi and sample_idx not in vbi:
+                        first_key = next(iter(vbi))
+                        pre_result_k = dict(pre_result_k) if isinstance(pre_result_k, dict) else {}
+                        pre_result_k["value_by_index"] = {sample_idx: vbi[first_key]}
+                    wrong_results.append(pre_result_k)
+                pre_compute_results[access_key] = wrong_results
+                continue
             pre_batch_template = batch_template
             if labels_field and labels_field in batch_template:
                 pre_batch_template = {
@@ -2001,21 +2099,14 @@ def trajectory_metrics(model, **kwargs):
                         "attention_mask": torch.ones((1, L), dtype=torch.long, device=sample_input_ids.device),  # All positions valid
                         "index": torch.tensor([int(idx_str)], dtype=torch.long, device=sample_input_ids.device),  # Required by run_batchwise_evals
                     }
-                    # Add labels_correct/labels_wrong for truth_ratio pre_compute (dual-answer dataset)
+                    # Add labels_correct/labels_wrong for truth_ratio pre_compute (dual-answer dataset).
+                    # Use each row's content start; support N wrong options (batch[key] 3D [B,N,L]).
                     for key in ("labels_correct", "labels_wrong"):
                         if key in batch:
-                            sample_labels_alt = batch[key][sample_idx]
-                            gen_alt = sample_labels_alt[sample_prompt_len:sample_prompt_len + L]
-                            if gen_alt.shape[0] < L:
-                                padding = torch.full(
-                                    (L - gen_alt.shape[0],),
-                                    IGNORE_INDEX,
-                                    dtype=gen_alt.dtype,
-                                    device=gen_alt.device,
-                                )
-                                gen_alt = torch.cat([gen_alt, padding])
-                            batch_template[key] = gen_alt.unsqueeze(0)
-            
+                            batch_template[key] = _batch_template_dual_labels(
+                                batch, sample_idx, key, L, IGNORE_INDEX
+                            )
+
                     # Decode ground truth once per sample for ROUGE-only path (reuse across steps and trajectory types)
                     if generated_labels is not None:
                         valid_labels_gt = generated_labels[generated_labels != IGNORE_INDEX]
