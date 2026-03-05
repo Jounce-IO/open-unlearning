@@ -699,6 +699,7 @@ def _compute_pre_compute_metrics_at_step(
     """
     trajectory_config = trajectory_config or kwargs.get("trajectory_config")
     sample_traj = sample_traj or kwargs.get("sample_traj")
+    step = kwargs.get("step")
     pre_compute_results = {}
 
     for pre_metric_name, pre_metric_cfg in pre_compute_config.items():
