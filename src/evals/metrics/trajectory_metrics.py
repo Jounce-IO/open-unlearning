@@ -737,7 +737,7 @@ def _compute_pre_compute_metrics_at_step(
 
         use_generalized = (
             trajectory_config is not None
-            and trajectory_config.get("use_generalized_sequence_probability", False)
+            and trajectory_config.get("use_generalized_sequence_probability", True)
             and sample_traj is not None
             and handler_name == "probability"
         )
@@ -1179,7 +1179,7 @@ def _call_metric_at_step(
     if (
         metric_name == "extraction_strength"
         and trajectory_config is not None
-        and trajectory_config.get("use_generalized_sequence_probability", False)
+        and trajectory_config.get("use_generalized_sequence_probability", True)
         and sample_traj is not None
     ):
         R = sample_traj["R"]
@@ -1907,7 +1907,7 @@ def trajectory_metrics(model, **kwargs):
                     }
                 if privleak_accumulators is not None and _key is None:
                     use_generalized_privleak = trajectory_config.get(
-                        "use_generalized_sequence_probability", False
+                        "use_generalized_sequence_probability", True
                     )
                     for step in steps_to_use:
                         if use_generalized_privleak:
@@ -1935,7 +1935,7 @@ def trajectory_metrics(model, **kwargs):
                     idx_str = str(indices[sample_idx].item() if torch.is_tensor(indices[sample_idx]) else indices[sample_idx])
                     sample_traj = {"R": R[sample_idx], "F": F[sample_idx], "S": S, "L": L}
                     use_generalized = (
-                        trajectory_config.get("use_generalized_sequence_probability", False)
+                        trajectory_config.get("use_generalized_sequence_probability", True)
                         if trajectory_config else False
                     )
 
@@ -2119,7 +2119,7 @@ def trajectory_metrics(model, **kwargs):
 
                         if "probability" in metrics_to_run and generated_labels is not None:
                             use_generalized = trajectory_config.get(
-                                "use_generalized_sequence_probability", False
+                                "use_generalized_sequence_probability", True
                             )
                             logit_alignment = trajectory_config.get(
                                 "logit_alignment", "causal"
@@ -2158,47 +2158,45 @@ def trajectory_metrics(model, **kwargs):
                                     torch.cuda.synchronize()
                                     torch.cuda.empty_cache()
                             else:
-                                logits_list = [
-                                    _get_logits_at_step(sample_traj, traj_name, step)
-                                    for step in steps_to_use
-                                ]
-                                device = logits_list[0].device
-                                logits_stacked = torch.stack(
-                                    [l.t() for l in logits_list], dim=0
-                                )
-                                # Convert same-position logits to AR format so _compute_prob_from_fixation_logits (logits[t] predicts label[t+1]) receives the correct convention.
-                                logits_stacked = torch.cat(
-                                    [logits_stacked[:, :1, :], logits_stacked[:, :-1, :]], dim=1
-                                )
-                                labels_batch_full = generated_labels.unsqueeze(0).expand(
-                                    len(steps_to_use), -1
-                                ).to(device=device, dtype=torch.long)
-                                for view in include_views:
-                                    if view == "full":
-                                        prob_results = _compute_prob_from_fixation_logits(
-                                            logits_stacked, labels_batch_full, device, IGNORE_INDEX
-                                        )
-                                    else:
-                                        L_eff_slice = min(L_eff_b, logits_stacked.shape[1])
-                                        prob_results = _compute_prob_from_fixation_logits(
-                                            logits_stacked[:, :L_eff_slice, :],
-                                            labels_batch_full[:, :L_eff_slice],
-                                            device,
-                                            IGNORE_INDEX,
-                                        )
-                                    for i, step in enumerate(steps_to_use):
-                                        if i < len(prob_results) and "prob" in prob_results[i]:
-                                            step_values_by_view[view][traj_name][step]["probability"].append(
-                                                prob_results[i]["prob"]
+                                # Process probability per step to avoid OOM: stacking all steps
+                                # (num_steps x L x V) can exceed GPU memory (e.g. 25 x 200 x 126k).
+                                device = _get_logits_at_step(
+                                    sample_traj, traj_name, steps_to_use[0]
+                                ).device
+                                labels_full = generated_labels.to(device=device, dtype=torch.long)
+                                for i, step in enumerate(steps_to_use):
+                                    logits_step = _get_logits_at_step(
+                                        sample_traj, traj_name, step
+                                    ).t()  # [L, V]
+                                    # AR convention: logits[t] predicts label[t+1]
+                                    logits_step = torch.cat(
+                                        [logits_step[:1, :], logits_step[:-1, :]], dim=0
+                                    ).unsqueeze(0)  # [1, L, V]
+                                    for view in include_views:
+                                        if view == "full":
+                                            logits_v = logits_step
+                                            lab = labels_full.unsqueeze(0)
+                                        else:
+                                            L_eff_slice = min(
+                                                L_eff_b, logits_step.shape[1]
                                             )
-                                    if len(include_views) > 1 and torch.cuda.is_available():
-                                        del prob_results
+                                            logits_v = logits_step[
+                                                :, :L_eff_slice, :
+                                            ].contiguous()
+                                            lab = labels_full[
+                                                :L_eff_slice
+                                            ].unsqueeze(0)
+                                        prob_results = _compute_prob_from_fixation_logits(
+                                            logits_v, lab, device, IGNORE_INDEX
+                                        )
+                                        if prob_results and "prob" in prob_results[0]:
+                                            step_values_by_view[view][traj_name][step][
+                                                "probability"
+                                            ].append(prob_results[0]["prob"])
+                                    if torch.cuda.is_available():
+                                        del logits_step
                                         torch.cuda.synchronize()
                                         torch.cuda.empty_cache()
-                                if torch.cuda.is_available():
-                                    del logits_stacked, labels_batch_full
-                                    torch.cuda.synchronize()
-                                    torch.cuda.empty_cache()
 
                         for step in steps_to_use:
                             # Get logits at this step (on-demand from R, F)
@@ -2424,7 +2422,7 @@ def trajectory_metrics(model, **kwargs):
                     h_B = h_R.shape[0] if hasattr(h_R, "shape") else len(h_R)
                     h_steps_to_use = [s for s in run_steps_to_use if s < h_S]
                     use_generalized_privleak = trajectory_config.get(
-                        "use_generalized_sequence_probability", False
+                        "use_generalized_sequence_probability", True
                     )
                     for step in h_steps_to_use:
                         if use_generalized_privleak:
