@@ -294,7 +294,9 @@ def truth_ratio(model, **kwargs):
         # New definition from OpenUnlearning: correct / (correct + wrong)
         truth_ratios = correct_prob / (correct_prob + wrong_prob + 1e-10)
 
-    value_by_index = {idx: {"score": truth_ratios} for idx in filtered_indices}
+    value_by_index = {
+        idx: {"score": truth_ratios[i]} for i, idx in enumerate(filtered_indices)
+    }
     truth_ratio_stats = np.array([evals["score"] for evals in value_by_index.values()])
     forget_tr_avg = aggregator(truth_ratio_stats)
     return {"agg_value": forget_tr_avg, "value_by_index": value_by_index}

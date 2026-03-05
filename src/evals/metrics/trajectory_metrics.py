@@ -904,11 +904,19 @@ def _compute_pre_compute_metrics_at_step(
                         model_wrapper_override=model_wrapper_override,
                         **kwargs_clean
                     )
-                    vbi = pre_result_k.get("value_by_index", {}) if isinstance(pre_result_k, dict) else {}
-                    if vbi and sample_idx not in vbi:
-                        first_key = next(iter(vbi))
-                        pre_result_k = dict(pre_result_k) if isinstance(pre_result_k, dict) else {}
-                        pre_result_k["value_by_index"] = {sample_idx: vbi[first_key]}
+                    # truth_ratio expects list of N dicts with value_by_index keyed by sample_idx (same as correct).
+                    if isinstance(pre_result_k, list) and len(pre_result_k) > 0 and isinstance(pre_result_k[0], dict):
+                        first = pre_result_k[0]
+                        pre_result_k = {
+                            "value_by_index": {sample_idx: first},
+                            "agg_value": first.get("prob") if first.get("prob") is not None else first.get("avg_loss"),
+                        }
+                    else:
+                        vbi = pre_result_k.get("value_by_index", {}) if isinstance(pre_result_k, dict) else {}
+                        if vbi and sample_idx not in vbi:
+                            first_key = next(iter(vbi))
+                            pre_result_k = dict(pre_result_k) if isinstance(pre_result_k, dict) else {}
+                            pre_result_k["value_by_index"] = {sample_idx: vbi[first_key]}
                     wrong_results.append(pre_result_k)
                 pre_compute_results[access_key] = wrong_results
                 continue
