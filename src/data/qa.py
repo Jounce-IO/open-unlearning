@@ -1,7 +1,10 @@
+import logging
 import torch
 from torch.utils.data import Dataset
 
 from data.utils import load_hf_dataset, preprocess_chat_instance, add_dataset_index
+
+logger = logging.getLogger(__name__)
 
 
 class QADataset(Dataset):
@@ -135,6 +138,23 @@ class QAwithAlternateDataset(QADataset):
         return return_item if self.return_original else return_item["alternate"]
 
 
+def _ensure_single_answer(answer, key_label: str, index, dataset_idx: int):
+    """If answer is a list (e.g. TOFU perturbed_answer has 5 options), use first element."""
+    if isinstance(answer, list):
+        if len(answer) == 0:
+            raise ValueError(
+                f"Empty list for {key_label} at dataset index {dataset_idx}; cannot compute dual-answer labels."
+            )
+        logger.info(
+            "dual_answer_dataset: %s is a list of %s items at index %s; using first for tokenization",
+            key_label,
+            len(answer),
+            dataset_idx,
+        )
+        return answer[0]
+    return answer
+
+
 class QAwithDualAnswersDataset(QADataset):
     """Dataset yielding both labels_correct and labels_wrong for truth_ratio metrics.
 
@@ -142,6 +162,10 @@ class QAwithDualAnswersDataset(QADataset):
     perturbed_answer in forget10_perturbed). Yields batches with both label
     variants for computing probability(correct) and probability(wrong) from
     the same model output.
+
+    When a key returns a list (e.g. TOFU perturbed_answer has multiple options),
+    the first element is used so tokenization produces valid labels. See
+    evaluation-notes.md "Dual-answer datasets and list answers".
     """
 
     def __init__(
@@ -162,6 +186,13 @@ class QAwithDualAnswersDataset(QADataset):
         correct_answer = self.data[idx][self.correct_answer_key]
         wrong_answer = self.data[idx][self.wrong_answer_key]
         index = self.data[idx]["index"]
+
+        correct_answer = _ensure_single_answer(
+            correct_answer, self.correct_answer_key, index, idx
+        )
+        wrong_answer = _ensure_single_answer(
+            wrong_answer, self.wrong_answer_key, index, idx
+        )
 
         correct_item = self._process_sample(
             question=question, answer=correct_answer, index=index
