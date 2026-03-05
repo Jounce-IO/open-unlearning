@@ -106,6 +106,7 @@ trajectory_config:
 datasets:
   TOFU_QA_forget:
     access_key: forget
+    handler: QADataset
     args:
       hf_args:
         name: ${eval.tofu_trajectory.forget_split}_perturbed
@@ -117,6 +118,7 @@ datasets:
       predict_with_generate: true
   TOFU_QA_holdout:
     access_key: holdout
+    handler: QADataset
     args:
       hf_args:
         name: ${eval.tofu_trajectory.holdout_split}
@@ -128,6 +130,7 @@ datasets:
   # Retain set: used to compute trajectory_model_utility (hm_aggregate) per step from current model, not reference_logs
   TOFU_QA_retain_eval:
     access_key: retain
+    handler: QADataset
     args:
       hf_args:
         name: retain_perturbed

@@ -26,6 +26,7 @@ trajectory_config:
 
 datasets:
   TOFU_QA_retain_eval:
+    handler: QADataset
     args:
       hf_args:
         name: ${eval.tofu_trajectory.forget_split}
