@@ -66,7 +66,7 @@ from evals.guardrails import (
 
 logger = logging.getLogger("evaluator")
 
-# One-time warnings for trajectory fallback to single retain reference (see known-limitations)
+# One-time warnings for trajectory fallback to single retain reference (see docs/evaluation-notes.md)
 _trajectory_single_retain_warned: set = set()
 
 # IGNORE_INDEX from data.utils
@@ -1244,6 +1244,42 @@ def _call_metric_at_step(
         "exact_memorization": _exact_memorization_batch_fn,
         "extraction_strength": _extraction_strength_batch_fn,
     }
+    
+    # Probability with fixation-length logits: use _compute_prob_from_fixation_logits to avoid
+    # cross_entropy shape mismatch (e.g. logits [1, 20, V] vs labels [1, 199] from full sequence).
+    # _compute_prob_from_fixation_logits uses causal alignment: shifted_logits[i] predicts
+    # shifted_labels[i] = labels[i+1]. Invariant: knowledge/dllm-unlearning-invariants/notation.tex
+    # "logit row at index ℓ−1 predicts token at ℓ"; metrics.tex generalized P(a|q; π,m) at report step s.
+    # When trajectory_sample_interval > 1, logits at index j are at sequence position j*interval,
+    # so they predict token at j*interval+1; we must slice full labels so that labels_sliced[j+1]
+    # = full_labels[j*interval+1]. Indices: 0, 1, interval+1, 2*interval+1, ..., (L_logits-2)*interval+1.
+    if metric_name == "probability" and "labels" in batch and batch["labels"] is not None:
+        L_logits = logits.shape[1]
+        labels_full = batch["labels"]
+        L_labels = labels_full.shape[1]
+        if L_logits != L_labels:
+            try:
+                trajectory_config = kwargs.get("trajectory_config") or {}
+                interval = int(trajectory_config.get("trajectory_sample_interval") or 1)
+                if interval > 1:
+                    # Causal: logits[j] at seq pos j*interval predicts token at j*interval+1.
+                    # We need labels_sliced[j+1] = full_labels[j*interval+1]. Build indices for
+                    # labels_sliced: [0, 1, interval+1, 2*interval+1, ..., (L_logits-2)*interval+1].
+                    j_range = torch.arange(L_logits, device=labels_full.device, dtype=torch.long)
+                    indices = (j_range - 1).clamp(min=0) * interval + 1
+                    indices[0] = 0
+                    indices = indices.clamp(max=L_labels - 1)
+                    labels_sliced = labels_full[:, indices].contiguous()
+                else:
+                    labels_sliced = labels_full[:, :L_logits].contiguous()
+                result = _compute_prob_from_fixation_logits(
+                    logits, labels_sliced, device, ignore_index=IGNORE_INDEX
+                )
+                return result
+            except Exception as e:
+                logger.warning(
+                    "probability from fixation logits failed (%s), falling back to batch fn", e
+                )
     
     # Try using batch function if available
     if metric_name in batch_function_map:

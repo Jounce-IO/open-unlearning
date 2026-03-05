@@ -27,6 +27,7 @@ from evals.metrics.trajectory_metrics import (
     _get_metric_from_registry,
     _call_metric_at_step,
     _compute_pre_compute_metrics_at_step,
+    _compute_prob_from_fixation_logits,
     _derive_steps_to_use,
     _extract_metric_scalar,
     _get_logits_at_step,
@@ -2622,6 +2623,99 @@ class TestCallMetricAtStep:
             call_kwargs = mock_metric._metric_fn.call_args[1]
             assert "pre_compute" in call_kwargs
             assert "correct" in call_kwargs["pre_compute"]
+
+
+class TestProbabilityFixationLogitsRegression:
+    """Regression tests for probability from fixation logits (shape mismatch and causal alignment).
+
+    Invariant: knowledge/dllm-unlearning-invariants/notation.tex — causal: logit at index ℓ−1
+    predicts token at ℓ. When trajectory_sample_interval > 1, fixation logits at index j are at
+    sequence position j*interval, so they predict token at j*interval+1; label indices must match.
+    """
+
+    def test_probability_fixation_logits_interval_one_trim_labels(self):
+        """L_logits < L_labels, interval=1: labels_sliced = full[:, :L_logits], no crash."""
+        if "probability" not in METRICS_REGISTRY:
+            pytest.skip("probability not registered")
+        prob_metric = METRICS_REGISTRY["probability"]
+        V, L_logits, L_labels = 50, 10, 100
+        device = torch.device("cpu")
+        logits = torch.randn(1, L_logits, V)
+        labels_full = torch.randint(0, V, (1, L_labels))
+        labels_full[0, :5] = IGNORE_INDEX
+        batch = {"labels": labels_full}
+        result = _compute_prob_from_fixation_logits(
+            logits, labels_full[:, :L_logits].contiguous(), device, ignore_index=IGNORE_INDEX
+        )
+        assert isinstance(result, list) and len(result) == 1
+        assert "prob" in result[0] and "avg_loss" in result[0]
+        assert 0 <= result[0]["prob"] <= 1
+
+    def test_probability_fixation_logits_shape_mismatch_interval_8_no_crash(self):
+        """L_logits=20, L_labels=199, interval=8: _call_metric_at_step returns without shape error (causal alignment)."""
+        if "probability" not in METRICS_REGISTRY:
+            pytest.skip("probability not registered")
+        prob_metric = METRICS_REGISTRY["probability"]
+        V, L_logits, L_labels = 100, 20, 199
+        logits = torch.randn(L_logits, V)  # [L, V] for _call_metric_at_step (transposed to [1,L,V] inside)
+        if logits.dim() == 2:
+            logits = logits.unsqueeze(0)
+        batch_template = {
+            "input_ids": torch.zeros((1, L_labels), dtype=torch.long),
+            "labels": torch.randint(0, V, (1, L_labels)),
+            "attention_mask": torch.ones((1, L_labels), dtype=torch.long),
+        }
+        batch_template["labels"][0, :10] = IGNORE_INDEX
+        tokenizer = Mock()
+        try:
+            result = _call_metric_at_step(
+                metric=prob_metric,
+                logits=logits,
+                batch_template=batch_template,
+                tokenizer=tokenizer,
+                sample_labels=batch_template["labels"][0],
+                sample_input_ids=batch_template["input_ids"][0],
+                sample_prompt_len=0,
+                metric_config={},
+                sample_idx="0",
+                trajectory_config={"trajectory_sample_interval": 8},
+                device=torch.device("cpu"),
+            )
+        except Exception as e:
+            assert "Expected target size" not in str(e), (
+                "Regression: probability with fixation logits and interval=8 must use causal-aligned "
+                "label indices (notation.tex: logit ℓ−1 predicts token ℓ)."
+            )
+            raise
+        assert result is not None
+        if isinstance(result, list):
+            assert len(result) >= 1
+            assert all("prob" in r and "avg_loss" in r for r in result)
+        elif isinstance(result, dict):
+            assert "agg_value" in result or "value_by_index" in result
+
+    def test_probability_fixation_logits_causal_sliced_labels_match_convention(self):
+        """With interval=8, labels_sliced must have indices 0,1,9,17,... so logits[j] predicts label at j*interval+1."""
+        device = torch.device("cpu")
+        L_logits, L_labels, interval, V = 5, 200, 8, 32
+        j_range = torch.arange(L_logits, dtype=torch.long)
+        indices = (j_range - 1).clamp(min=0) * interval + 1
+        indices[0] = 0
+        indices = indices.clamp(max=L_labels - 1)
+        expected = [0, 1, 9, 17, 25]
+        assert indices.tolist() == expected, (
+            "Causal alignment: labels_sliced[j+1] must be full_labels[j*interval+1] "
+            "(notation.tex logit at ℓ−1 predicts token at ℓ)."
+        )
+        # Sanity: _compute_prob_from_fixation_logits with these-length labels and logits runs
+        logits = torch.randn(1, L_logits, V)
+        labels_full = torch.randint(0, V, (1, L_labels))
+        labels_sliced = labels_full[:, indices].contiguous()
+        result = _compute_prob_from_fixation_logits(
+            logits, labels_sliced, device, ignore_index=IGNORE_INDEX
+        )
+        assert isinstance(result, list) and len(result) == 1
+        assert "prob" in result[0]
 
 
 class TestReproductionBugs:
