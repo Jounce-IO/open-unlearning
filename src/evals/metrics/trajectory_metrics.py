@@ -743,6 +743,8 @@ def _compute_pre_compute_metrics_at_step(
     sample_traj = sample_traj or kwargs.get("sample_traj")
     step = kwargs.get("step")
     pre_compute_results = {}
+    # Normalize so truth_ratio always sees same key type (str) for correct vs wrong value_by_index.
+    idx_key = str(sample_idx)
 
     for pre_metric_name, pre_metric_cfg in pre_compute_config.items():
         # Get access key (defaults to metric name)
@@ -811,13 +813,13 @@ def _compute_pre_compute_metrics_at_step(
                             wrong_results.append({
                                 "agg_value": prob_val,
                                 "value_by_index": {
-                                    sample_idx: {"prob": prob_val, "avg_loss": avg_loss_val},
+                                    idx_key: {"prob": prob_val, "avg_loss": avg_loss_val},
                                 },
                             })
                         else:
                             wrong_results.append({
                                 "agg_value": None,
-                                "value_by_index": {sample_idx: {"prob": None, "avg_loss": None}},
+                                "value_by_index": {idx_key: {"prob": None, "avg_loss": None}},
                             })
                     pre_compute_results[access_key] = wrong_results
                 elif lab is not None:
@@ -837,7 +839,7 @@ def _compute_pre_compute_metrics_at_step(
                         pre_result = {
                             "agg_value": prob_val,
                             "value_by_index": {
-                                sample_idx: {"prob": prob_val, "avg_loss": avg_loss_val},
+                                idx_key: {"prob": prob_val, "avg_loss": avg_loss_val},
                             },
                         }
                     else:
@@ -850,7 +852,7 @@ def _compute_pre_compute_metrics_at_step(
                         )
                         pre_result = {
                             "agg_value": None,
-                            "value_by_index": {sample_idx: {"prob": None, "avg_loss": None}},
+                            "value_by_index": {idx_key: {"prob": None, "avg_loss": None}},
                         }
                     pre_compute_results[access_key] = pre_result
                 else:
@@ -863,7 +865,7 @@ def _compute_pre_compute_metrics_at_step(
                     )
                     pre_result = {
                         "agg_value": None,
-                        "value_by_index": {sample_idx: {"prob": None, "avg_loss": None}},
+                        "value_by_index": {idx_key: {"prob": None, "avg_loss": None}},
                     }
                     pre_compute_results[access_key] = pre_result
             except Exception as e:
@@ -877,7 +879,7 @@ def _compute_pre_compute_metrics_at_step(
                 )
                 pre_compute_results[access_key] = {
                     "agg_value": None,
-                    "value_by_index": {sample_idx: {"prob": None, "avg_loss": None}},
+                    "value_by_index": {idx_key: {"prob": None, "avg_loss": None}},
                 }
             continue
 
@@ -908,7 +910,7 @@ def _compute_pre_compute_metrics_at_step(
                     if isinstance(pre_result_k, list) and len(pre_result_k) > 0 and isinstance(pre_result_k[0], dict):
                         first = pre_result_k[0]
                         pre_result_k = {
-                            "value_by_index": {sample_idx: first},
+                            "value_by_index": {idx_key: first},
                             "agg_value": first.get("prob") if first.get("prob") is not None else first.get("avg_loss"),
                         }
                     else:
@@ -916,7 +918,7 @@ def _compute_pre_compute_metrics_at_step(
                         if vbi and sample_idx not in vbi:
                             first_key = next(iter(vbi))
                             pre_result_k = dict(pre_result_k) if isinstance(pre_result_k, dict) else {}
-                            pre_result_k["value_by_index"] = {sample_idx: vbi[first_key]}
+                            pre_result_k["value_by_index"] = {idx_key: vbi[first_key]}
                     wrong_results.append(pre_result_k)
                 pre_compute_results[access_key] = wrong_results
                 continue
@@ -942,24 +944,45 @@ def _compute_pre_compute_metrics_at_step(
                 model_wrapper_override=model_wrapper_override,
                 **kwargs_clean
             )
-            
+
+            # When probability was called with 3D labels (e.g. [1,N,L]), it returns list of N lists;
+            # truth_ratio expects wrong = list of N dicts with value_by_index keyed by same index as correct.
+            if (
+                access_key == "wrong"
+                and isinstance(pre_result, list)
+                and len(pre_result) > 0
+                and isinstance(pre_result[0], list)
+            ):
+                wrong_results = []
+                for k in range(len(pre_result)):
+                    opt_list = pre_result[k]
+                    first = opt_list[0] if opt_list and isinstance(opt_list[0], dict) else {}
+                    wrong_results.append({
+                        "value_by_index": {
+                            idx_key: first if isinstance(first, dict) else {"prob": None, "avg_loss": None},
+                        },
+                        "agg_value": first.get("prob") if isinstance(first, dict) else first.get("avg_loss"),
+                    })
+                pre_compute_results[access_key] = wrong_results
+                continue
+
             # Structure result in the format expected by main metrics
             # Main metrics expect: {"agg_value": ..., "value_by_index": {idx: {...}}}
             if isinstance(pre_result, dict):
                 if "value_by_index" in pre_result:
                     # Already in correct format, but ensure sample_idx is present
                     value_by_index = pre_result["value_by_index"]
-                    if sample_idx not in value_by_index:
+                    if idx_key not in value_by_index:
                         # Extract value from result and add to value_by_index
                         if "agg_value" in pre_result:
-                            value_by_index[sample_idx] = {"prob": pre_result["agg_value"]}
+                            value_by_index[idx_key] = {"prob": pre_result["agg_value"]}
                         elif len(value_by_index) > 0:
                             # Use first value as template
                             first_idx = list(value_by_index.keys())[0]
-                            value_by_index[sample_idx] = value_by_index[first_idx].copy()
+                            value_by_index[idx_key] = value_by_index[first_idx].copy()
                 elif "agg_value" in pre_result:
                     # Create value_by_index with single entry
-                    value_by_index = {sample_idx: {"prob": pre_result["agg_value"]}}
+                    value_by_index = {idx_key: {"prob": pre_result["agg_value"]}}
                     pre_result["value_by_index"] = value_by_index
                 else:
                     # Try to extract value from result
@@ -975,7 +998,7 @@ def _compute_pre_compute_metrics_at_step(
                                 value = float(val)
                                 break
                     if value is not None:
-                        value_by_index = {sample_idx: {"prob": value}}
+                        value_by_index = {idx_key: {"prob": value}}
                         pre_result = {
                             "agg_value": value,
                             "value_by_index": value_by_index,
@@ -986,7 +1009,7 @@ def _compute_pre_compute_metrics_at_step(
                         )
                         pre_result = {
                             "agg_value": None,
-                            "value_by_index": {sample_idx: {"prob": None}},
+                            "value_by_index": {idx_key: {"prob": None}},
                         }
             elif isinstance(pre_result, list) and len(pre_result) > 0:
                 # List format - extract first result (e.g., from evaluate_probability)
@@ -1007,12 +1030,12 @@ def _compute_pre_compute_metrics_at_step(
                     # Preserve all fields from result_dict in value_by_index
                     pre_result = {
                         "agg_value": value,
-                        "value_by_index": {sample_idx: result_dict.copy()},
+                        "value_by_index": {idx_key: result_dict.copy()},
                     }
                 else:
                     pre_result = {
                         "agg_value": None,
-                        "value_by_index": {sample_idx: {"prob": None}},
+                        "value_by_index": {idx_key: {"prob": None}},
                     }
             else:
                 logger.warning(
@@ -1020,7 +1043,7 @@ def _compute_pre_compute_metrics_at_step(
                 )
                 pre_result = {
                     "agg_value": None,
-                    "value_by_index": {sample_idx: {"prob": None}},
+                    "value_by_index": {idx_key: {"prob": None}},
                 }
             
             pre_compute_results[access_key] = pre_result
@@ -1033,7 +1056,7 @@ def _compute_pre_compute_metrics_at_step(
             # Return None result so main metric can handle it
             pre_compute_results[access_key] = {
                 "agg_value": None,
-                "value_by_index": {sample_idx: {"prob": None}},
+                "value_by_index": {idx_key: {"prob": None}},
             }
     
     return pre_compute_results
