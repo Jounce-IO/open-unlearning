@@ -147,10 +147,23 @@ def run_batchwise_evals(model, dataloader, batch_eval_fn, batch_eval_fn_args, ev
     return evals
 
 
+def _batch_to_device(batch: dict, device: torch.device) -> dict:
+    """Move batch values to device. Handles list of tensors (e.g. labels_wrong from trajectory)."""
+    out = {}
+    for k, v in batch.items():
+        if isinstance(v, torch.Tensor):
+            out[k] = v.to(device)
+        elif isinstance(v, list) and len(v) > 0 and isinstance(v[0], torch.Tensor):
+            out[k] = [t.to(device) for t in v]
+        else:
+            out[k] = v
+    return out
+
+
 def _evaluate_probability_single(model, batch, labels):
     """One option: compute probability for batch with given labels [B, L]."""
-    batch = {k: v.to(model.device) if isinstance(v, torch.Tensor) else v for k, v in batch.items()}
-    batch = {**batch, "labels": labels.to(model.device)}
+    batch = _batch_to_device(batch, model.device)
+    batch = {**batch, "labels": labels.to(model.device) if isinstance(labels, torch.Tensor) else labels}
     with torch.no_grad():
         output = model(**batch)
     logits = output.logits
@@ -170,10 +183,22 @@ def _evaluate_probability_single(model, batch, labels):
 def evaluate_probability(model, batch, **fn_args):
     """Evaluate model probabilities and average token-level loss for a given batch.
 
-    When fn_args has labels_field (e.g. labels_wrong) and that key is 3D [B, N, L],
-    runs N times (one per option) and returns a list of N lists of per-sample dicts,
-    so run_batchwise_evals can produce pre_compute[\"wrong\"] as list of N dicts for truth_ratio.
+    When fn_args has labels_field (e.g. labels_wrong) and that key is 3D [B, N, L]
+    or a list of N tensors, runs N times (one per option) and returns a list of N
+    lists of per-sample dicts, so run_batchwise_evals can produce pre_compute[\"wrong\"]
+    as list of N dicts for truth_ratio. Also supports batch[\"labels_wrong\"] or
+    batch[\"labels_correct\"] as list of tensors (trajectory per-sample batch_template).
     """
+    device = model.device
+    batch = _batch_to_device(batch, device)
+
+    def run_n_options(lab_list):
+        """Run probability for each of N label tensors; return list of N result lists."""
+        return [
+            _evaluate_probability_single(model, {**batch, "labels": lab_list[k]}, lab_list[k])
+            for k in range(len(lab_list))
+        ]
+
     labels_field = fn_args.get("labels_field")
     if labels_field and labels_field in batch:
         lab = batch[labels_field]
@@ -183,9 +208,18 @@ def evaluate_probability(model, batch, **fn_args):
                 _evaluate_probability_single(model, batch, lab[:, k, :].contiguous())
                 for k in range(n_opts)
             ]
-        lab_2d = lab.squeeze(1) if lab.dim() == 3 else lab
+        if isinstance(lab, list) and len(lab) > 0 and isinstance(lab[0], torch.Tensor):
+            return run_n_options(lab)
+        lab_2d = lab.squeeze(1) if isinstance(lab, torch.Tensor) and lab.dim() == 3 else lab
         return _evaluate_probability_single(model, batch, lab_2d)
-    batch = {k: v.to(model.device) for k, v in batch.items()}
+
+    # Trajectory path: batch_template has labels_wrong/labels_correct as list of N tensors (no fn_args).
+    for key in ("labels_wrong", "labels_correct"):
+        if key in batch:
+            val = batch[key]
+            if isinstance(val, list) and len(val) > 0 and isinstance(val[0], torch.Tensor):
+                return run_n_options(val)
+
     labels = batch["labels"]
     return _evaluate_probability_single(model, batch, labels)
 

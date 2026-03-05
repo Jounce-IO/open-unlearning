@@ -20,6 +20,7 @@ sys.path.insert(0, str(repo_root / "src"))
 
 from evals.metrics.utils import (
     evaluate_probability,
+    _batch_to_device,
     _tensor_to_list_of_floats,
     eval_rouge_recall_batch,
     eval_text_similarity,
@@ -95,6 +96,84 @@ class TestEvaluateProbabilityStructureAndValues:
         result = evaluate_probability(model, batch)
         for item in result:
             assert abs(item["prob"] - math.exp(-item["avg_loss"])) < 1e-5
+
+    def test_batch_to_device_handles_list_of_tensors(self):
+        """_batch_to_device moves list of tensors to device without calling .to() on list."""
+        device = torch.device("cpu")
+        t1 = torch.tensor([1.0, 2.0])
+        t2 = torch.tensor([3.0, 4.0])
+        batch = {"a": t1, "b": [t1, t2], "c": torch.tensor(5)}
+        out = _batch_to_device(batch, device)
+        assert out["a"].device == device
+        assert isinstance(out["b"], list)
+        assert len(out["b"]) == 2
+        assert out["b"][0].device == device
+        assert out["b"][1].device == device
+        assert out["c"].device == device
+
+    def test_evaluate_probability_with_list_labels_wrong_trajectory_path(self):
+        """Trajectory batch_template has labels_wrong as list of N tensors [1, L]; no AttributeError."""
+        batch_size = 1
+        seq_len = 5
+        vocab_size = 10
+        n_wrong_options = 3
+        # Single-sample batch (trajectory per-sample): labels_wrong = list of N tensors [1, L]
+        labels_correct = torch.randint(0, vocab_size, (batch_size, seq_len))
+        labels_correct[:, 0] = -100
+        labels_wrong_list = [
+            torch.randint(0, vocab_size, (batch_size, seq_len)) for _ in range(n_wrong_options)
+        ]
+        for lab in labels_wrong_list:
+            lab[:, 0] = -100
+        model = Mock()
+        model.device = torch.device("cpu")
+        model.return_value = Mock(logits=torch.randn(batch_size, seq_len, vocab_size))
+        model.side_effect = lambda **kw: model.return_value
+        batch = {
+            "input_ids": torch.zeros(batch_size, seq_len, dtype=torch.long),
+            "labels": labels_correct,
+            "labels_wrong": labels_wrong_list,
+            "attention_mask": torch.ones(batch_size, seq_len),
+        }
+        result = evaluate_probability(model, batch)
+        # Should return list of N result lists (one per wrong option), each list has 1 dict (batch_size=1).
+        assert isinstance(result, list)
+        assert len(result) == n_wrong_options
+        for option_results in result:
+            assert isinstance(option_results, list)
+            assert len(option_results) == 1
+            assert "prob" in option_results[0]
+            assert "avg_loss" in option_results[0]
+            assert option_results[0]["prob"] is not None
+            assert option_results[0]["avg_loss"] is not None
+
+    def test_evaluate_probability_labels_field_list_returns_n_option_results(self):
+        """When labels_field is in fn_args and batch[labels_field] is list of tensors, return N option results."""
+        batch_size = 1
+        seq_len = 4
+        vocab_size = 8
+        n_opts = 2
+        labels_list = [
+            torch.randint(0, vocab_size, (batch_size, seq_len)) for _ in range(n_opts)
+        ]
+        for lab in labels_list:
+            lab[:, 0] = -100
+        model = Mock()
+        model.device = torch.device("cpu")
+        model.return_value = Mock(logits=torch.randn(batch_size, seq_len, vocab_size))
+        model.side_effect = lambda **kw: model.return_value
+        batch = {
+            "input_ids": torch.zeros(batch_size, seq_len, dtype=torch.long),
+            "labels": labels_list[0],
+            "labels_wrong": labels_list,
+            "attention_mask": torch.ones(batch_size, seq_len),
+        }
+        result = evaluate_probability(model, batch, labels_field="labels_wrong")
+        assert isinstance(result, list)
+        assert len(result) == n_opts
+        for option_results in result:
+            assert len(option_results) == 1
+            assert "prob" in option_results[0] and "avg_loss" in option_results[0]
 
 
 class TestComputeProbFromFixationLogits:
