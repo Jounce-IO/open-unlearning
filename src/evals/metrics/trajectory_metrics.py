@@ -970,16 +970,17 @@ def _compute_pre_compute_metrics_at_step(
             # Main metrics expect: {"agg_value": ..., "value_by_index": {idx: {...}}}
             if isinstance(pre_result, dict):
                 if "value_by_index" in pre_result:
-                    # Already in correct format, but ensure sample_idx is present
+                    # Normalize to single key idx_key so correct and wrong have same key type (trajectory single-sample).
+                    # Metric may return value_by_index keyed by data index (int); truth_ratio requires same indices as wrong (str).
                     value_by_index = pre_result["value_by_index"]
-                    if idx_key not in value_by_index:
-                        # Extract value from result and add to value_by_index
-                        if "agg_value" in pre_result:
-                            value_by_index[idx_key] = {"prob": pre_result["agg_value"]}
-                        elif len(value_by_index) > 0:
-                            # Use first value as template
-                            first_idx = list(value_by_index.keys())[0]
-                            value_by_index[idx_key] = value_by_index[first_idx].copy()
+                    if idx_key in value_by_index:
+                        val = value_by_index[idx_key]
+                    elif len(value_by_index) > 0:
+                        first_idx = list(value_by_index.keys())[0]
+                        val = value_by_index[first_idx].copy() if isinstance(value_by_index[first_idx], dict) else {"prob": pre_result.get("agg_value"), "avg_loss": None}
+                    else:
+                        val = {"prob": pre_result.get("agg_value"), "avg_loss": None}
+                    pre_result["value_by_index"] = {idx_key: val}
                 elif "agg_value" in pre_result:
                     # Create value_by_index with single entry
                     value_by_index = {idx_key: {"prob": pre_result["agg_value"]}}
