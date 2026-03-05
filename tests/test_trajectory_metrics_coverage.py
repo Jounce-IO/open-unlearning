@@ -717,8 +717,10 @@ class TestTrajectoryMetricsMainCoverage:
                 )
                 
                 assert "agg_value" in result
-                # Check that aggregation might have NaN for missing steps
-                agg_array = result["agg_value"]["steps"]["probability"]
+                # agg_value is keyed by view first (e.g. "full", "eos"), then traj ("steps"), then metric name
+                agg_by_view = result["agg_value"]
+                first_view = next(iter(agg_by_view.keys()))
+                agg_array = agg_by_view[first_view]["steps"]["probability"]
                 assert len(agg_array) > 0
                 # If there are missing steps, we should have NaN values
                 # But if all steps have values, that's also fine
