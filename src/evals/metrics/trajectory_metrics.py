@@ -1583,6 +1583,25 @@ def trajectory_metrics(model, **kwargs):
             and isinstance(data, dict)
             and data.get("retain") is not None
         ):
+            # Avoid passing keys already given as positional args (causes "multiple values" TypeError)
+            _retain_mu_kw = {
+                k: v
+                for k, v in kwargs.items()
+                if k
+                not in (
+                    "tokenizer",
+                    "model",
+                    "data",
+                    "collator",
+                    "batch_size",
+                    "trajectory_config",
+                    "loaded_metrics",
+                    "sort_by_length",
+                    "use_distributed_sampler",
+                    "world_size",
+                    "rank",
+                )
+            }
             retain_agg_by_step = _compute_retain_mu_by_step(
                 model,
                 data["retain"],
@@ -1595,7 +1614,7 @@ def trajectory_metrics(model, **kwargs):
                 use_distributed_sampler,
                 world_size,
                 rank,
-                **kwargs,
+                **_retain_mu_kw,
             )
         kwargs["retain_agg_by_step"] = retain_agg_by_step
 
