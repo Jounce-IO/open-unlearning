@@ -216,12 +216,15 @@ class FixationStepWiseScoreProvider:
             fixation_logits = model_or_logits
         fixation_logits = fixation_logits.float()
         B, L, V = fixation_logits.shape
+        L_lab = lab.shape[1]
+        # Trajectory R/F can have one more position than labels (e.g. final step); cap to avoid index error.
+        L_use = min(L, L_lab)
         log_probs = torch.nn.functional.log_softmax(fixation_logits, dim=-1)
         results: list[tuple[list[float], Optional[list[int]]]] = []
         for b in range(B):
             probs_list: list[float] = []
             fixation_list: list[int] = []
-            for ell in range(L):
+            for ell in range(L_use):
                 if lab[b, ell].item() == ignore_index:
                     continue
                 if self.logit_alignment == "causal":
