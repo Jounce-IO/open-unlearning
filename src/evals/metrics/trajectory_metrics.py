@@ -915,7 +915,7 @@ def _compute_pre_compute_metrics_at_step(
                         }
                     else:
                         vbi = pre_result_k.get("value_by_index", {}) if isinstance(pre_result_k, dict) else {}
-                        if vbi and sample_idx not in vbi:
+                        if vbi and idx_key not in vbi:
                             first_key = next(iter(vbi))
                             pre_result_k = dict(pre_result_k) if isinstance(pre_result_k, dict) else {}
                             pre_result_k["value_by_index"] = {idx_key: vbi[first_key]}

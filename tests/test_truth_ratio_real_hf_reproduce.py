@@ -183,7 +183,76 @@ def test_real_hf_tofu_dual_answer_pre_compute_truth_ratio_and_ks_test():
     assert np.all(np.isfinite(stats))
 
 
-# ---- 6. Reproduce: correct has both int and str key (current bug) -> indices mismatch ----
+# ---- 6. Full chain: int-keyed correct -> normalize -> truth_ratio -> ks_test (assert real output, no KeyError) ----
+def test_ks_test_chain_with_int_keyed_correct_normalized_then_truth_ratio_and_ks_test_succeed():
+    """Reproduce job path: when correct comes back with value_by_index keyed by int (e.g. 25),
+    normalization must produce str keys so truth_ratio passes and ks_test gets evals['score'].
+    Assert full output: truth_ratio value_by_index has 'score', ks_test runs without KeyError."""
+    import torch
+    from unittest.mock import patch
+    from evals.metrics.trajectory_metrics import _compute_pre_compute_metrics_at_step
+    from evals.metrics import METRICS_REGISTRY
+
+    sample_idx = "25"
+    pre_compute_config = {
+        "para": {"access_key": "correct", "labels_field": "labels_correct", "handler": "probability"},
+        "pert": {"access_key": "wrong", "labels_field": "labels_wrong", "handler": "probability"},
+    }
+    batch_template = {
+        "input_ids": torch.zeros(1, 16, dtype=torch.long),
+        "labels": torch.zeros(1, 16, dtype=torch.long),
+        "labels_correct": torch.zeros(1, 16, dtype=torch.long),
+        "labels_wrong": torch.zeros(1, 5, 16, dtype=torch.long),
+    }
+    logits = torch.zeros(1, 16, 100)
+    tokenizer = __import__("unittest.mock").mock.MagicMock()
+
+    # Correct returns int-keyed dict (reproduces job bug); wrong returns list of lists
+    inner_returns = [
+        {"agg_value": 0.5, "value_by_index": {25: {"prob": 0.5, "avg_loss": -0.693}}},
+        [[{"prob": 0.2, "avg_loss": -1.61}], [{"prob": 0.15, "avg_loss": -1.90}]],
+    ]
+    with patch("evals.metrics.trajectory_metrics._call_metric_at_step", side_effect=inner_returns):
+        results = _compute_pre_compute_metrics_at_step(
+            pre_compute_config=pre_compute_config,
+            logits=logits,
+            batch_template=batch_template,
+            tokenizer=tokenizer,
+            sample_labels=None,
+            sample_input_ids=batch_template["input_ids"],
+            sample_prompt_len=0,
+            sample_idx=sample_idx,
+        )
+
+    correct_vbi = results["correct"]["value_by_index"]
+    assert list(correct_vbi.keys()) == [sample_idx], f"normalize must yield str key {sample_idx!r}, got {list(correct_vbi.keys())}"
+    wrong_list = results["wrong"]
+    assert list(wrong_list[0]["value_by_index"].keys()) == [sample_idx]
+
+    # Truth ratio must succeed and output value_by_index with scalar 'score' (for ks_test)
+    tr = METRICS_REGISTRY["truth_ratio"]
+    tr_result = tr._metric_fn(
+        model=None,
+        pre_compute={"correct": {"value_by_index": correct_vbi}, "wrong": wrong_list},
+        aggregator="closer_to_1_better",
+    )
+    assert tr_result["agg_value"] is not None
+    assert sample_idx in tr_result["value_by_index"]
+    assert "score" in tr_result["value_by_index"][sample_idx]
+    score_val = tr_result["value_by_index"][sample_idx]["score"]
+    assert np.isscalar(score_val) or (isinstance(score_val, np.ndarray) and score_val.size == 1), "score must be scalar for ks_test"
+
+    # ks_test must run without KeyError (uses evals['score'])
+    pre_compute_for_ks = {"forget": {"value_by_index": tr_result["value_by_index"]}}
+    ks = METRICS_REGISTRY["ks_test"]
+    ks_result = ks._metric_fn(model=None, pre_compute=pre_compute_for_ks, reference_logs=None)
+    assert "agg_value" in ks_result
+    # Real assertion: ks_test built stats from evals["score"]
+    stats = np.array([evals["score"] for evals in pre_compute_for_ks["forget"]["value_by_index"].values()])
+    assert len(stats) == 1 and np.isfinite(stats[0])
+
+
+# ---- 7. Reproduce: correct has both int and str key (current bug) -> indices mismatch ----
 def test_reproduce_bug_correct_has_int_and_str_keys_wrong_has_str_only():
     """Reproduce: when we only add idx_key, correct can have both 453 and '453', wrong has '453' -> list order/sort can make indices differ."""
     from evals.metrics import METRICS_REGISTRY
