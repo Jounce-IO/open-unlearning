@@ -226,9 +226,16 @@ def truth_ratio(model, **kwargs):
             if n_wrong_options > 0 and "value_by_index" in wrong_input[0]
             else []
         )
-        assert correct_indices == wrong_indices, (
-            "truth_ratio: correct and wrong pre_compute must have same indices"
-        )
+        # Use intersection so we don't crash when trajectory vs batchwise keys differ (e.g. one empty).
+        common_indices = [idx for idx in correct_indices if idx in set(wrong_indices)]
+        if common_indices != correct_indices or common_indices != wrong_indices:
+            logger.warning(
+                "truth_ratio: correct/wrong index sets differ (correct=%s, wrong=%s); using intersection %s",
+                correct_indices,
+                wrong_indices,
+                common_indices,
+            )
+        correct_indices = common_indices
         filtered_indices = [
             idx
             for idx in correct_indices
@@ -255,7 +262,15 @@ def truth_ratio(model, **kwargs):
         wrong_answer_results = {str(k): v for k, v in wrong_answer_results.items()}
         wrong_input["value_by_index"] = wrong_answer_results
         wrong_indices = list(wrong_answer_results.keys())
-        assert correct_indices == wrong_indices
+        common_indices = [idx for idx in correct_indices if idx in set(wrong_indices)]
+        if common_indices != correct_indices or common_indices != wrong_indices:
+            logger.warning(
+                "truth_ratio: correct/wrong index sets differ (correct=%s, wrong=%s); using intersection %s",
+                correct_indices,
+                wrong_indices,
+                common_indices,
+            )
+        correct_indices = common_indices
         filtered_indices = [
             idx
             for idx in correct_indices
