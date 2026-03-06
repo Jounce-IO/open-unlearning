@@ -1048,7 +1048,7 @@ def _compute_pre_compute_metrics_at_step(
                 }
             
             pre_compute_results[access_key] = pre_result
-            
+
         except Exception as e:
             logger.warning(
                 f"Error computing pre-compute metric {pre_metric_name} at step: {e}",

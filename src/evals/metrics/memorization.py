@@ -208,11 +208,19 @@ def truth_ratio(model, **kwargs):
     correct_answer_results = kwargs["pre_compute"]["correct"]["value_by_index"]
     wrong_input = kwargs["pre_compute"]["wrong"]
 
+    # Normalize to str keys so trajectory (idx_str) and batch (int from index tensor) always match.
+    correct_answer_results = {str(k): v for k, v in correct_answer_results.items()}
     correct_indices = list(correct_answer_results.keys())
 
     if isinstance(wrong_input, list):
         wrong_answer_results = None
         n_wrong_options = len(wrong_input)
+        for k in range(n_wrong_options):
+            if "value_by_index" in wrong_input[k]:
+                wrong_input[k]["value_by_index"] = {
+                    str(i): wrong_input[k]["value_by_index"][i]
+                    for i in wrong_input[k]["value_by_index"]
+                }
         wrong_indices = (
             list(wrong_input[0]["value_by_index"].keys())
             if n_wrong_options > 0 and "value_by_index" in wrong_input[0]
@@ -244,6 +252,8 @@ def truth_ratio(model, **kwargs):
         filtered_indices = [idx for idx in filtered_indices if idx in wrong_probs_per_idx]
     else:
         wrong_answer_results = wrong_input["value_by_index"]
+        wrong_answer_results = {str(k): v for k, v in wrong_answer_results.items()}
+        wrong_input["value_by_index"] = wrong_answer_results
         wrong_indices = list(wrong_answer_results.keys())
         assert correct_indices == wrong_indices
         filtered_indices = [

@@ -43,8 +43,9 @@ def test_truth_ratio_list_of_wrong_dicts_averages():
         ])
         correct_prob = np.exp(-correct_vbi[idx]["avg_loss"])
         expected_tr = wrong_prob_avg / (correct_prob + 1e-10)
-        assert idx in result["value_by_index"]
-        reported = result["value_by_index"][idx]["score"]
+        key = str(idx)  # truth_ratio normalizes keys to str
+        assert key in result["value_by_index"]
+        reported = result["value_by_index"][key]["score"]
         if isinstance(reported, np.ndarray):
             reported = float(reported.flat[i]) if reported.size > i else None
         assert reported is not None
@@ -67,7 +68,7 @@ def test_truth_ratio_single_wrong_dict_unchanged():
     )
     assert result["agg_value"] is not None
     expected_tr = 0.25 / (0.5 + 1e-10)
-    reported = result["value_by_index"][0]["score"]
+    reported = result["value_by_index"]["0"]["score"]  # truth_ratio normalizes keys to str
     if isinstance(reported, np.ndarray):
         reported = float(reported.flat[0])
     np.testing.assert_allclose(reported, expected_tr, rtol=1e-5)

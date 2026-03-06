@@ -15,21 +15,21 @@ repo_root = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(repo_root / "src"))
 
 
-# ---- 1. Reproduce bug: correct has int key, wrong has str key -> AssertionError ----
+# ---- 1. int key (correct) vs str key (wrong): truth_ratio normalizes to str and succeeds ----
 def test_reproduce_bug_correct_int_key_wrong_str_key_truth_ratio_assert_fails():
-    """Reproduce: pre_compute correct has value_by_index with int key (e.g. from metric), wrong has str key -> same indices assert fails."""
+    """Pre_compute correct has value_by_index with int key, wrong has str key; truth_ratio normalizes to str and does not raise."""
     from evals.metrics import METRICS_REGISTRY
     metric = METRICS_REGISTRY["truth_ratio"]
-    # Simulate trajectory: "correct" came from metric that returned value_by_index with data index (int)
     correct_vbi = {453: {"prob": 0.5, "avg_loss": -np.log(0.5)}}
     wrong_vbi = {"453": {"prob": 0.25, "avg_loss": -np.log(0.25)}}
     wrong_list = [{"value_by_index": wrong_vbi, "agg_value": 0.25}]
-    with pytest.raises(AssertionError, match="correct and wrong pre_compute must have same indices"):
-        metric._metric_fn(
-            model=None,
-            pre_compute={"correct": {"value_by_index": correct_vbi}, "wrong": wrong_list},
-            aggregator="closer_to_1_better",
-        )
+    result = metric._metric_fn(
+        model=None,
+        pre_compute={"correct": {"value_by_index": correct_vbi}, "wrong": wrong_list},
+        aggregator="closer_to_1_better",
+    )
+    assert result["agg_value"] is not None
+    assert "453" in result["value_by_index"]
 
 
 # ---- 2. Same keys (both str) -> truth_ratio passes ----
@@ -252,19 +252,20 @@ def test_ks_test_chain_with_int_keyed_correct_normalized_then_truth_ratio_and_ks
     assert len(stats) == 1 and np.isfinite(stats[0])
 
 
-# ---- 7. Reproduce: correct has both int and str key (current bug) -> indices mismatch ----
+# ---- 7. correct has both int and str key, wrong has str: truth_ratio normalizes and succeeds ----
 def test_reproduce_bug_correct_has_int_and_str_keys_wrong_has_str_only():
-    """Reproduce: when we only add idx_key, correct can have both 453 and '453', wrong has '453' -> list order/sort can make indices differ."""
+    """Correct has both 453 and '453', wrong has '453'; truth_ratio normalizes to str and succeeds (no assert)."""
     from evals.metrics import METRICS_REGISTRY
     metric = METRICS_REGISTRY["truth_ratio"]
     correct_vbi = {453: {"prob": 0.5, "avg_loss": -np.log(0.5)}, "453": {"prob": 0.5, "avg_loss": -np.log(0.5)}}
     wrong_list = [{"value_by_index": {"453": {"prob": 0.25, "avg_loss": -np.log(0.25)}}}]
     correct_indices = list(correct_vbi.keys())
     wrong_indices = list(wrong_list[0]["value_by_index"].keys())
-    assert correct_indices != wrong_indices
-    with pytest.raises(AssertionError, match="same indices"):
-        metric._metric_fn(
-            model=None,
-            pre_compute={"correct": {"value_by_index": correct_vbi}, "wrong": wrong_list},
-            aggregator="closer_to_1_better",
-        )
+    assert correct_indices != wrong_indices  # raw keys differ
+    result = metric._metric_fn(
+        model=None,
+        pre_compute={"correct": {"value_by_index": correct_vbi}, "wrong": wrong_list},
+        aggregator="closer_to_1_better",
+    )
+    assert result["agg_value"] is not None
+    assert "453" in result["value_by_index"]
