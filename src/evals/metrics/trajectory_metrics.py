@@ -819,16 +819,6 @@ def _compute_pre_compute_metrics_at_step(
                     for opt_i, lab_t in enumerate(lab):
                         lab_flat = lab_t.squeeze(0) if lab_t.dim() > 1 else lab_t
                         num_non_ignore = (lab_flat != IGNORE_INDEX).sum().item()
-                        # #region agent log
-                        try:
-                            import json
-                            import time
-                            _payload = {"sessionId": "0656be", "location": "trajectory_metrics.py:generalized:wrong_before_provider", "message": "wrong option before get_per_position_scores", "data": {"sample_idx": sample_idx, "step": step, "access_key": access_key, "option_idx": opt_i, "L_from_R": L_gen, "lab_flat_shape": list(lab_flat.shape), "num_non_ignore": num_non_ignore}, "timestamp": int(time.time() * 1000), "hypothesisId": "H5"}
-                            with open("/workspaces/dllm/.cursor/debug-0656be.log", "a") as _f:
-                                _f.write(json.dumps(_payload) + "\n")
-                        except Exception:
-                            pass
-                        # #endregion
                         batch_prov = {"labels": lab_flat.unsqueeze(0)}
                         model_or_logits = {
                             "R": R.unsqueeze(0),
@@ -848,16 +838,6 @@ def _compute_pre_compute_metrics_at_step(
                                 },
                             })
                         else:
-                            # #region agent log
-                            try:
-                                import json
-                                import time
-                                _payload = {"sessionId": "0656be", "location": "trajectory_metrics.py:generalized:wrong_option_no_scores", "message": "wrong option no scores", "data": {"sample_idx": sample_idx, "step": step, "access_key": access_key, "option_idx": len(wrong_results)}, "timestamp": int(time.time() * 1000), "hypothesisId": "H5"}
-                                with open("/workspaces/dllm/.cursor/debug-0656be.log", "a") as _f:
-                                    _f.write(json.dumps(_payload) + "\n")
-                            except Exception:
-                                pass
-                            # #endregion
                             wrong_results.append({
                                 "agg_value": None,
                                 "value_by_index": {idx_key: {"prob": None, "avg_loss": None}},
@@ -866,16 +846,6 @@ def _compute_pre_compute_metrics_at_step(
                 elif lab is not None:
                     lab = lab.squeeze(0) if lab.dim() > 1 else lab
                     num_non_ignore = (lab != IGNORE_INDEX).sum().item()
-                    # #region agent log
-                    try:
-                        import json
-                        import time
-                        _payload = {"sessionId": "0656be", "location": "trajectory_metrics.py:generalized:correct_before_provider", "message": "correct before get_per_position_scores", "data": {"sample_idx": sample_idx, "step": step, "labels_field": labels_field, "access_key": access_key, "L_from_R": L_gen, "lab_shape": list(lab.shape), "num_non_ignore": num_non_ignore}, "timestamp": int(time.time() * 1000), "hypothesisId": "H5"}
-                        with open("/workspaces/dllm/.cursor/debug-0656be.log", "a") as _f:
-                            _f.write(json.dumps(_payload) + "\n")
-                    except Exception:
-                        pass
-                    # #endregion
                     batch_prov = {"labels": lab.unsqueeze(0)}
                     model_or_logits = {
                         "R": R.unsqueeze(0),
@@ -895,16 +865,6 @@ def _compute_pre_compute_metrics_at_step(
                             },
                         }
                     else:
-                        # #region agent log
-                        try:
-                            import json
-                            import time
-                            _payload = {"sessionId": "0656be", "location": "trajectory_metrics.py:generalized:no_scores", "message": "fixation provider no scores", "data": {"sample_idx": sample_idx, "step": step, "labels_field": labels_field, "access_key": access_key}, "timestamp": int(time.time() * 1000), "hypothesisId": "H5"}
-                            with open("/workspaces/dllm/.cursor/debug-0656be.log", "a") as _f:
-                                _f.write(json.dumps(_payload) + "\n")
-                        except Exception:
-                            pass
-                        # #endregion
                         logger.info(
                             "pre_compute probability (generalized): no scores from fixation "
                             "provider — empty scores or L_use=0 (sample_idx=%s, step=%s, labels_field=%s)",

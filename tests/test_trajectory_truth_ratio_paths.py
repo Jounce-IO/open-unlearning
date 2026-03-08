@@ -85,8 +85,8 @@ def test_non_generalized_3d_labels_wrong_structure():
         assert "0" in vbi
         # Document current bug: entry can have prob/avg_loss None
         pytest.skip(
-            "Current code returns wrong as single dict (often with None); "
-            "fix: loop over N options, align labels to logits length, then wrong will be list of N."
+            "Trajectory is generalized by definition; the non-generalized path is unsupported for "
+            "dual-answer (no implementation of 3D labels_wrong in non-generalized path)."
         )
 
 
