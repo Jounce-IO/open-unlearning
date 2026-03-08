@@ -211,6 +211,35 @@ def _batch_template_dual_labels(
     return _slice_labels_by_content_start(tensor[sample_idx], L, ignore_index).unsqueeze(0)
 
 
+def _slice_batch_template_to_length(
+    batch_template: Dict[str, Any], length: int
+) -> Dict[str, Any]:
+    """Slice batch_template sequence dimensions to length (probability invariant: logits and labels same length)."""
+    out = {}
+    for k, v in batch_template.items():
+        if v is None:
+            out[k] = v
+            continue
+        if isinstance(v, list):
+            out[k] = [
+                x[:, :length] if isinstance(x, torch.Tensor) and x.dim() >= 2 else x
+                for x in v
+            ]
+            continue
+        if isinstance(v, torch.Tensor) and v.dim() >= 1:
+            seq_dim = 1 if v.dim() >= 2 else 0
+            if v.shape[seq_dim] > length:
+                if v.dim() == 1:
+                    out[k] = v[:length].clone()
+                else:
+                    out[k] = v[:, :length].clone()
+            else:
+                out[k] = v
+        else:
+            out[k] = v
+    return out
+
+
 def should_run_gc(threshold: float = 0.9) -> bool:
     """Return True if CUDA is available and VRAM usage (allocated/total) is >= threshold."""
     if not torch.cuda.is_available():
@@ -651,6 +680,9 @@ def _compute_retain_mu_by_step(
                     logits = logits.transpose(0, 1).unsqueeze(0)
                 L_eff_slice = min(L_eff_b, logits.shape[1])
                 logits_view = logits[:, :L_eff_slice] if L_eff_slice < logits.shape[1] else logits
+                # Probability invariant: step logits and batch labels must have same length.
+                # Slice batch_template to L_eff_slice so labels match logits_view.
+                batch_template_step = _slice_batch_template_to_length(batch_template, L_eff_slice)
 
                 for metric_name, key in (("probability", "prob"), ("rouge", "rouge"), ("truth_ratio", "tr")):
                     m = metric_objs.get(metric_name)
@@ -661,7 +693,7 @@ def _compute_retain_mu_by_step(
                         res = _call_metric_at_step(
                             metric=m,
                             logits=logits_view,
-                            batch_template=batch_template,
+                            batch_template=batch_template_step,
                             tokenizer=tokenizer,
                             sample_labels=generated_labels.unsqueeze(0) if generated_labels is not None else None,
                             sample_input_ids=input_ids[sample_idx].unsqueeze(0),
