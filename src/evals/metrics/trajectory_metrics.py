@@ -220,7 +220,7 @@ def _slice_batch_template_to_length(
         if v is None:
             out[k] = v
             continue
-                                if isinstance(v, list):
+        if isinstance(v, list):
             out[k] = [
                 x[:, :length].clone() if isinstance(x, torch.Tensor) and x.dim() >= 2 else x
                 for x in v
