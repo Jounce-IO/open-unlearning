@@ -48,10 +48,10 @@ def ks_test(model, **kwargs):
         dtype=np.float64,
     )
     if len(forget_tr_stats) == 0:
-        raise ValueError(
-            "ks_test: forget pre_compute has no valid value_by_index entries with 'score'. "
-            "truth_ratio (or forget trajectory) must produce valid scores."
+        logger.warning(
+            "ks_test: forget pre_compute has no valid value_by_index entries with 'score'; returning agg_value=None."
         )
+        return {"agg_value": None}
     reference_logs = kwargs.get("reference_logs", None)
     if reference_logs:
         reference_logs = reference_logs["retain_model_logs"]

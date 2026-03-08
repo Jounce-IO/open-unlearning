@@ -93,7 +93,7 @@ def test_non_generalized_3d_labels_wrong_structure():
 def test_non_generalized_3d_labels_wrong_tr_raises_when_no_valid_pre_compute():
     """
     With real TOFU-like 3D labels_wrong, pre_compute can end up with no valid avg_loss.
-    truth_ratio raises ValueError (same as upstream: fail when no valid pre_compute).
+    truth_ratio returns agg_value=None when no valid pre_compute so trajectory eval continues.
     """
     from datasets import load_dataset
     from transformers import AutoTokenizer
@@ -144,13 +144,14 @@ def test_non_generalized_3d_labels_wrong_tr_raises_when_no_valid_pre_compute():
         sample_idx="0",
     )
     tr = METRICS_REGISTRY["truth_ratio"]
-    # No valid pre_compute (wrong has None avg_loss) → truth_ratio raises (same as upstream).
-    with pytest.raises(ValueError, match="no valid pre_compute"):
-        tr._metric_fn(
-            model=None,
-            pre_compute={"correct": results["correct"], "wrong": results["wrong"]},
-            aggregator="closer_to_1_better",
-        )
+    # No valid pre_compute (wrong has None avg_loss) → truth_ratio returns None so eval continues.
+    result = tr._metric_fn(
+        model=None,
+        pre_compute={"correct": results["correct"], "wrong": results["wrong"]},
+        aggregator="closer_to_1_better",
+    )
+    assert result["agg_value"] is None
+    assert result["value_by_index"] == {}
 
 
 # ---- Generalized path: list of N label tensors (from _batch_template_dual_labels) ----
@@ -325,10 +326,10 @@ def test_generalized_correct_single_tensor_returns_valid():
     assert c["value_by_index"]["0"]["avg_loss"] is not None
 
 
-def test_generalized_L_zero_pre_compute_then_truth_ratio_raises():
+def test_generalized_L_zero_pre_compute_then_truth_ratio_returns_none():
     """
     When L=0 we early-exit and set pre_compute to None for correct/wrong.
-    truth_ratio then raises ValueError (no valid pre_compute), same as upstream.
+    truth_ratio returns agg_value=None, value_by_index={} so trajectory eval can continue.
     """
     from evals.metrics.trajectory_metrics import _compute_pre_compute_metrics_at_step
     from evals.metrics import METRICS_REGISTRY
@@ -372,9 +373,10 @@ def test_generalized_L_zero_pre_compute_then_truth_ratio_raises():
     for w in results["wrong"]:
         assert w["value_by_index"]["0"]["avg_loss"] is None
     tr = METRICS_REGISTRY["truth_ratio"]
-    with pytest.raises(ValueError, match="no valid pre_compute"):
-        tr._metric_fn(
-            model=None,
-            pre_compute={"correct": results["correct"], "wrong": results["wrong"]},
-            aggregator="closer_to_1_better",
-        )
+    result = tr._metric_fn(
+        model=None,
+        pre_compute={"correct": results["correct"], "wrong": results["wrong"]},
+        aggregator="closer_to_1_better",
+    )
+    assert result["agg_value"] is None
+    assert result["value_by_index"] == {}

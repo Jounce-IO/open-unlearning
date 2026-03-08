@@ -279,11 +279,12 @@ def truth_ratio(model, **kwargs):
             n_total,
         )
     if not filtered_indices:
-        # Align with upstream: truth_ratio does not require retain; invalid pre_compute is a bug → fail.
-        raise ValueError(
-            "truth_ratio: no valid pre_compute (correct/wrong avg_loss) for any index. "
-            "Pre-compute must provide valid probability/avg_loss per sample."
+        # Trajectory eval: some steps/samples can have no valid probability (e.g. all-ignore, empty).
+        # Return None result so ks_test and downstream can continue instead of failing the batch.
+        logger.warning(
+            "truth_ratio: no valid pre_compute (correct/wrong avg_loss) for any index; returning agg_value=None."
         )
+        return {"agg_value": None, "value_by_index": {}}
 
     correct_avg_losses = [
         correct_answer_results[idx]["avg_loss"] for idx in filtered_indices
