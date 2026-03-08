@@ -11,6 +11,7 @@ Every-step mode (no interval) is not used.
 import copy
 import gc
 import logging
+import time
 from collections import defaultdict
 from concurrent.futures import ProcessPoolExecutor
 
@@ -1987,6 +1988,7 @@ def trajectory_metrics(model, **kwargs):
         # Process each batch
             for batch_idx, batch in enumerate(dataloader):
                 gpu_set_phase("trajectory_batch_start", batch_idx=batch_idx)
+                _batch_t0 = time.perf_counter()
                 input_ids = batch["input_ids"]
                 labels = batch.get("labels")
                 attention_mask = batch.get("attention_mask")
@@ -2512,6 +2514,13 @@ def trajectory_metrics(model, **kwargs):
                         torch.cuda.empty_cache()
 
                 gpu_set_phase("trajectory_batch_end", batch_idx=batch_idx)
+                _batch_duration = time.perf_counter() - _batch_t0
+                logger.info(
+                    "trajectory_batch_duration batch_idx=%s batch_size=%s duration_sec=%.2f",
+                    batch_idx,
+                    B,
+                    _batch_duration,
+                )
                 # Release batch-sized GPU data before next batch to avoid holding two batches in memory (OOM with many samples).
                 # R and F are references to out["R"] and out["F"]; deleting only 'out' leaves R, F alive (see reports/oom-investigation-why-still-oom.md).
                 # logits_history already deleted earlier in the loop after trajectories_from_logits.
