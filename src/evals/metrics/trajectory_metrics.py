@@ -941,6 +941,10 @@ def _compute_pre_compute_metrics_at_step(
                             first_key = next(iter(vbi))
                             pre_result_k = dict(pre_result_k) if isinstance(pre_result_k, dict) else {}
                             pre_result_k["value_by_index"] = {idx_key: vbi[first_key]}
+                        elif not vbi:
+                            # truth_ratio requires wrong to have same value_by_index keys as correct.
+                            pre_result_k = dict(pre_result_k) if isinstance(pre_result_k, dict) else {}
+                            pre_result_k["value_by_index"] = {idx_key: {"prob": None, "avg_loss": None}}
                     wrong_results.append(pre_result_k)
                 pre_compute_results[access_key] = wrong_results
                 continue

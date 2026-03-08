@@ -52,6 +52,29 @@ def test_truth_ratio_list_of_wrong_dicts_averages():
         np.testing.assert_allclose(reported, expected_tr, rtol=1e-5)
 
 
+def test_truth_ratio_raises_when_first_wrong_option_has_empty_value_by_index():
+    """When wrong is a list, truth_ratio requires wrong[n]['value_by_index'] to have same keys as correct.
+    If the first wrong option has empty value_by_index, wrong_indices is [] and we assert same indices."""
+    if "truth_ratio" not in METRICS_REGISTRY:
+        return
+    metric = METRICS_REGISTRY["truth_ratio"]
+    correct_vbi = {"9": {"prob": 0.5, "avg_loss": -np.log(0.5)}}
+    wrong_list_first_empty = [
+        {"agg_value": None, "value_by_index": {}},  # empty -> wrong_indices = []
+        {"agg_value": 0.2, "value_by_index": {"9": {"prob": 0.2, "avg_loss": -np.log(0.2)}}},
+    ]
+    import pytest
+    with pytest.raises(AssertionError) as exc_info:
+        metric._metric_fn(
+            model=None,
+            pre_compute={"correct": {"value_by_index": correct_vbi}, "wrong": wrong_list_first_empty},
+            aggregator="closer_to_1_better",
+        )
+    assert "correct and wrong pre_compute must have same indices" in str(exc_info.value)
+    assert "correct=['9']" in str(exc_info.value) or "correct=[\"9\"]" in str(exc_info.value)
+    assert "wrong=[]" in str(exc_info.value)
+
+
 def test_truth_ratio_single_wrong_dict_unchanged():
     if "truth_ratio" not in METRICS_REGISTRY:
         return
