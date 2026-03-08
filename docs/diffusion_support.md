@@ -2,7 +2,7 @@
 
 This document describes how to use diffusion language models (dLLMs) with open-unlearning's evaluation framework.
 
-**Note:** The diffusion adapter code lives in the main `dllm` repo (`dllm/integrations/open_unlearning_adapter.py`) to keep this submodule clean. The adapter is automatically imported when available.
+**Note:** The diffusion adapter code lives in the main `dllm` repo (`dllm/integrations/open_unlearning_adapter.py`) to keep this submodule clean. The adapter is automatically imported when available. When invoking eval or unlearn via the dllm CLI, `model` is always a full HuggingFace path (`org/repo`) or `gs://` path; dllm does not use shortcuts.
 
 ## Overview
 
