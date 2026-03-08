@@ -790,14 +790,45 @@ def _compute_pre_compute_metrics_at_step(
             try:
                 R = sample_traj["R"]
                 F = sample_traj["F"]
+                L_gen = R.shape[1] if R.dim() >= 2 else 0
+                # When generated length is 0, provider returns no scores; skip call and set None explicitly.
+                if L_gen == 0:
+                    lab = batch_template.get(labels_field if labels_field else "labels")
+                    if isinstance(lab, list):
+                        pre_compute_results[access_key] = [
+                            {"agg_value": None, "value_by_index": {idx_key: {"prob": None, "avg_loss": None}}}
+                            for _ in lab
+                        ]
+                    elif lab is not None:
+                        pre_compute_results[access_key] = {
+                            "agg_value": None,
+                            "value_by_index": {idx_key: {"prob": None, "avg_loss": None}},
+                        }
+                    else:
+                        pre_compute_results[access_key] = {
+                            "agg_value": None,
+                            "value_by_index": {idx_key: {"prob": None, "avg_loss": None}},
+                        }
+                    continue
                 logit_alignment = trajectory_config.get("logit_alignment", "causal")
                 provider = FixationStepWiseScoreProvider(logit_alignment=logit_alignment)
                 lab = batch_template.get(labels_field if labels_field else "labels")
 
                 if isinstance(lab, list):
                     wrong_results = []
-                    for lab_t in lab:
+                    for opt_i, lab_t in enumerate(lab):
                         lab_flat = lab_t.squeeze(0) if lab_t.dim() > 1 else lab_t
+                        num_non_ignore = (lab_flat != IGNORE_INDEX).sum().item()
+                        # #region agent log
+                        try:
+                            import json
+                            import time
+                            _payload = {"sessionId": "0656be", "location": "trajectory_metrics.py:generalized:wrong_before_provider", "message": "wrong option before get_per_position_scores", "data": {"sample_idx": sample_idx, "step": step, "access_key": access_key, "option_idx": opt_i, "L_from_R": L_gen, "lab_flat_shape": list(lab_flat.shape), "num_non_ignore": num_non_ignore}, "timestamp": int(time.time() * 1000), "hypothesisId": "H5"}
+                            with open("/workspaces/dllm/.cursor/debug-0656be.log", "a") as _f:
+                                _f.write(json.dumps(_payload) + "\n")
+                        except Exception:
+                            pass
+                        # #endregion
                         batch_prov = {"labels": lab_flat.unsqueeze(0)}
                         model_or_logits = {
                             "R": R.unsqueeze(0),
@@ -817,6 +848,16 @@ def _compute_pre_compute_metrics_at_step(
                                 },
                             })
                         else:
+                            # #region agent log
+                            try:
+                                import json
+                                import time
+                                _payload = {"sessionId": "0656be", "location": "trajectory_metrics.py:generalized:wrong_option_no_scores", "message": "wrong option no scores", "data": {"sample_idx": sample_idx, "step": step, "access_key": access_key, "option_idx": len(wrong_results)}, "timestamp": int(time.time() * 1000), "hypothesisId": "H5"}
+                                with open("/workspaces/dllm/.cursor/debug-0656be.log", "a") as _f:
+                                    _f.write(json.dumps(_payload) + "\n")
+                            except Exception:
+                                pass
+                            # #endregion
                             wrong_results.append({
                                 "agg_value": None,
                                 "value_by_index": {idx_key: {"prob": None, "avg_loss": None}},
@@ -824,6 +865,17 @@ def _compute_pre_compute_metrics_at_step(
                     pre_compute_results[access_key] = wrong_results
                 elif lab is not None:
                     lab = lab.squeeze(0) if lab.dim() > 1 else lab
+                    num_non_ignore = (lab != IGNORE_INDEX).sum().item()
+                    # #region agent log
+                    try:
+                        import json
+                        import time
+                        _payload = {"sessionId": "0656be", "location": "trajectory_metrics.py:generalized:correct_before_provider", "message": "correct before get_per_position_scores", "data": {"sample_idx": sample_idx, "step": step, "labels_field": labels_field, "access_key": access_key, "L_from_R": L_gen, "lab_shape": list(lab.shape), "num_non_ignore": num_non_ignore}, "timestamp": int(time.time() * 1000), "hypothesisId": "H5"}
+                        with open("/workspaces/dllm/.cursor/debug-0656be.log", "a") as _f:
+                            _f.write(json.dumps(_payload) + "\n")
+                    except Exception:
+                        pass
+                    # #endregion
                     batch_prov = {"labels": lab.unsqueeze(0)}
                     model_or_logits = {
                         "R": R.unsqueeze(0),
@@ -843,6 +895,16 @@ def _compute_pre_compute_metrics_at_step(
                             },
                         }
                     else:
+                        # #region agent log
+                        try:
+                            import json
+                            import time
+                            _payload = {"sessionId": "0656be", "location": "trajectory_metrics.py:generalized:no_scores", "message": "fixation provider no scores", "data": {"sample_idx": sample_idx, "step": step, "labels_field": labels_field, "access_key": access_key}, "timestamp": int(time.time() * 1000), "hypothesisId": "H5"}
+                            with open("/workspaces/dllm/.cursor/debug-0656be.log", "a") as _f:
+                                _f.write(json.dumps(_payload) + "\n")
+                        except Exception:
+                            pass
+                        # #endregion
                         logger.info(
                             "pre_compute probability (generalized): no scores from fixation "
                             "provider — empty scores or L_use=0 (sample_idx=%s, step=%s, labels_field=%s)",
@@ -975,12 +1037,18 @@ def _compute_pre_compute_metrics_at_step(
                     value_by_index = pre_result["value_by_index"]
                     if idx_key in value_by_index:
                         val = value_by_index[idx_key]
+                        pre_result["value_by_index"] = {idx_key: val}
                     elif len(value_by_index) > 0:
                         first_idx = list(value_by_index.keys())[0]
                         val = value_by_index[first_idx].copy() if isinstance(value_by_index[first_idx], dict) else {"prob": pre_result.get("agg_value"), "avg_loss": None}
+                        pre_result["value_by_index"] = {idx_key: val}
                     else:
-                        val = {"prob": pre_result.get("agg_value"), "avg_loss": None}
-                    pre_result["value_by_index"] = {idx_key: val}
+                        # Empty value_by_index: do not add a placeholder for forget_truth_ratio → ks_test.
+                        # ks_test expects entries to have "score"; a placeholder with only "prob"/"avg_loss" causes KeyError.
+                        if not (access_key == "forget" and handler_name == "truth_ratio"):
+                            val = {"prob": pre_result.get("agg_value"), "avg_loss": None}
+                            pre_result["value_by_index"] = {idx_key: val}
+                        # else: leave value_by_index as {} so ks_test gets [] and returns pvalue=None without KeyError
                 elif "agg_value" in pre_result:
                     # Create value_by_index with single entry
                     value_by_index = {idx_key: {"prob": pre_result["agg_value"]}}

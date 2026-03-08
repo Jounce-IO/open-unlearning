@@ -37,23 +37,41 @@ def log_retain_logs_path_none_if_needed(
 def ks_test(model, **kwargs):
     """Compare two forget and retain model distributions with a 2-sample KS-test and report the p-value.
     Used in the TOFU benchmark as forget_quality when computed over the truth_ratio statistic."""
+    # Forget side: does not require retain; invalid input is a bug → fail (same as upstream).
+    forget_vbi = kwargs["pre_compute"]["forget"].get("value_by_index") or {}
     forget_tr_stats = np.array(
         [
             evals["score"]
-            for evals in kwargs["pre_compute"]["forget"]["value_by_index"].values()
-        ]
+            for evals in forget_vbi.values()
+            if isinstance(evals, dict) and evals.get("score") is not None
+        ],
+        dtype=np.float64,
     )
+    if len(forget_tr_stats) == 0:
+        raise ValueError(
+            "ks_test: forget pre_compute has no valid value_by_index entries with 'score'. "
+            "truth_ratio (or forget trajectory) must produce valid scores."
+        )
     reference_logs = kwargs.get("reference_logs", None)
     if reference_logs:
         reference_logs = reference_logs["retain_model_logs"]
+        retain_vbi = (reference_logs.get("retain") or {}).get("value_by_index") or {}
         retain_tr_stats = np.array(
             [
                 evals["score"]
-                for evals in reference_logs["retain"]["value_by_index"].values()
-            ]
+                for evals in retain_vbi.values()
+                if isinstance(evals, dict) and evals.get("score") is not None
+            ],
+            dtype=np.float64,
         )
-        fq = ks_2samp(forget_tr_stats, retain_tr_stats)
-        pvalue = fq.pvalue
+        if len(retain_tr_stats) > 0:
+            fq = ks_2samp(forget_tr_stats, retain_tr_stats)
+            pvalue = fq.pvalue
+        else:
+            logger.warning(
+                "retain_model_logs retain has no valid scores; setting forget_quality to None"
+            )
+            pvalue = None
     else:
         logger.warning(
             "retain_model_logs not provided in reference_logs, setting forget_quality to None"

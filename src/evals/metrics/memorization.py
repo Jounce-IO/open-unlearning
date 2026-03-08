@@ -226,16 +226,10 @@ def truth_ratio(model, **kwargs):
             if n_wrong_options > 0 and "value_by_index" in wrong_input[0]
             else []
         )
-        # Use intersection so we don't crash when trajectory vs batchwise keys differ (e.g. one empty).
-        common_indices = [idx for idx in correct_indices if idx in set(wrong_indices)]
-        if common_indices != correct_indices or common_indices != wrong_indices:
-            logger.warning(
-                "truth_ratio: correct/wrong index sets differ (correct=%s, wrong=%s); using intersection %s",
-                correct_indices,
-                wrong_indices,
-                common_indices,
-            )
-        correct_indices = common_indices
+        assert correct_indices == wrong_indices, (
+            f"truth_ratio: correct and wrong pre_compute must have same indices; "
+            f"correct={correct_indices!r}, wrong={wrong_indices!r}"
+        )
         filtered_indices = [
             idx
             for idx in correct_indices
@@ -262,15 +256,10 @@ def truth_ratio(model, **kwargs):
         wrong_answer_results = {str(k): v for k, v in wrong_answer_results.items()}
         wrong_input["value_by_index"] = wrong_answer_results
         wrong_indices = list(wrong_answer_results.keys())
-        common_indices = [idx for idx in correct_indices if idx in set(wrong_indices)]
-        if common_indices != correct_indices or common_indices != wrong_indices:
-            logger.warning(
-                "truth_ratio: correct/wrong index sets differ (correct=%s, wrong=%s); using intersection %s",
-                correct_indices,
-                wrong_indices,
-                common_indices,
-            )
-        correct_indices = common_indices
+        assert correct_indices == wrong_indices, (
+            f"truth_ratio: correct and wrong pre_compute must have same indices; "
+            f"correct={correct_indices!r}, wrong={wrong_indices!r}"
+        )
         filtered_indices = [
             idx
             for idx in correct_indices
@@ -290,10 +279,11 @@ def truth_ratio(model, **kwargs):
             n_total,
         )
     if not filtered_indices:
-        logger.warning(
-            "truth_ratio: no valid pre_compute (correct/wrong avg_loss) for any index; returning None"
+        # Align with upstream: truth_ratio does not require retain; invalid pre_compute is a bug → fail.
+        raise ValueError(
+            "truth_ratio: no valid pre_compute (correct/wrong avg_loss) for any index. "
+            "Pre-compute must provide valid probability/avg_loss per sample."
         )
-        return {"agg_value": None, "value_by_index": {}}
 
     correct_avg_losses = [
         correct_answer_results[idx]["avg_loss"] for idx in filtered_indices

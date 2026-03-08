@@ -472,41 +472,77 @@ def test_real_source_with_bad_input_does_not_raise_after_fix():
     assert "score" in result["value_by_index"]["0"]
 
 
-# ---- Reproduce KeyError: 'score' in ks_test ----
-def test_reproduce_ks_test_keyerror_when_forget_value_by_index_missing_score():
-    """ks_test does: evals['score'] for evals in forget['value_by_index'].values(); if entry has no 'score', KeyError."""
+# ---- Reproduce KeyError: 'score' in ks_test (real error) and assert fix ----
+
+
+def _ks_test_buggy_extraction(forget_vbi):
+    """Exact buggy logic that raised in pod: evals['score'] without .get."""
+    return np.array(
+        [evals["score"] for evals in forget_vbi.values() if isinstance(evals, dict)],
+        dtype=np.float64,
+    )
+
+
+def test_ks_test_keyerror_reproduced_with_buggy_extraction():
+    """
+    Reproduce the REAL error: the exact line that raised in K8s (evals["score"])
+    when value_by_index contains an entry without 'score' (e.g. truth_ratio return dict).
+    """
+    forget_vbi = {"0": {"agg_value": None, "value_by_index": {}}}
+    with pytest.raises(KeyError, match="score"):
+        _ks_test_buggy_extraction(forget_vbi)
+
+
+def test_ks_test_real_error_reproduction_exact_line():
+    """
+    Reproduce the REAL error: the exact line in ks_test that raised in K8s.
+    forget['value_by_index'] had entries with only 'prob'/'avg_loss' (no 'score')
+    from trajectory structuring when truth_ratio returned empty value_by_index.
+    """
+    pre_compute_forget = {
+        "agg_value": None,
+        "value_by_index": {"0": {"prob": None, "avg_loss": None}},
+    }
+    # Exact line from ks_test (before fix): evals["score"] for evals in ...
+    evals_list = list(pre_compute_forget["value_by_index"].values())
+    with pytest.raises(KeyError, match="score"):
+        _ = [evals["score"] for evals in evals_list]
+
+
+def test_ks_test_raises_when_forget_has_no_valid_scores():
+    """
+    ks_test does not require retain for the forget side; invalid forget pre_compute is a bug → fail.
+    When forget value_by_index has no valid 'score', ks_test raises ValueError (same as upstream).
+    """
     from evals.metrics import METRICS_REGISTRY
 
     ks_test_metric = METRICS_REGISTRY["ks_test"]
     pre_compute = {
-        "forget": {"value_by_index": {"0": {"prob": 0.8}, "1": {"prob": 0.9}}},
+        "forget": {"agg_value": None, "value_by_index": {"0": {"prob": None, "avg_loss": None}}},
     }
-    with pytest.raises(KeyError, match="score"):
+    with pytest.raises(ValueError, match="no valid.*value_by_index.*score"):
         ks_test_metric._metric_fn(model=None, pre_compute=pre_compute)
 
 
-def test_reproduce_ks_test_keyerror_single_entry_no_score():
-    """Forget has one entry with only 'prob', no 'score'."""
+def test_ks_test_raises_when_forget_empty_or_no_valid_scores():
+    """
+    ks_test fails when forget pre_compute has no valid scores (same as upstream).
+    Empty value_by_index or entries without valid 'score' → ValueError.
+    """
     from evals.metrics import METRICS_REGISTRY
 
     ks_test_metric = METRICS_REGISTRY["ks_test"]
-    pre_compute = {
-        "forget": {"value_by_index": {"0": {"prob": 0.8, "avg_loss": 0.22}}},
+    # Case 1: forget value_by_index empty
+    pre_compute_empty = {"forget": {"agg_value": None, "value_by_index": {}}}
+    with pytest.raises(ValueError, match="no valid"):
+        ks_test_metric._metric_fn(model=None, pre_compute=pre_compute_empty)
+
+    # Case 2: entries with only "prob" (no "score") → no valid scores after filter
+    pre_compute_placeholder = {
+        "forget": {"agg_value": None, "value_by_index": {"0": {"prob": None}}},
     }
-    with pytest.raises(KeyError, match="score"):
-        ks_test_metric._metric_fn(model=None, pre_compute=pre_compute)
-
-
-def test_reproduce_ks_test_keyerror_empty_value_by_index():
-    """Forget has value_by_index with empty dict values (no keys)."""
-    from evals.metrics import METRICS_REGISTRY
-
-    ks_test_metric = METRICS_REGISTRY["ks_test"]
-    pre_compute = {
-        "forget": {"value_by_index": {"0": {}}},
-    }
-    with pytest.raises(KeyError, match="score"):
-        ks_test_metric._metric_fn(model=None, pre_compute=pre_compute)
+    with pytest.raises(ValueError, match="no valid"):
+        ks_test_metric._metric_fn(model=None, pre_compute=pre_compute_placeholder)
 
 
 # ---- Buggy truth_ratio passes when keys match (sanity: bug is only on mismatch) ----
@@ -675,7 +711,10 @@ def test_reproduce_assert_large_data_indices():
 
 
 def test_reproduce_ks_test_keyerror_second_entry_missing_score():
-    """One entry has score, second does not -> iteration hits KeyError."""
+    """
+    REAL ks_test with pre_compute that caused KeyError in pod: one entry has 'score',
+    second has only 'prob'. With fix, we use .get('score') and skip missing; no KeyError.
+    """
     from evals.metrics import METRICS_REGISTRY
 
     ks_test_metric = METRICS_REGISTRY["ks_test"]
@@ -687,7 +726,28 @@ def test_reproduce_ks_test_keyerror_second_entry_missing_score():
             }
         },
     }
-    with pytest.raises(KeyError, match="score"):
+    result = ks_test_metric._metric_fn(model=None, pre_compute=pre_compute)
+    assert result is not None and "agg_value" in result
+    # No reference_logs so pvalue is None; we used only entry "0" (has score)
+    assert result["agg_value"] is None
+
+
+def test_reproduce_ks_test_exact_pod_structure_raises():
+    """
+    ks_test with structure that pod had: value_by_index entry has no 'score'.
+    We fail (ValueError) when forget has no valid scores, same as upstream.
+    """
+    from evals.metrics import METRICS_REGISTRY
+
+    ks_test_metric = METRICS_REGISTRY["ks_test"]
+    pre_compute = {
+        "forget": {
+            "value_by_index": {
+                "0": {"agg_value": None, "value_by_index": {}},
+            }
+        },
+    }
+    with pytest.raises(ValueError, match="no valid"):
         ks_test_metric._metric_fn(model=None, pre_compute=pre_compute)
 
 

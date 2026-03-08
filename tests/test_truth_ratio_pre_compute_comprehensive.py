@@ -50,21 +50,19 @@ def test_truth_ratio_original_style_single_wrong_dict_same_indices():
     assert "value_by_index" in result
 
 
-def test_truth_ratio_uses_intersection_when_correct_and_wrong_indices_differ():
-    """When correct and wrong have different index sets, truth_ratio uses intersection and does not raise."""
+def test_truth_ratio_asserts_when_correct_and_wrong_indices_differ():
+    """When correct and wrong have different index sets, truth_ratio asserts (same as upstream)."""
     if "truth_ratio" not in METRICS_REGISTRY:
         pytest.skip("truth_ratio not registered")
     metric = METRICS_REGISTRY["truth_ratio"]
     correct_vbi = {"0": {"prob": 0.5, "avg_loss": -np.log(0.5)}, "1": {"prob": 0.4, "avg_loss": -np.log(0.4)}}
     wrong_list = [{"value_by_index": {"0": {"prob": 0.25, "avg_loss": -np.log(0.25)}}, "agg_value": 0.25}]
-    result = metric._metric_fn(
-        model=None,
-        pre_compute={"correct": {"value_by_index": correct_vbi}, "wrong": wrong_list},
-        aggregator="closer_to_1_better",
-    )
-    assert result["agg_value"] is not None
-    assert list(result["value_by_index"].keys()) == ["0"]
-    assert "score" in result["value_by_index"]["0"]
+    with pytest.raises(AssertionError, match="same indices"):
+        metric._metric_fn(
+            model=None,
+            pre_compute={"correct": {"value_by_index": correct_vbi}, "wrong": wrong_list},
+            aggregator="closer_to_1_better",
+        )
 
 
 def test_truth_ratio_list_of_n_dicts_string_indices_ks_test_ready():
