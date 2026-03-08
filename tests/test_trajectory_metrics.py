@@ -2651,28 +2651,25 @@ class TestProbabilityFixationLogitsRegression:
         assert "prob" in result[0] and "avg_loss" in result[0]
         assert 0 <= result[0]["prob"] <= 1
 
-    def test_probability_fixation_logits_shape_mismatch_interval_8_no_crash(self):
-        """L_logits=20, L_labels=199, interval=8: _call_metric_at_step returns without shape error (causal alignment)."""
+    def test_probability_mismatched_logits_labels_length_raises(self):
+        """Invariant: probability metric requires logits.shape[1] == batch['labels'].shape[1]. Mismatch must raise."""
         if "probability" not in METRICS_REGISTRY:
             pytest.skip("probability not registered")
         prob_metric = METRICS_REGISTRY["probability"]
-        V, L_logits, L_labels = 100, 20, 199
-        logits = torch.randn(L_logits, V)  # [L, V] for _call_metric_at_step (transposed to [1,L,V] inside)
-        if logits.dim() == 2:
-            logits = logits.unsqueeze(0)
+        V, L_logits, L_labels = 50, 20, 199
+        logits = torch.randn(1, L_logits, V)
         batch_template = {
             "input_ids": torch.zeros((1, L_labels), dtype=torch.long),
             "labels": torch.randint(0, V, (1, L_labels)),
             "attention_mask": torch.ones((1, L_labels), dtype=torch.long),
         }
-        batch_template["labels"][0, :10] = IGNORE_INDEX
-        tokenizer = Mock()
-        try:
-            result = _call_metric_at_step(
+        batch_template["labels"][0, :5] = IGNORE_INDEX
+        with pytest.raises(ValueError) as exc_info:
+            _call_metric_at_step(
                 metric=prob_metric,
                 logits=logits,
                 batch_template=batch_template,
-                tokenizer=tokenizer,
+                tokenizer=Mock(),
                 sample_labels=batch_template["labels"][0],
                 sample_input_ids=batch_template["input_ids"][0],
                 sample_prompt_len=0,
@@ -2681,12 +2678,38 @@ class TestProbabilityFixationLogitsRegression:
                 trajectory_config={"trajectory_sample_interval": 8},
                 device=torch.device("cpu"),
             )
-        except Exception as e:
-            assert "Expected target size" not in str(e), (
-                "Regression: probability with fixation logits and interval=8 must use causal-aligned "
-                "label indices (notation.tex: logit ℓ−1 predicts token ℓ)."
-            )
-            raise
+        msg = str(exc_info.value).lower()
+        assert "same sequence length" in msg or "logits.shape" in msg or "labels.shape" in msg
+
+    def test_probability_fixation_logits_shape_mismatch_interval_8_no_crash(self):
+        """Matched lengths (L_logits = L_labels = 20): _call_metric_at_step returns valid result with interval=8."""
+        if "probability" not in METRICS_REGISTRY:
+            pytest.skip("probability not registered")
+        prob_metric = METRICS_REGISTRY["probability"]
+        V, L = 100, 20
+        logits = torch.randn(L, V)  # [L, V] for _call_metric_at_step (transposed to [1,L,V] inside)
+        if logits.dim() == 2:
+            logits = logits.unsqueeze(0)
+        batch_template = {
+            "input_ids": torch.zeros((1, L), dtype=torch.long),
+            "labels": torch.randint(0, V, (1, L)),
+            "attention_mask": torch.ones((1, L), dtype=torch.long),
+        }
+        batch_template["labels"][0, :10] = IGNORE_INDEX
+        tokenizer = Mock()
+        result = _call_metric_at_step(
+            metric=prob_metric,
+            logits=logits,
+            batch_template=batch_template,
+            tokenizer=tokenizer,
+            sample_labels=batch_template["labels"][0],
+            sample_input_ids=batch_template["input_ids"][0],
+            sample_prompt_len=0,
+            metric_config={},
+            sample_idx="0",
+            trajectory_config={"trajectory_sample_interval": 8},
+            device=torch.device("cpu"),
+        )
         assert result is not None
         if isinstance(result, list):
             assert len(result) >= 1

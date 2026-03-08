@@ -439,6 +439,14 @@ The key challenge is ensuring logits and labels have matching shapes:
    - And: `labels[..., 1:]` → `[1, L-1]`
    - CrossEntropyLoss expects: `[1, V, L-1]` and `[1, L-1]` ✓
 
+### Invariant: Single L from trajectory
+
+**Single source of truth:** The generated sequence length `L` comes from `trajectories_from_logits(...)` as `out["L"]`. The pipeline enforces:
+
+- `out["L"] == out["R"].shape[2]` (asserted in `trajectories_from_logits`)
+- Step logits and `batch_template["labels"]` both use this `L`, so `logits.shape[1] == batch["labels"].shape[1]` when computing probability
+- The probability metric **asserts** this equality and raises `ValueError` if violated; callers must never pass mismatched lengths
+
 ### Metric Computation Flow
 
 ```python
