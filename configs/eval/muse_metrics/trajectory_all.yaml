@@ -60,6 +60,8 @@ trajectory_config:
   use_generalized_sequence_probability: true
   # full = all positions 0..L (leakage); eos = positions 0..L_eff-1 only (real response). Default both.
   include_views: [full, eos]
+  # CPU worker pool for ROUGE (default 4). Set to 0 for synchronous (no pool).
+  metric_worker_pool_size: 4
   sampler_kwargs:
     steps: 32  # ceil(128/4)
     temperature: 0.0
