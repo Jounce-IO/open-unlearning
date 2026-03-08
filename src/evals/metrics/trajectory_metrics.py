@@ -220,9 +220,9 @@ def _slice_batch_template_to_length(
         if v is None:
             out[k] = v
             continue
-        if isinstance(v, list):
+                                if isinstance(v, list):
             out[k] = [
-                x[:, :length] if isinstance(x, torch.Tensor) and x.dim() >= 2 else x
+                x[:, :length].clone() if isinstance(x, torch.Tensor) and x.dim() >= 2 else x
                 for x in v
             ]
             continue
@@ -2406,17 +2406,10 @@ def trajectory_metrics(model, **kwargs):
                             else:
                                 logits = _get_logits_at_step(sample_traj, traj_name, step)  # [V, L]
 
-                            # Build eos batch_template (sliced to L_eff_b) for eos view
+                            # Build eos batch_template (sliced to L_eff_slice) for eos view.
+                            # Use helper so labels_correct/labels_wrong (list of tensors) are sliced too (probability invariant).
                             L_eff_slice = min(L_eff_b, batch_template["input_ids"].shape[1])
-                            batch_template_eos = {}
-                            for k, v in batch_template.items():
-                                if isinstance(v, torch.Tensor) and v.dim() >= 1 and v.shape[-1] >= L_eff_slice:
-                                    if v.dim() == 1:
-                                        batch_template_eos[k] = v[:L_eff_slice].unsqueeze(0)
-                                    else:
-                                        batch_template_eos[k] = v[:, :L_eff_slice].clone()
-                                else:
-                                    batch_template_eos[k] = v
+                            batch_template_eos = _slice_batch_template_to_length(batch_template, L_eff_slice)
 
                             # Compute each requested metric (skip rouge and probability; already batched above) for each view
                             for metric_name, metric_info in [(m, loaded_metrics[m]) for m in metrics_to_run]:
