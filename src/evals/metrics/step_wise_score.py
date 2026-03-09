@@ -12,12 +12,15 @@ or their geometric mean; they are agnostic to model type or alignment.
 
 from __future__ import annotations
 
+import logging
 from typing import Any, Optional, Protocol
 
 import numpy as np
 import torch
 
 from data.utils import IGNORE_INDEX
+
+logger = logging.getLogger("evaluator")
 
 
 class StepWiseScoreProvider(Protocol):
@@ -73,8 +76,13 @@ def evaluate_probability_via_provider(
         model, batch, ignore_index=ignore_index
     )
     out = []
-    for scores, _ in results:
+    for i, (scores, _) in enumerate(results):
         if not scores:
+            logger.info(
+                "pre_compute probability (via provider): empty scores for sample %s — "
+                "provider returned no per-position scores (no valid positions or L_use=0)",
+                i,
+            )
             out.append({"prob": None, "avg_loss": None})
             continue
         prob = sequence_probability_from_scores(scores)
@@ -216,12 +224,15 @@ class FixationStepWiseScoreProvider:
             fixation_logits = model_or_logits
         fixation_logits = fixation_logits.float()
         B, L, V = fixation_logits.shape
+        L_lab = lab.shape[1]
+        # Trajectory R/F can have one more position than labels (e.g. final step); cap to avoid index error.
+        L_use = min(L, L_lab)
         log_probs = torch.nn.functional.log_softmax(fixation_logits, dim=-1)
         results: list[tuple[list[float], Optional[list[int]]]] = []
         for b in range(B):
             probs_list: list[float] = []
             fixation_list: list[int] = []
-            for ell in range(L):
+            for ell in range(L_use):
                 if lab[b, ell].item() == ignore_index:
                     continue
                 if self.logit_alignment == "causal":
@@ -256,6 +267,10 @@ def extraction_strength_from_fixation(
     L, V = fixation_logits.shape
     if L == 0 or S <= 0:
         return 0.0
+    L_lab = labels.shape[0]
+    L_use = min(L, L_lab)
+    if L_use == 0:
+        return 0.0
     preds = torch.zeros(L, dtype=torch.long, device=fixation_logits.device)
     for ell in range(L):
         logit_idx = max(0, ell - 1) if logit_alignment == "causal" else ell
@@ -272,7 +287,7 @@ def extraction_strength_from_fixation(
     best_t = S
     for t in range(S):
         match = True
-        for ell in range(L):
+        for ell in range(L_use):
             if not valid_np[ell]:
                 continue
             if F_np[ell] >= t:

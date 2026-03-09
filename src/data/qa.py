@@ -1,7 +1,10 @@
+import logging
 import torch
 from torch.utils.data import Dataset
 
 from data.utils import load_hf_dataset, preprocess_chat_instance, add_dataset_index
+
+logger = logging.getLogger(__name__)
 
 
 class QADataset(Dataset):
@@ -135,13 +138,38 @@ class QAwithAlternateDataset(QADataset):
         return return_item if self.return_original else return_item["alternate"]
 
 
+def _ensure_single_answer(answer, key_label: str, index, dataset_idx: int):
+    """Normalize to a single string for tokenization. If list, use first element (no log)."""
+    if isinstance(answer, list):
+        if len(answer) == 0:
+            raise ValueError(
+                f"Empty list for {key_label} at dataset index {dataset_idx}; cannot compute dual-answer labels."
+            )
+        return answer[0]
+    return answer
+
+
+def _wrong_labels_for_sample(question, wrong_answer, process_sample_fn, index):
+    """Build labels for wrong answer(s). Returns list of N label tensors or single tensor [L]."""
+    if isinstance(wrong_answer, list):
+        if len(wrong_answer) == 0:
+            raise ValueError(
+                "Empty list for wrong_answer; cannot compute dual-answer labels."
+            )
+        return [process_sample_fn(question=question, answer=wrong_answer[k], index=index)["labels"] for k in range(len(wrong_answer))]
+    item = process_sample_fn(question=question, answer=wrong_answer, index=index)
+    return item["labels"]
+
+
 class QAwithDualAnswersDataset(QADataset):
     """Dataset yielding both labels_correct and labels_wrong for truth_ratio metrics.
 
     Uses two answer keys from the same HF split (e.g., paraphrased_answer and
-    perturbed_answer in forget10_perturbed). Yields batches with both label
-    variants for computing probability(correct) and probability(wrong) from
-    the same model output.
+    perturbed_answer in forget10_perturbed). When wrong_answer_key returns a list
+    of N options (e.g. TOFU perturbed_answer), yields N wrong label tensors per
+    sample so truth_ratio can average over all. When it returns a string, yields
+    a single labels_wrong per sample. See evaluation-notes.md "Dual-answer
+    datasets and list answers".
     """
 
     def __init__(
@@ -163,18 +191,21 @@ class QAwithDualAnswersDataset(QADataset):
         wrong_answer = self.data[idx][self.wrong_answer_key]
         index = self.data[idx]["index"]
 
+        correct_answer = _ensure_single_answer(
+            correct_answer, self.correct_answer_key, index, idx
+        )
         correct_item = self._process_sample(
             question=question, answer=correct_answer, index=index
         )
-        wrong_item = self._process_sample(
-            question=question, answer=wrong_answer, index=index
+        wrong_labels = _wrong_labels_for_sample(
+            question, wrong_answer, self._process_sample, index
         )
 
         return {
             "input_ids": correct_item["input_ids"],
             "labels": correct_item["labels"],
             "labels_correct": correct_item["labels"],
-            "labels_wrong": wrong_item["labels"],
+            "labels_wrong": wrong_labels,
             "attention_mask": correct_item["attention_mask"],
             "index": index,
         }

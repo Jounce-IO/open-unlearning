@@ -211,6 +211,24 @@ class TestFixationStepWiseScoreProvider:
         with pytest.raises(ValueError, match="logit_alignment"):
             FixationStepWiseScoreProvider(logit_alignment="invalid")
 
+    def test_fixation_logits_longer_than_labels_no_index_error(self):
+        """Regression: trajectory R/F can have one more position than labels; cap to min(L, lab.shape[1])."""
+        V, L_lab, L_fix, S = 4, 86, 87, 10
+        # R/F have L_fix positions (87); labels have L_lab (86)
+        R = torch.randn(1, V, L_fix, S)
+        F = torch.randint(0, S, (1, L_fix))
+        labels = torch.randint(0, V, (1, L_lab))
+        labels[0, 0] = IGNORE_INDEX
+        batch = {"labels": labels}
+        provider = FixationStepWiseScoreProvider(logit_alignment="causal")
+        results = provider.get_per_position_scores({"R": R, "F": F}, batch)
+        assert len(results) == 1
+        scores, fixation_steps = results[0]
+        # Should cap to L_lab positions; one position is ignore_index so L_lab - 1 scores
+        assert len(scores) == L_lab - 1
+        assert len(fixation_steps) == L_lab - 1
+        assert all(0 <= p <= 1 for p in scores)
+
 
 class TestExtractionStrengthFromFixation:
     """dLLM ES: smallest fraction of fixation steps to drop so remaining match target; result in [0,1]."""
@@ -248,3 +266,14 @@ class TestExtractionStrengthFromFixation:
             torch.zeros(0, 5), torch.tensor([]), torch.tensor([]), 0
         )
         assert es == 0.0
+
+    def test_fixation_logits_longer_than_labels_no_index_error(self):
+        """Regression: fixation logits can have more positions than labels; cap to min(L, labels.shape[0])."""
+        L_fix, L_lab, V, S = 12, 11, 4, 10
+        fixation_logits = torch.randn(L_fix, V)
+        labels = torch.randint(0, V, (L_lab,))
+        F = torch.randint(0, S, (L_fix,))
+        es = extraction_strength_from_fixation(
+            fixation_logits, labels, F, S, logit_alignment="causal"
+        )
+        assert 0 <= es <= 1

@@ -37,6 +37,7 @@ ref_value: 0.5
 datasets:
   TOFU_QA_forget:
     access_key: forget
+    handler: QADataset
     args:
       hf_args:
         name: ${eval.tofu_trajectory.forget_split}
@@ -47,6 +48,7 @@ datasets:
       max_length: 512
   TOFU_QA_holdout:
     access_key: holdout
+    handler: QADataset
     args:
       hf_args:
         name: ${eval.tofu_trajectory.holdout_split}

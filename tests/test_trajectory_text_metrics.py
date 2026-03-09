@@ -513,6 +513,7 @@ class TestBatchAcrossSteps:
                 trajectory_config={
                     "return_logits": True,
                     "return_fixation_steps": True,
+                    "metric_worker_pool_size": 0,
                     "sampler_kwargs": {
                         "steps": S,
                         "max_new_tokens": L_gen,
@@ -520,7 +521,9 @@ class TestBatchAcrossSteps:
                     },
                 },
             )
-            assert mock_rouge_batch.call_count >= 1
+            assert mock_rouge_batch.call_count >= 1, (
+                "eval_rouge_recall_batch must be called when ROUGE runs in main process (metric_worker_pool_size=0)"
+            )
             for call in mock_rouge_batch.call_args_list:
                 gen_texts, ground_truths = call[0][0], call[0][1]
                 assert len(gen_texts) == S

@@ -1206,6 +1206,33 @@ class TestTrajectoriesFromLogits:
         for key in ("steps", "fixation_start", "fixation_end", "fixation_ratio"):
             assert key not in out
 
+    def test_trajectories_from_logits_L_equals_R_second_dim(self):
+        """Invariant: out['L'] must equal out['R'].shape[2] for both generated-only and full-sequence branches."""
+        # Full-sequence branch: L_logits >= T_fixation
+        B, V, L_full, S = 2, 16, 20, 6
+        max_prompt_len = 4
+        logits_history = [torch.randn(B, L_full, V) for _ in range(S)]
+        fixation_steps = torch.randint(0, S, (B, L_full))
+        prompt_lens = [max_prompt_len, max_prompt_len]
+        out = trajectories_from_logits(
+            logits_history, fixation_steps, prompt_lens, return_trajectory_tensors=False
+        )
+        assert out["L"] == out["R"].shape[2], (
+            "trajectories_from_logits invariant: L must equal R.shape[2] (full-sequence); "
+            "got L=%s, R.shape=%s" % (out["L"], out["R"].shape)
+        )
+        # Generated-only branch: L_logits < T_fixation
+        L_gen, T_full = 10, 24
+        logits_history_gen = [torch.randn(B, L_gen, V) for _ in range(S)]
+        fixation_steps_gen = torch.randint(0, S, (B, T_full))
+        out_gen = trajectories_from_logits(
+            logits_history_gen, fixation_steps_gen, prompt_lens, return_trajectory_tensors=False
+        )
+        assert out_gen["L"] == out_gen["R"].shape[2], (
+            "trajectories_from_logits invariant: L must equal R.shape[2] (generated-only); "
+            "got L=%s, R.shape=%s" % (out_gen["L"], out_gen["R"].shape)
+        )
+
 
 class TestTrajectoriesFromLogitsGeneratedOnly:
     """Tests for trajectories_from_logits with generated-only logits (sampler contract).

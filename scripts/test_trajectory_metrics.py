@@ -6,7 +6,7 @@ This script can be run locally to test trajectory metrics without K8s.
 It uses a small subset of data and reduced steps for quick testing.
 
 Usage:
-    cd /workspaces/dllm/open-unlearning
+    cd <path-to-open-unlearning>
     python scripts/test_trajectory_metrics.py
 """
 

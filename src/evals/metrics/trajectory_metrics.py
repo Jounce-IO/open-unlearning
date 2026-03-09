@@ -8,8 +8,11 @@ Trajectory evals use interval mode only (trajectory_sample_interval, default 8).
 Every-step mode (no interval) is not used.
 """
 
+import copy
 import gc
 import logging
+import time
+from collections import defaultdict
 from concurrent.futures import ProcessPoolExecutor
 
 import numpy as np
@@ -63,6 +66,9 @@ from evals.guardrails import (
 )
 
 logger = logging.getLogger("evaluator")
+
+# One-time warnings for trajectory fallback to single retain reference (see docs/evaluation-notes.md)
+_trajectory_single_retain_warned: set = set()
 
 # IGNORE_INDEX from data.utils
 IGNORE_INDEX = -100
@@ -159,6 +165,79 @@ def _build_target_sequences_for_sampler(
             row = row + [ignore_index] * (L - len(row))
         target_sequences.append(row)
     return target_sequences
+
+
+def _slice_labels_by_content_start(
+    row: torch.Tensor, L: int, ignore_index: int = IGNORE_INDEX
+) -> torch.Tensor:
+    """Slice the first L tokens of the content (non-ignore region) from a labels row.
+
+    With left padding, each row's content starts at a different index. Using the
+    same start (e.g. from the correct item) for labels_wrong can make the slice
+    fall entirely in padding when the wrong item is shorter, causing truth_ratio
+    to get no valid positions. This uses this row's own content start.
+    """
+    if row.dim() > 1:
+        row = row.squeeze(0)
+    mask = row != ignore_index
+    if not mask.any():
+        return torch.full((L,), ignore_index, dtype=row.dtype, device=row.device)
+    content_start = mask.nonzero(as_tuple=True)[0][0].item()
+    end = min(content_start + L, row.shape[0])
+    gen_alt = row[content_start:end].clone()
+    if gen_alt.shape[0] < L:
+        padding = torch.full(
+            (L - gen_alt.shape[0],), ignore_index, dtype=gen_alt.dtype, device=gen_alt.device
+        )
+        gen_alt = torch.cat([gen_alt, padding])
+    return gen_alt
+
+
+def _batch_template_dual_labels(
+    batch: dict,
+    sample_idx: int,
+    key: str,
+    L: int,
+    ignore_index: int = IGNORE_INDEX,
+) -> Any:
+    """Build batch_template[key] for labels_correct or labels_wrong. Handles N wrong options (3D [B,N,L])."""
+    tensor = batch[key]
+    if key == "labels_wrong" and tensor.dim() == 3:
+        N = tensor.shape[1]
+        return [
+            _slice_labels_by_content_start(tensor[sample_idx][k], L, ignore_index).unsqueeze(0)
+            for k in range(N)
+        ]
+    return _slice_labels_by_content_start(tensor[sample_idx], L, ignore_index).unsqueeze(0)
+
+
+def _slice_batch_template_to_length(
+    batch_template: Dict[str, Any], length: int
+) -> Dict[str, Any]:
+    """Slice batch_template sequence dimensions to length (probability invariant: logits and labels same length)."""
+    out = {}
+    for k, v in batch_template.items():
+        if v is None:
+            out[k] = v
+            continue
+        if isinstance(v, list):
+            out[k] = [
+                x[:, :length].clone() if isinstance(x, torch.Tensor) and x.dim() >= 2 else x
+                for x in v
+            ]
+            continue
+        if isinstance(v, torch.Tensor) and v.dim() >= 1:
+            seq_dim = 1 if v.dim() >= 2 else 0
+            if v.shape[seq_dim] > length:
+                if v.dim() == 1:
+                    out[k] = v[:length].clone()
+                else:
+                    out[k] = v[:, :length].clone()
+            else:
+                out[k] = v
+        else:
+            out[k] = v
+    return out
 
 
 def should_run_gc(threshold: float = 0.9) -> bool:
@@ -424,6 +503,239 @@ def _get_metric_from_registry(metric_name: str):
     return metric
 
 
+def _extract_metric_scalar(result: Any) -> Optional[float]:
+    """Extract a single float from a metric result (list of dicts or dict with agg_value/score/prob)."""
+    if result is None:
+        return None
+    item = result[0] if isinstance(result, (list, tuple)) and len(result) > 0 else result
+    if not isinstance(item, dict):
+        return None
+    for key in ("agg_value", "score", "prob"):
+        if key in item and item[key] is not None:
+            v = item[key]
+            return float(v) if hasattr(v, "item") else float(v)
+    return None
+
+
+def _compute_retain_mu_by_step(
+    model: Any,
+    data_retain: Any,
+    collator: Any,
+    batch_size: int,
+    trajectory_config: Union[Dict, DictConfig],
+    tokenizer: Any,
+    loaded_metrics: Dict[str, Any],
+    sort_by_length: bool,
+    use_distributed_sampler: bool,
+    world_size: int,
+    rank: int,
+    **kwargs: Any,
+) -> Dict[str, Dict[str, Dict[str, float]]]:
+    """
+    Compute per-step retain-set aggregates (Prob, ROUGE, Truth Ratio) for trajectory MU.
+    Returns retain_agg_by_step[step_index] = {retain_Q_A_Prob: {agg_value: v}, ...}.
+    Used so hm_aggregate at each step uses current model's retain metrics, not reference_logs.
+    """
+    from evals.gpu_phase_logger import set_phase as gpu_set_phase
+
+    retain_agg_by_step = {}
+    run_steps_to_use = None
+    traj_name = "steps"
+    # Sub-metrics needed for MU; use from loaded_metrics or registry
+    mu_sub_metrics = ("probability", "rouge", "truth_ratio")
+    metric_objs = {}
+    for name in mu_sub_metrics:
+        if name in loaded_metrics:
+            metric_objs[name] = loaded_metrics[name]["metric"]
+            metric_objs[f"{name}_config"] = loaded_metrics[name].get("config") or {}
+        else:
+            try:
+                metric_objs[name] = _get_metric_from_registry(name)
+                metric_objs[f"{name}_config"] = {}
+            except ValueError:
+                metric_objs[name] = None
+                metric_objs[f"{name}_config"] = {}
+    if not all(metric_objs.get(m) for m in mu_sub_metrics):
+        logger.warning("trajectory_model_utility: missing probability/rouge/truth_ratio; retain MU will be None")
+        return retain_agg_by_step
+
+    if sort_by_length:
+        retain_dataloader = DataLoader(
+            data_retain,
+            batch_size=batch_size,
+            sampler=LengthSortedSampler(data_retain),
+            collate_fn=collator,
+        )
+    elif use_distributed_sampler:
+        retain_dataloader = DataLoader(
+            data_retain,
+            batch_size=batch_size,
+            sampler=DistributedSampler(data_retain, num_replicas=world_size, rank=rank, shuffle=False),
+            collate_fn=collator,
+        )
+    else:
+        retain_dataloader = DataLoader(
+            data_retain, batch_size=batch_size, collate_fn=collator
+        )
+
+    sampler = _get_sampler_from_model(model)
+    if sampler is None:
+        logger.warning("trajectory_model_utility: no sampler on model; retain MU will be None")
+        return retain_agg_by_step
+
+    _sampler_kw = _trajectory_sampler_kwargs(trajectory_config)
+    rouge_type = trajectory_config.get("rouge_type") or kwargs.get("rouge_type", "rougeL_recall")
+    rouge_scorer_instance = rouge_scorer.RougeScorer(["rouge1", "rougeL"], use_stemmer=True)
+    per_step_lists = defaultdict(lambda: {"prob": [], "rouge": [], "tr": []})
+
+    for batch_idx, batch in enumerate(retain_dataloader):
+        gpu_set_phase("retain_mu_batch", batch_idx=batch_idx)
+        input_ids = batch["input_ids"]
+        labels = batch.get("labels")
+        attention_mask = batch.get("attention_mask")
+        indices = batch.get("index", torch.arange(batch_idx * batch_size, (batch_idx + 1) * batch_size))
+        B = input_ids.shape[0]
+        prompts, prompt_lens = _build_prompts_for_sampler(input_ids, labels, tokenizer, IGNORE_INDEX)
+        evaluation_mode = _sampler_kw.get("evaluation_mode", "unguided")
+        sample_kw = dict(
+            inputs=prompts,
+            config=None,
+            return_dict=True,
+            return_logits=True,
+            **_sampler_kw,
+        )
+        if evaluation_mode in ("guided_native", "guided_skew") and labels is not None:
+            L_gen = _sampler_kw.get("max_new_tokens") or max(labels.shape[1] - prompt_lens[j] for j in range(B))
+            target_sequences = _build_target_sequences_for_sampler(labels, prompt_lens, int(L_gen), IGNORE_INDEX)
+            sample_kw["target_sequences"] = target_sequences
+            sample_kw["evaluation_mode"] = evaluation_mode
+        sampler_output = sampler.sample(**sample_kw)
+        logits_history = sampler_output.logits_history
+        fixation_steps = sampler_output.fixation_steps
+        if logits_history is None or len(logits_history) == 0:
+            continue
+        if fixation_steps is None:
+            continue
+        out = trajectories_from_logits(
+            logits_history, fixation_steps, prompt_lens, return_trajectory_tensors=False
+        )
+        R, F, S, L = out["R"], out["F"], out["S"], out["L"]
+        del logits_history
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache()
+        if run_steps_to_use is None:
+            run_steps_to_use, _ = _derive_steps_to_use(S, trajectory_config)
+        steps_to_use = [s for s in run_steps_to_use if s < S]
+        sequences = getattr(sampler_output, "sequences", None)
+        eos_token_id = getattr(tokenizer, "eos_token_id", None) or (trajectory_config.get("eos_token_id") if trajectory_config else None)
+        if sequences is not None and eos_token_id is not None:
+            effective_lengths = effective_lengths_from_eos(sequences, prompt_lens, L, eos_token_id)
+        else:
+            effective_lengths = [L] * B
+
+        for sample_idx in range(B):
+            sample_traj = {"R": R[sample_idx], "F": F[sample_idx], "S": S, "L": L}
+            L_eff_b = effective_lengths[sample_idx]
+            sample_labels = labels[sample_idx] if labels is not None else None
+            sample_prompt_len = prompt_lens[sample_idx]
+            generated_labels = None
+            if sample_labels is not None:
+                generated_labels = sample_labels[sample_prompt_len : sample_prompt_len + L]
+                if generated_labels.shape[0] < L:
+                    padding = torch.full(
+                        (L - generated_labels.shape[0],), IGNORE_INDEX,
+                        dtype=generated_labels.dtype, device=generated_labels.device,
+                    )
+                    generated_labels = torch.cat([generated_labels, padding])
+            generated_input_ids = input_ids[sample_idx][sample_prompt_len : sample_prompt_len + L]
+            if generated_input_ids.shape[0] < L:
+                padding = torch.zeros(L - generated_input_ids.shape[0], dtype=generated_input_ids.dtype, device=input_ids.device)
+                generated_input_ids = torch.cat([generated_input_ids, padding])
+            batch_template = {
+                "input_ids": generated_input_ids.unsqueeze(0),
+                "labels": generated_labels.unsqueeze(0) if generated_labels is not None else None,
+                "attention_mask": torch.ones((1, L), dtype=torch.long, device=input_ids.device),
+                "index": torch.tensor([0], dtype=torch.long, device=input_ids.device),
+            }
+            for key in ("labels_correct", "labels_wrong"):
+                if key in batch:
+                    batch_template[key] = _batch_template_dual_labels(
+                        batch, sample_idx, key, L, IGNORE_INDEX
+                    )
+            ground_truth_str = ""
+            if generated_labels is not None:
+                valid = generated_labels[generated_labels != IGNORE_INDEX]
+                ground_truth_str = tokenizer.decode(valid.tolist(), skip_special_tokens=True) if len(valid) > 0 else ""
+
+            kwargs_retain = {
+                "ground_truth": ground_truth_str,
+                "rouge_scorer": rouge_scorer_instance,
+                "trajectory_config": trajectory_config,
+                **{k: v for k, v in kwargs.items() if k not in ("tokenizer", "model", "data")},
+            }
+
+            for step_idx, step in enumerate(steps_to_use):
+                logits = _get_logits_at_step(sample_traj, traj_name, step)
+                if logits.dim() == 2:
+                    logits = logits.transpose(0, 1).unsqueeze(0)
+                L_eff_slice = min(L_eff_b, logits.shape[1])
+                logits_view = logits[:, :L_eff_slice] if L_eff_slice < logits.shape[1] else logits
+                # Probability invariant: step logits and batch labels must have same length.
+                # Slice batch_template to L_eff_slice so labels match logits_view.
+                batch_template_step = _slice_batch_template_to_length(batch_template, L_eff_slice)
+
+                for metric_name, key in (("probability", "prob"), ("rouge", "rouge"), ("truth_ratio", "tr")):
+                    m = metric_objs.get(metric_name)
+                    if m is None:
+                        continue
+                    cfg = metric_objs.get(f"{metric_name}_config") or {}
+                    try:
+                        res = _call_metric_at_step(
+                            metric=m,
+                            logits=logits_view,
+                            batch_template=batch_template_step,
+                            tokenizer=tokenizer,
+                            sample_labels=generated_labels.unsqueeze(0) if generated_labels is not None else None,
+                            sample_input_ids=input_ids[sample_idx].unsqueeze(0),
+                            sample_prompt_len=sample_prompt_len,
+                            metric_config=cfg,
+                            sample_idx="0",
+                            step=step,
+                            step_index=step_idx,
+                            **kwargs_retain,
+                        )
+                        val = _extract_metric_scalar(res)
+                        if val is not None:
+                            per_step_lists[step_idx][key].append(val)
+                    except Exception as e:
+                        logger.debug("retain MU %s at step %s: %s", metric_name, step, e)
+
+        del R, F, out
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache()
+
+    for step_idx in sorted(per_step_lists.keys()):
+        pl = per_step_lists[step_idx]
+        prob_vals = pl["prob"]
+        rouge_vals = pl["rouge"]
+        tr_vals = pl["tr"]
+        agg_prob = float(np.mean(prob_vals)) if prob_vals else None
+        agg_rouge = float(np.mean(rouge_vals)) if rouge_vals else None
+        agg_tr = float(np.mean(tr_vals)) if tr_vals else None
+        pre = {}
+        if agg_prob is not None:
+            pre["retain_Q_A_Prob"] = {"agg_value": agg_prob}
+        if agg_rouge is not None:
+            pre["retain_Q_A_ROUGE"] = {"agg_value": agg_rouge}
+        if agg_tr is not None:
+            pre["retain_Truth_Ratio"] = {"agg_value": agg_tr}
+        if pre:
+            retain_agg_by_step[str(step_idx)] = pre
+
+    logger.info("trajectory_model_utility: computed retain-set aggregates for %s steps (current model)", len(retain_agg_by_step))
+    return retain_agg_by_step
+
+
 def _compute_pre_compute_metrics_at_step(
     pre_compute_config: Dict[str, Any],
     logits: torch.Tensor,
@@ -462,7 +774,10 @@ def _compute_pre_compute_metrics_at_step(
     """
     trajectory_config = trajectory_config or kwargs.get("trajectory_config")
     sample_traj = sample_traj or kwargs.get("sample_traj")
+    step = kwargs.get("step")
     pre_compute_results = {}
+    # Normalize so truth_ratio always sees same key type (str) for correct vs wrong value_by_index.
+    idx_key = str(sample_idx)
 
     for pre_metric_name, pre_metric_cfg in pre_compute_config.items():
         # Get access key (defaults to metric name)
@@ -500,7 +815,7 @@ def _compute_pre_compute_metrics_at_step(
 
         use_generalized = (
             trajectory_config is not None
-            and trajectory_config.get("use_generalized_sequence_probability", False)
+            and trajectory_config.get("use_generalized_sequence_probability", True)
             and sample_traj is not None
             and handler_name == "probability"
         )
@@ -508,11 +823,62 @@ def _compute_pre_compute_metrics_at_step(
             try:
                 R = sample_traj["R"]
                 F = sample_traj["F"]
+                L_gen = R.shape[1] if R.dim() >= 2 else 0
+                # When generated length is 0, provider returns no scores; skip call and set None explicitly.
+                if L_gen == 0:
+                    lab = batch_template.get(labels_field if labels_field else "labels")
+                    if isinstance(lab, list):
+                        pre_compute_results[access_key] = [
+                            {"agg_value": None, "value_by_index": {idx_key: {"prob": None, "avg_loss": None}}}
+                            for _ in lab
+                        ]
+                    elif lab is not None:
+                        pre_compute_results[access_key] = {
+                            "agg_value": None,
+                            "value_by_index": {idx_key: {"prob": None, "avg_loss": None}},
+                        }
+                    else:
+                        pre_compute_results[access_key] = {
+                            "agg_value": None,
+                            "value_by_index": {idx_key: {"prob": None, "avg_loss": None}},
+                        }
+                    continue
                 logit_alignment = trajectory_config.get("logit_alignment", "causal")
                 provider = FixationStepWiseScoreProvider(logit_alignment=logit_alignment)
                 lab = batch_template.get(labels_field if labels_field else "labels")
-                if lab is not None:
+
+                if isinstance(lab, list):
+                    wrong_results = []
+                    for opt_i, lab_t in enumerate(lab):
+                        lab_flat = lab_t.squeeze(0) if lab_t.dim() > 1 else lab_t
+                        num_non_ignore = (lab_flat != IGNORE_INDEX).sum().item()
+                        batch_prov = {"labels": lab_flat.unsqueeze(0)}
+                        model_or_logits = {
+                            "R": R.unsqueeze(0),
+                            "F": F.unsqueeze(0),
+                            "report_step": step,
+                        }
+                        results = provider.get_per_position_scores(
+                            model_or_logits, batch_prov, ignore_index=IGNORE_INDEX
+                        )
+                        if results and results[0][0]:
+                            prob_val = sequence_probability_from_scores(results[0][0])
+                            avg_loss_val = float(-np.log(prob_val + 1e-12))
+                            wrong_results.append({
+                                "agg_value": prob_val,
+                                "value_by_index": {
+                                    idx_key: {"prob": prob_val, "avg_loss": avg_loss_val},
+                                },
+                            })
+                        else:
+                            wrong_results.append({
+                                "agg_value": None,
+                                "value_by_index": {idx_key: {"prob": None, "avg_loss": None}},
+                            })
+                    pre_compute_results[access_key] = wrong_results
+                elif lab is not None:
                     lab = lab.squeeze(0) if lab.dim() > 1 else lab
+                    num_non_ignore = (lab != IGNORE_INDEX).sum().item()
                     batch_prov = {"labels": lab.unsqueeze(0)}
                     model_or_logits = {
                         "R": R.unsqueeze(0),
@@ -528,28 +894,47 @@ def _compute_pre_compute_metrics_at_step(
                         pre_result = {
                             "agg_value": prob_val,
                             "value_by_index": {
-                                sample_idx: {"prob": prob_val, "avg_loss": avg_loss_val},
+                                idx_key: {"prob": prob_val, "avg_loss": avg_loss_val},
                             },
                         }
                     else:
+                        logger.info(
+                            "pre_compute probability (generalized): no scores from fixation "
+                            "provider — empty scores or L_use=0 (sample_idx=%s, step=%s, labels_field=%s)",
+                            sample_idx,
+                            step,
+                            labels_field,
+                        )
                         pre_result = {
                             "agg_value": None,
-                            "value_by_index": {sample_idx: {"prob": None, "avg_loss": None}},
+                            "value_by_index": {idx_key: {"prob": None, "avg_loss": None}},
                         }
+                    pre_compute_results[access_key] = pre_result
                 else:
+                    logger.info(
+                        "pre_compute probability (generalized): labels missing "
+                        "(labels_field=%s, sample_idx=%s, step=%s)",
+                        labels_field,
+                        sample_idx,
+                        step,
+                    )
                     pre_result = {
                         "agg_value": None,
-                        "value_by_index": {sample_idx: {"prob": None, "avg_loss": None}},
+                        "value_by_index": {idx_key: {"prob": None, "avg_loss": None}},
                     }
-                pre_compute_results[access_key] = pre_result
+                    pre_compute_results[access_key] = pre_result
             except Exception as e:
                 logger.warning(
-                    f"Error computing generalized pre-compute probability for {pre_metric_name}: {e}",
+                    "pre_compute probability (generalized): exception — %s (sample_idx=%s, step=%s, labels_field=%s)",
+                    e,
+                    sample_idx,
+                    step,
+                    labels_field,
                     exc_info=True,
                 )
                 pre_compute_results[access_key] = {
                     "agg_value": None,
-                    "value_by_index": {sample_idx: {"prob": None, "avg_loss": None}},
+                    "value_by_index": {idx_key: {"prob": None, "avg_loss": None}},
                 }
             continue
 
@@ -557,7 +942,45 @@ def _compute_pre_compute_metrics_at_step(
         # Note: Pre-compute metrics might have their own pre_compute requirements
         # We handle this recursively
         try:
-            # Substitute labels with labels_field if specified (for truth_ratio dual-answer)
+            labels_val = batch_template.get(labels_field) if labels_field else batch_template.get("labels")
+            if labels_field and labels_field in batch_template and isinstance(labels_val, list):
+                wrong_results = []
+                for lab_tensor in labels_val:
+                    pre_bt = {**batch_template, "labels": lab_tensor}
+                    kwargs_clean = {k: v for k, v in kwargs.items() if k not in ("tokenizer", "model_wrapper_override")}
+                    pre_result_k = _call_metric_at_step(
+                        metric=pre_metric,
+                        logits=logits,
+                        batch_template=pre_bt,
+                        tokenizer=tokenizer,
+                        sample_labels=sample_labels,
+                        sample_input_ids=sample_input_ids,
+                        sample_prompt_len=sample_prompt_len,
+                        metric_config=pre_metric_cfg,
+                        sample_idx=sample_idx,
+                        model_wrapper_override=model_wrapper_override,
+                        **kwargs_clean
+                    )
+                    # truth_ratio expects list of N dicts with value_by_index keyed by sample_idx (same as correct).
+                    if isinstance(pre_result_k, list) and len(pre_result_k) > 0 and isinstance(pre_result_k[0], dict):
+                        first = pre_result_k[0]
+                        pre_result_k = {
+                            "value_by_index": {idx_key: first},
+                            "agg_value": first.get("prob") if first.get("prob") is not None else first.get("avg_loss"),
+                        }
+                    else:
+                        vbi = pre_result_k.get("value_by_index", {}) if isinstance(pre_result_k, dict) else {}
+                        if vbi and idx_key not in vbi:
+                            first_key = next(iter(vbi))
+                            pre_result_k = dict(pre_result_k) if isinstance(pre_result_k, dict) else {}
+                            pre_result_k["value_by_index"] = {idx_key: vbi[first_key]}
+                        elif not vbi:
+                            # truth_ratio requires wrong to have same value_by_index keys as correct.
+                            pre_result_k = dict(pre_result_k) if isinstance(pre_result_k, dict) else {}
+                            pre_result_k["value_by_index"] = {idx_key: {"prob": None, "avg_loss": None}}
+                    wrong_results.append(pre_result_k)
+                pre_compute_results[access_key] = wrong_results
+                continue
             pre_batch_template = batch_template
             if labels_field and labels_field in batch_template:
                 pre_batch_template = {
@@ -580,24 +1003,52 @@ def _compute_pre_compute_metrics_at_step(
                 model_wrapper_override=model_wrapper_override,
                 **kwargs_clean
             )
-            
+
+            # When probability was called with 3D labels (e.g. [1,N,L]), it returns list of N lists;
+            # truth_ratio expects wrong = list of N dicts with value_by_index keyed by same index as correct.
+            if (
+                access_key == "wrong"
+                and isinstance(pre_result, list)
+                and len(pre_result) > 0
+                and isinstance(pre_result[0], list)
+            ):
+                wrong_results = []
+                for k in range(len(pre_result)):
+                    opt_list = pre_result[k]
+                    first = opt_list[0] if opt_list and isinstance(opt_list[0], dict) else {}
+                    wrong_results.append({
+                        "value_by_index": {
+                            idx_key: first if isinstance(first, dict) else {"prob": None, "avg_loss": None},
+                        },
+                        "agg_value": first.get("prob") if isinstance(first, dict) else first.get("avg_loss"),
+                    })
+                pre_compute_results[access_key] = wrong_results
+                continue
+
             # Structure result in the format expected by main metrics
             # Main metrics expect: {"agg_value": ..., "value_by_index": {idx: {...}}}
             if isinstance(pre_result, dict):
                 if "value_by_index" in pre_result:
-                    # Already in correct format, but ensure sample_idx is present
+                    # Normalize to single key idx_key so correct and wrong have same key type (trajectory single-sample).
+                    # Metric may return value_by_index keyed by data index (int); truth_ratio requires same indices as wrong (str).
                     value_by_index = pre_result["value_by_index"]
-                    if sample_idx not in value_by_index:
-                        # Extract value from result and add to value_by_index
-                        if "agg_value" in pre_result:
-                            value_by_index[sample_idx] = {"prob": pre_result["agg_value"]}
-                        elif len(value_by_index) > 0:
-                            # Use first value as template
-                            first_idx = list(value_by_index.keys())[0]
-                            value_by_index[sample_idx] = value_by_index[first_idx].copy()
+                    if idx_key in value_by_index:
+                        val = value_by_index[idx_key]
+                        pre_result["value_by_index"] = {idx_key: val}
+                    elif len(value_by_index) > 0:
+                        first_idx = list(value_by_index.keys())[0]
+                        val = value_by_index[first_idx].copy() if isinstance(value_by_index[first_idx], dict) else {"prob": pre_result.get("agg_value"), "avg_loss": None}
+                        pre_result["value_by_index"] = {idx_key: val}
+                    else:
+                        # Empty value_by_index: do not add a placeholder for forget_truth_ratio → ks_test.
+                        # ks_test expects entries to have "score"; a placeholder with only "prob"/"avg_loss" causes KeyError.
+                        if not (access_key == "forget" and handler_name == "truth_ratio"):
+                            val = {"prob": pre_result.get("agg_value"), "avg_loss": None}
+                            pre_result["value_by_index"] = {idx_key: val}
+                        # else: leave value_by_index as {} so ks_test gets [] and returns pvalue=None without KeyError
                 elif "agg_value" in pre_result:
                     # Create value_by_index with single entry
-                    value_by_index = {sample_idx: {"prob": pre_result["agg_value"]}}
+                    value_by_index = {idx_key: {"prob": pre_result["agg_value"]}}
                     pre_result["value_by_index"] = value_by_index
                 else:
                     # Try to extract value from result
@@ -613,7 +1064,7 @@ def _compute_pre_compute_metrics_at_step(
                                 value = float(val)
                                 break
                     if value is not None:
-                        value_by_index = {sample_idx: {"prob": value}}
+                        value_by_index = {idx_key: {"prob": value}}
                         pre_result = {
                             "agg_value": value,
                             "value_by_index": value_by_index,
@@ -624,7 +1075,7 @@ def _compute_pre_compute_metrics_at_step(
                         )
                         pre_result = {
                             "agg_value": None,
-                            "value_by_index": {sample_idx: {"prob": None}},
+                            "value_by_index": {idx_key: {"prob": None}},
                         }
             elif isinstance(pre_result, list) and len(pre_result) > 0:
                 # List format - extract first result (e.g., from evaluate_probability)
@@ -645,12 +1096,12 @@ def _compute_pre_compute_metrics_at_step(
                     # Preserve all fields from result_dict in value_by_index
                     pre_result = {
                         "agg_value": value,
-                        "value_by_index": {sample_idx: result_dict.copy()},
+                        "value_by_index": {idx_key: result_dict.copy()},
                     }
                 else:
                     pre_result = {
                         "agg_value": None,
-                        "value_by_index": {sample_idx: {"prob": None}},
+                        "value_by_index": {idx_key: {"prob": None}},
                     }
             else:
                 logger.warning(
@@ -658,11 +1109,11 @@ def _compute_pre_compute_metrics_at_step(
                 )
                 pre_result = {
                     "agg_value": None,
-                    "value_by_index": {sample_idx: {"prob": None}},
+                    "value_by_index": {idx_key: {"prob": None}},
                 }
             
             pre_compute_results[access_key] = pre_result
-            
+
         except Exception as e:
             logger.warning(
                 f"Error computing pre-compute metric {pre_metric_name} at step: {e}",
@@ -671,7 +1122,7 @@ def _compute_pre_compute_metrics_at_step(
             # Return None result so main metric can handle it
             pre_compute_results[access_key] = {
                 "agg_value": None,
-                "value_by_index": {sample_idx: {"prob": None}},
+                "value_by_index": {idx_key: {"prob": None}},
             }
     
     return pre_compute_results
@@ -897,18 +1348,36 @@ def _call_metric_at_step(
     # Add pre_compute results if available
     if pre_compute_results:
         metric_kwargs["pre_compute"] = pre_compute_results
-    # trajectory_model_utility: hm_aggregate needs retain sub-metrics from reference_logs (no per-step pre_compute)
+    # trajectory_model_utility: use current model's retain-set metrics at this step (from retain_agg_by_step), not reference_logs
     elif metric.name == "hm_aggregate":
+        retain_agg_by_step = kwargs.get("retain_agg_by_step") or {}
+        step_index = kwargs.get("step_index")
+        if step_index is not None and retain_agg_by_step:
+            pre_compute_step = retain_agg_by_step.get(str(step_index)) or retain_agg_by_step.get(step_index)
+            if pre_compute_step:
+                metric_kwargs["pre_compute"] = pre_compute_step
+
+    # Step-matched retain reference for privleak / ks_test when retain trajectory is loaded
+    if metric.name in ("privleak", "ks_test"):
         ref_logs = kwargs.get("reference_logs") or {}
         retain_logs = ref_logs.get("retain_model_logs") or {}
-        model_utility_keys = ("retain_Q_A_Prob", "retain_Q_A_ROUGE", "retain_Truth_Ratio")
-        pre_compute_from_ref = {}
-        for key in model_utility_keys:
-            if key in retain_logs and isinstance(retain_logs[key], dict) and retain_logs[key].get("agg_value") is not None:
-                pre_compute_from_ref[key] = retain_logs[key]
-        if pre_compute_from_ref:
-            metric_kwargs["pre_compute"] = pre_compute_from_ref
-    
+        step_index = kwargs.get("step_index")
+        if step_index is None:
+            step_index = kwargs.get("step")
+        if step_index is not None and retain_logs:
+            step_str = str(step_index)
+            step_retain = None
+            if metric.name == "privleak" and retain_logs.get("retain_mia_by_step") and step_str in retain_logs["retain_mia_by_step"]:
+                step_retain = retain_logs["retain_mia_by_step"][step_str]
+            elif metric.name == "ks_test" and retain_logs.get("retain_forget_tr_by_step") and step_str in retain_logs["retain_forget_tr_by_step"]:
+                step_retain = retain_logs["retain_forget_tr_by_step"][step_str]
+            if step_retain is not None:
+                ref_logs_step = copy.deepcopy(ref_logs)
+                if "retain_model_logs" not in ref_logs_step:
+                    ref_logs_step["retain_model_logs"] = {}
+                ref_logs_step["retain_model_logs"]["retain"] = step_retain
+                metric_kwargs["reference_logs"] = ref_logs_step
+
     # Call the metric's underlying function
     # Note: We call _metric_fn directly, not evaluate(), because:
     # 1. We're computing at a single step, not iterating over data
@@ -924,7 +1393,7 @@ def _call_metric_at_step(
     if (
         metric_name == "extraction_strength"
         and trajectory_config is not None
-        and trajectory_config.get("use_generalized_sequence_probability", False)
+        and trajectory_config.get("use_generalized_sequence_probability", True)
         and sample_traj is not None
     ):
         R = sample_traj["R"]
@@ -989,6 +1458,26 @@ def _call_metric_at_step(
         "exact_memorization": _exact_memorization_batch_fn,
         "extraction_strength": _extraction_strength_batch_fn,
     }
+    
+    # Probability: invariant — step logits and batch labels must have the same sequence length
+    # (single L from trajectories_from_logits). Callers must never pass mismatched lengths.
+    if metric_name == "probability" and "labels" in batch and batch["labels"] is not None:
+        labels_full = batch["labels"]
+        if isinstance(labels_full, torch.Tensor):
+            L_logits = logits.shape[1]
+            L_labels = labels_full.shape[1]
+            if L_logits != L_labels:
+                raise ValueError(
+                    "Probability metric requires step logits and batch labels to have the same "
+                    "sequence length (invariant: single L from trajectory). "
+                    "Got logits.shape[1]=%s, labels.shape[1]=%s. "
+                    "Fix the caller (trajectory construction or batch_template)."
+                    % (L_logits, L_labels)
+                )
+            result = _compute_prob_from_fixation_logits(
+                logits, labels_full, device, ignore_index=IGNORE_INDEX
+            )
+            return result
     
     # Try using batch function if available
     if metric_name in batch_function_map:
@@ -1247,31 +1736,29 @@ def trajectory_metrics(model, **kwargs):
                 logger.error(f"Failed to load metric '{metric_name}': {e}")
                 raise
 
-        # One-time warning if hm_aggregate (trajectory_model_utility) will have no pre_compute
-        if "hm_aggregate" in loaded_metrics:
-            ref_logs = kwargs.get("reference_logs") or {}
-            retain_logs = ref_logs.get("retain_model_logs") or {}
-            model_utility_keys = ("retain_Q_A_Prob", "retain_Q_A_ROUGE", "retain_Truth_Ratio")
-            have = [k for k in model_utility_keys if retain_logs.get(k) and isinstance(retain_logs.get(k), dict) and retain_logs[k].get("agg_value") is not None]
-            if len(have) < len(model_utility_keys):
-                logger.warning(
-                    "trajectory_model_utility (hm_aggregate) will be None: set eval.tofu_trajectory.retain_logs_path to a retain run JSON containing retain_Q_A_Prob, retain_Q_A_ROUGE, retain_Truth_Ratio. reference_logs keys: %s",
-                    list(retain_logs.keys()) if retain_logs else "(retain_logs_path not set or file missing)",
-                )
+        # One-time warning if hm_aggregate (trajectory_model_utility) will have no pre_compute (no retain dataset)
+        if "hm_aggregate" in loaded_metrics and isinstance(data, dict) and data.get("retain") is None:
+            logger.warning(
+                "trajectory_model_utility (hm_aggregate) will be None: add a retain dataset to the eval config (e.g. TOFU_QA_retain_eval with access_key: retain) so current model's retain-set metrics are computed per step."
+            )
 
-        # Handle multi-dataset only when there are keys beyond forget/holdout (e.g. MUSE: forget_knowmem, retain_knowmem, forget_verbmem, forget, holdout)
+        # Handle multi-dataset only when there are keys beyond forget/holdout/retain (e.g. MUSE: forget_knowmem, retain_knowmem).
+        # "retain" is used only for trajectory_model_utility (retain pass); we still run the main loop on forget/holdout.
         multi_dataset = (
             isinstance(data, dict)
-            and bool(set(data.keys()) - {"forget", "holdout"})
+            and bool(set(data.keys()) - {"forget", "holdout", "retain"})
         )
-        if isinstance(data, dict) and "forget" in data and "holdout" in data and not multi_dataset:
+        if isinstance(data, dict) and "forget" in data and "holdout" in data:
             primary_data = data["forget"]
             secondary_data = data["holdout"]
+        elif isinstance(data, dict) and "forget" in data and not multi_dataset:
+            primary_data = data["forget"]
+            secondary_data = data.get("holdout")
         else:
             primary_data = data if not multi_dataset else None
             secondary_data = None
 
-        single_dataset_keys = [k for k in data if k not in ("forget", "holdout")] if multi_dataset else []
+        single_dataset_keys = [k for k in data if k not in ("forget", "holdout", "retain")] if multi_dataset else []
 
         # Create dataloader(s). When distributed (world_size > 1), use DistributedSampler per rank.
         if not multi_dataset:
@@ -1322,6 +1809,70 @@ def trajectory_metrics(model, **kwargs):
                 )
         else:
             holdout_dataloader = None
+
+        # Compute retain-set metrics per step for trajectory_model_utility (hm_aggregate); then pass retain_agg_by_step into kwargs
+        retain_agg_by_step = {}
+        if (
+            "hm_aggregate" in loaded_metrics
+            and isinstance(data, dict)
+            and data.get("retain") is not None
+        ):
+            # Avoid passing keys already given as positional args (causes "multiple values" TypeError)
+            _retain_mu_kw = {
+                k: v
+                for k, v in kwargs.items()
+                if k
+                not in (
+                    "tokenizer",
+                    "model",
+                    "data",
+                    "collator",
+                    "batch_size",
+                    "trajectory_config",
+                    "loaded_metrics",
+                    "sort_by_length",
+                    "use_distributed_sampler",
+                    "world_size",
+                    "rank",
+                )
+            }
+            retain_agg_by_step = _compute_retain_mu_by_step(
+                model,
+                data["retain"],
+                collator,
+                batch_size,
+                trajectory_config,
+                tokenizer,
+                loaded_metrics,
+                sort_by_length,
+                use_distributed_sampler,
+                world_size,
+                rank,
+                **_retain_mu_kw,
+            )
+        kwargs["retain_agg_by_step"] = retain_agg_by_step
+
+        # Log once when trajectory PrivLeak or FQ (ks_test) will use single retain reference (no step-matched)
+        ref_logs = kwargs.get("reference_logs") or {}
+        retain_logs = ref_logs.get("retain_model_logs") or {}
+        if retain_logs:
+            if "privleak" in loaded_metrics and not retain_logs.get("retain_mia_by_step"):
+                if "privleak" not in _trajectory_single_retain_warned:
+                    _trajectory_single_retain_warned.add("privleak")
+                    logger.warning(
+                        "trajectory_privleak: step-matched retain (retain_mia_by_step) not in reference_logs; "
+                        "using single retain reference for all steps. For step-matched comparison, run eval on "
+                        "retain model with trajectory and save mia_min_k_by_step, then load as reference."
+                    )
+            if "ks_test" in loaded_metrics and not retain_logs.get("retain_forget_tr_by_step"):
+                if "ks_test" not in _trajectory_single_retain_warned:
+                    _trajectory_single_retain_warned.add("ks_test")
+                    logger.warning(
+                        "trajectory_forget_quality (ks_test): step-matched retain (forget_truth_ratio_by_step) "
+                        "not in reference_logs; using single retain reference for all steps. For step-matched "
+                        "comparison, run eval on retain model with trajectory and save forget_truth_ratio_by_step, "
+                        "then load as reference."
+                    )
 
         # Check if privleak needs dual trajectories (forget + holdout)
         privleak_has_dual_data = (secondary_data is not None and holdout_dataloader is not None) or (
@@ -1453,6 +2004,7 @@ def trajectory_metrics(model, **kwargs):
         # Process each batch
             for batch_idx, batch in enumerate(dataloader):
                 gpu_set_phase("trajectory_batch_start", batch_idx=batch_idx)
+                _batch_t0 = time.perf_counter()
                 input_ids = batch["input_ids"]
                 labels = batch.get("labels")
                 attention_mask = batch.get("attention_mask")
@@ -1554,7 +2106,7 @@ def trajectory_metrics(model, **kwargs):
                     }
                 if privleak_accumulators is not None and _key is None:
                     use_generalized_privleak = trajectory_config.get(
-                        "use_generalized_sequence_probability", False
+                        "use_generalized_sequence_probability", True
                     )
                     for step in steps_to_use:
                         if use_generalized_privleak:
@@ -1582,7 +2134,7 @@ def trajectory_metrics(model, **kwargs):
                     idx_str = str(indices[sample_idx].item() if torch.is_tensor(indices[sample_idx]) else indices[sample_idx])
                     sample_traj = {"R": R[sample_idx], "F": F[sample_idx], "S": S, "L": L}
                     use_generalized = (
-                        trajectory_config.get("use_generalized_sequence_probability", False)
+                        trajectory_config.get("use_generalized_sequence_probability", True)
                         if trajectory_config else False
                     )
 
@@ -1611,6 +2163,11 @@ def trajectory_metrics(model, **kwargs):
                             generated_labels = torch.cat([generated_labels, padding])
                     else:
                         generated_labels = None
+                    if generated_labels is not None:
+                        assert generated_labels.shape[0] == L, (
+                            "batch_template invariant: generated_labels length must equal L; "
+                            "got %s, L=%s" % (generated_labels.shape[0], L)
+                        )
             
                     # Create batch template for logit metrics
                     # Use generated token IDs so metrics that use input_ids (e.g. mia_min_k via tokenwise_logprobs)
@@ -1629,21 +2186,14 @@ def trajectory_metrics(model, **kwargs):
                         "attention_mask": torch.ones((1, L), dtype=torch.long, device=sample_input_ids.device),  # All positions valid
                         "index": torch.tensor([int(idx_str)], dtype=torch.long, device=sample_input_ids.device),  # Required by run_batchwise_evals
                     }
-                    # Add labels_correct/labels_wrong for truth_ratio pre_compute (dual-answer dataset)
+                    # Add labels_correct/labels_wrong for truth_ratio pre_compute (dual-answer dataset).
+                    # Use each row's content start; support N wrong options (batch[key] 3D [B,N,L]).
                     for key in ("labels_correct", "labels_wrong"):
                         if key in batch:
-                            sample_labels_alt = batch[key][sample_idx]
-                            gen_alt = sample_labels_alt[sample_prompt_len:sample_prompt_len + L]
-                            if gen_alt.shape[0] < L:
-                                padding = torch.full(
-                                    (L - gen_alt.shape[0],),
-                                    IGNORE_INDEX,
-                                    dtype=gen_alt.dtype,
-                                    device=gen_alt.device,
-                                )
-                                gen_alt = torch.cat([gen_alt, padding])
-                            batch_template[key] = gen_alt.unsqueeze(0)
-            
+                            batch_template[key] = _batch_template_dual_labels(
+                                batch, sample_idx, key, L, IGNORE_INDEX
+                            )
+
                     # Decode ground truth once per sample for ROUGE-only path (reuse across steps and trajectory types)
                     if generated_labels is not None:
                         valid_labels_gt = generated_labels[generated_labels != IGNORE_INDEX]
@@ -1766,7 +2316,7 @@ def trajectory_metrics(model, **kwargs):
 
                         if "probability" in metrics_to_run and generated_labels is not None:
                             use_generalized = trajectory_config.get(
-                                "use_generalized_sequence_probability", False
+                                "use_generalized_sequence_probability", True
                             )
                             logit_alignment = trajectory_config.get(
                                 "logit_alignment", "causal"
@@ -1805,47 +2355,45 @@ def trajectory_metrics(model, **kwargs):
                                     torch.cuda.synchronize()
                                     torch.cuda.empty_cache()
                             else:
-                                logits_list = [
-                                    _get_logits_at_step(sample_traj, traj_name, step)
-                                    for step in steps_to_use
-                                ]
-                                device = logits_list[0].device
-                                logits_stacked = torch.stack(
-                                    [l.t() for l in logits_list], dim=0
-                                )
-                                # Convert same-position logits to AR format so _compute_prob_from_fixation_logits (logits[t] predicts label[t+1]) receives the correct convention.
-                                logits_stacked = torch.cat(
-                                    [logits_stacked[:, :1, :], logits_stacked[:, :-1, :]], dim=1
-                                )
-                                labels_batch_full = generated_labels.unsqueeze(0).expand(
-                                    len(steps_to_use), -1
-                                ).to(device=device, dtype=torch.long)
-                                for view in include_views:
-                                    if view == "full":
-                                        prob_results = _compute_prob_from_fixation_logits(
-                                            logits_stacked, labels_batch_full, device, IGNORE_INDEX
-                                        )
-                                    else:
-                                        L_eff_slice = min(L_eff_b, logits_stacked.shape[1])
-                                        prob_results = _compute_prob_from_fixation_logits(
-                                            logits_stacked[:, :L_eff_slice, :],
-                                            labels_batch_full[:, :L_eff_slice],
-                                            device,
-                                            IGNORE_INDEX,
-                                        )
-                                    for i, step in enumerate(steps_to_use):
-                                        if i < len(prob_results) and "prob" in prob_results[i]:
-                                            step_values_by_view[view][traj_name][step]["probability"].append(
-                                                prob_results[i]["prob"]
+                                # Process probability per step to avoid OOM: stacking all steps
+                                # (num_steps x L x V) can exceed GPU memory (e.g. 25 x 200 x 126k).
+                                device = _get_logits_at_step(
+                                    sample_traj, traj_name, steps_to_use[0]
+                                ).device
+                                labels_full = generated_labels.to(device=device, dtype=torch.long)
+                                for i, step in enumerate(steps_to_use):
+                                    logits_step = _get_logits_at_step(
+                                        sample_traj, traj_name, step
+                                    ).t()  # [L, V]
+                                    # AR convention: logits[t] predicts label[t+1]
+                                    logits_step = torch.cat(
+                                        [logits_step[:1, :], logits_step[:-1, :]], dim=0
+                                    ).unsqueeze(0)  # [1, L, V]
+                                    for view in include_views:
+                                        if view == "full":
+                                            logits_v = logits_step
+                                            lab = labels_full.unsqueeze(0)
+                                        else:
+                                            L_eff_slice = min(
+                                                L_eff_b, logits_step.shape[1]
                                             )
-                                    if len(include_views) > 1 and torch.cuda.is_available():
-                                        del prob_results
+                                            logits_v = logits_step[
+                                                :, :L_eff_slice, :
+                                            ].contiguous()
+                                            lab = labels_full[
+                                                :L_eff_slice
+                                            ].unsqueeze(0)
+                                        prob_results = _compute_prob_from_fixation_logits(
+                                            logits_v, lab, device, IGNORE_INDEX
+                                        )
+                                        if prob_results and "prob" in prob_results[0]:
+                                            step_values_by_view[view][traj_name][step][
+                                                "probability"
+                                            ].append(prob_results[0]["prob"])
+                                    if torch.cuda.is_available():
+                                        del logits_step
                                         torch.cuda.synchronize()
                                         torch.cuda.empty_cache()
-                                if torch.cuda.is_available():
-                                    del logits_stacked, labels_batch_full
-                                    torch.cuda.synchronize()
-                                    torch.cuda.empty_cache()
 
                         for step in steps_to_use:
                             # Get logits at this step (on-demand from R, F)
@@ -1858,17 +2406,10 @@ def trajectory_metrics(model, **kwargs):
                             else:
                                 logits = _get_logits_at_step(sample_traj, traj_name, step)  # [V, L]
 
-                            # Build eos batch_template (sliced to L_eff_b) for eos view
+                            # Build eos batch_template (sliced to L_eff_slice) for eos view.
+                            # Use helper so labels_correct/labels_wrong (list of tensors) are sliced too (probability invariant).
                             L_eff_slice = min(L_eff_b, batch_template["input_ids"].shape[1])
-                            batch_template_eos = {}
-                            for k, v in batch_template.items():
-                                if isinstance(v, torch.Tensor) and v.dim() >= 1 and v.shape[-1] >= L_eff_slice:
-                                    if v.dim() == 1:
-                                        batch_template_eos[k] = v[:L_eff_slice].unsqueeze(0)
-                                    else:
-                                        batch_template_eos[k] = v[:, :L_eff_slice].clone()
-                                else:
-                                    batch_template_eos[k] = v
+                            batch_template_eos = _slice_batch_template_to_length(batch_template, L_eff_slice)
 
                             # Compute each requested metric (skip rouge and probability; already batched above) for each view
                             for metric_name, metric_info in [(m, loaded_metrics[m]) for m in metrics_to_run]:
@@ -1890,6 +2431,10 @@ def trajectory_metrics(model, **kwargs):
                                     kwargs_clean["rouge_scorer"] = rouge_scorer_instance
                                     kwargs_clean["sample_traj"] = sample_traj
                                     kwargs_clean["step"] = step
+                                    try:
+                                        kwargs_clean["step_index"] = steps_to_use.index(step) if step in steps_to_use else None
+                                    except (ValueError, NameError):
+                                        kwargs_clean["step_index"] = None
                                     if trajectory_config is not None:
                                         kwargs_clean["trajectory_config"] = trajectory_config
                                     if guardrail_config_with_pools is not None:
@@ -1983,6 +2528,13 @@ def trajectory_metrics(model, **kwargs):
                         torch.cuda.empty_cache()
 
                 gpu_set_phase("trajectory_batch_end", batch_idx=batch_idx)
+                _batch_duration = time.perf_counter() - _batch_t0
+                logger.info(
+                    "trajectory_batch_duration batch_idx=%s batch_size=%s duration_sec=%.2f",
+                    batch_idx,
+                    B,
+                    _batch_duration,
+                )
                 # Release batch-sized GPU data before next batch to avoid holding two batches in memory (OOM with many samples).
                 # R and F are references to out["R"] and out["F"]; deleting only 'out' leaves R, F alive (see reports/oom-investigation-why-still-oom.md).
                 # logits_history already deleted earlier in the loop after trajectories_from_logits.
@@ -2067,7 +2619,7 @@ def trajectory_metrics(model, **kwargs):
                     h_B = h_R.shape[0] if hasattr(h_R, "shape") else len(h_R)
                     h_steps_to_use = [s for s in run_steps_to_use if s < h_S]
                     use_generalized_privleak = trajectory_config.get(
-                        "use_generalized_sequence_probability", False
+                        "use_generalized_sequence_probability", True
                     )
                     for step in h_steps_to_use:
                         if use_generalized_privleak:
@@ -2098,10 +2650,20 @@ def trajectory_metrics(model, **kwargs):
                 for step in run_steps_to_use:
                     gpu_set_phase("privleak_dual_step", step=step)
                     pre_result = privleak_accumulators[step].aggregate()
+                    ref_logs = kwargs.get("reference_logs") or {}
+                    retain_logs = ref_logs.get("retain_model_logs") or {}
+                    step_index = run_steps_to_use.index(step) if step in run_steps_to_use else step
+                    step_str = str(step_index)
+                    if retain_logs.get("retain_mia_by_step") and step_str in retain_logs["retain_mia_by_step"]:
+                        ref_logs = copy.deepcopy(ref_logs)
+                        if "retain_model_logs" not in ref_logs:
+                            ref_logs["retain_model_logs"] = {}
+                        ref_logs["retain_model_logs"] = dict(retain_logs)
+                        ref_logs["retain_model_logs"]["retain"] = retain_logs["retain_mia_by_step"][step_str]
                     privleak_result = _get_metric_from_registry("privleak")._metric_fn(
                         model=None,
                         pre_compute=pre_result,
-                        reference_logs=kwargs.get("reference_logs"),
+                        reference_logs=ref_logs,
                         ref_value=privleak_cfg.get("ref_value", 0.5),
                         **{k: v for k, v in kwargs.items() if k not in ("model", "tokenizer", "pre_compute")},
                     )
@@ -2191,10 +2753,20 @@ def trajectory_metrics(model, **kwargs):
                         model_wrapper_override=dual_wrapper,
                         **kwargs_priv,
                     )
+                    ref_logs = kwargs.get("reference_logs") or {}
+                    retain_logs = ref_logs.get("retain_model_logs") or {}
+                    step_index = steps_to_use_dual.index(step) if step in steps_to_use_dual else step
+                    step_str = str(step_index)
+                    if retain_logs.get("retain_mia_by_step") and step_str in retain_logs["retain_mia_by_step"]:
+                        ref_logs = copy.deepcopy(ref_logs)
+                        if "retain_model_logs" not in ref_logs:
+                            ref_logs["retain_model_logs"] = {}
+                        ref_logs["retain_model_logs"] = dict(retain_logs)
+                        ref_logs["retain_model_logs"]["retain"] = retain_logs["retain_mia_by_step"][step_str]
                     privleak_result = _get_metric_from_registry("privleak")._metric_fn(
                         model=dual_wrapper,
                         pre_compute=pre_result,
-                        reference_logs=kwargs.get("reference_logs"),
+                        reference_logs=ref_logs,
                         ref_value=privleak_cfg.get("ref_value", 0.5),
                         **{k: v for k, v in kwargs.items() if k not in ("model", "tokenizer", "pre_compute")},
                     )
@@ -2405,6 +2977,36 @@ def trajectory_metrics(model, **kwargs):
                 "agg_value": None,
                 "trajectory_step_metadata": trajectory_step_metadata,
             }
+            # Retain trajectory: per-step refs for step-matched FQ/PrivLeak when loading later.
+            eval_cfg = kwargs.get("eval_cfg")
+            if eval_cfg is not None and getattr(eval_cfg, "get", lambda k, d=None: d)("retain_reference_mode", False):
+                first_view = include_views[0] if include_views else "full"
+                step_vals = step_values_by_view.get(first_view, {}).get("steps", {})
+                if "privleak" in loaded_metrics:
+                    arr = agg_value_by_view.get(first_view, {}).get("steps", {}).get("privleak", np.array([]))
+                    if hasattr(arr, "__len__") and len(arr) > 0:
+                        mia_by_step = {}
+                        for i in range(len(arr)):
+                            v = arr[i]
+                            mia_by_step[str(i)] = {"agg_value": float(v) if hasattr(v, "item") else v}
+                        out["mia_min_k_by_step"] = mia_by_step
+                if "truth_ratio" in loaded_metrics and step_vals:
+                    ordered_steps = (
+                        list(run_steps_to_use)
+                        if run_steps_to_use is not None
+                        else sorted(step_vals.keys(), key=lambda x: (x if isinstance(x, (int, float)) else 0))
+                    )
+                    tr_by_step = {}
+                    for step_idx, step in enumerate(ordered_steps):
+                        if step in step_vals and "truth_ratio" in step_vals[step]:
+                            vals = step_vals[step]["truth_ratio"]
+                            value_by_index = {
+                                str(i): {"score": float(v) if v is not None else None}
+                                for i, v in enumerate(vals)
+                            }
+                            tr_by_step[str(step_idx)] = {"value_by_index": value_by_index}
+                    if tr_by_step:
+                        out["forget_truth_ratio_by_step"] = tr_by_step
             if executor is not None:
                 executor.shutdown(wait=True)
             return out

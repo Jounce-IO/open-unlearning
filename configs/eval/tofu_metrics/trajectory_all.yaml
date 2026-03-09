@@ -15,7 +15,7 @@ reference_logs:
         access_key: retain
       forget_truth_ratio:
         access_key: retain
-      # For trajectory_model_utility (hm_aggregate): retain run must produce these keys
+      # For PrivLeak/FQ step-matched comparison (trajectory_model_utility uses current model retain pass, not reference_logs)
       retain_Q_A_Prob:
         access_key: retain_Q_A_Prob
       retain_Q_A_ROUGE:
@@ -91,11 +91,11 @@ trajectory_config:
   return_fixation_steps: true
   # full = all positions 0..L (leakage); eos = positions 0..L_eff-1 only (real response). Default both.
   include_views: [full, eos]
-  # Generalized metrics (dLLM-compatible): step-wise scores at fixation; causal = Dream/AR.
-  use_generalized_sequence_probability: false
+  # Generalized metrics (dLLM-compatible): step-wise scores at fixation; matches invariants. causal = Dream/AR.
+  use_generalized_sequence_probability: true
   logit_alignment: causal
-  # CPU worker pool for ROUGE (0 = synchronous). Set via override to enable (e.g. 4).
-  metric_worker_pool_size: 0
+  # CPU worker pool for ROUGE (default 4). Set to 0 for synchronous (no pool).
+  metric_worker_pool_size: 4
   sampler_kwargs:
     steps: 50  # ceil(200/4)
     temperature: 0.0
@@ -103,20 +103,24 @@ trajectory_config:
     # Tokens between trajectory captures; larger = fewer logits stored, less memory.
     trajectory_sample_interval: 8
 
+# Forget set uses dual-answer dataset so truth_ratio (and forget_quality) get labels_correct/labels_wrong in the batch.
 datasets:
   TOFU_QA_forget:
     access_key: forget
+    handler: QAwithDualAnswersDataset
     args:
       hf_args:
         name: ${eval.tofu_trajectory.forget_split}_perturbed
         split: train
         path: locuslab/TOFU
       question_key: ${eval.tofu_trajectory.question_key}
-      answer_key: answer
+      correct_answer_key: paraphrased_answer
+      wrong_answer_key: perturbed_answer
       max_length: 512
       predict_with_generate: true
   TOFU_QA_holdout:
     access_key: holdout
+    handler: QADataset
     args:
       hf_args:
         name: ${eval.tofu_trajectory.holdout_split}
@@ -125,6 +129,19 @@ datasets:
       question_key: ${eval.tofu_trajectory.question_key}
       answer_key: answer
       max_length: 512
+  # Retain set: used to compute trajectory_model_utility (hm_aggregate) per step from current model, not reference_logs
+  TOFU_QA_retain_eval:
+    access_key: retain
+    handler: QADataset
+    args:
+      hf_args:
+        name: retain_perturbed
+        split: train
+        path: locuslab/TOFU
+      question_key: ${eval.tofu_trajectory.question_key}
+      answer_key: answer
+      max_length: 512
+      predict_with_generate: true
 
 collators:
   DataCollatorForSupervisedDataset:

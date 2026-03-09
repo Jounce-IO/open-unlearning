@@ -261,6 +261,10 @@ def trajectories_from_logits(
         If return_trajectory_tensors=True: dict with "steps", "fixation_start",
         "fixation_end", "fixation_ratio", "S", "L".
         If return_trajectory_tensors=False: dict with "R", "F", "S", "L" only.
+
+    Invariant: out["L"] is the single source of truth for generated sequence length and
+    satisfies out["L"] == out["R"].shape[2]. The probability metric assumes
+    logits.shape[1] == batch["labels"].shape[1] and asserts it.
     """
     if not logits_history:
         raise ValueError("logits_history cannot be empty")
@@ -337,6 +341,11 @@ def trajectories_from_logits(
                 )
             F_list.append(F_b)
         F = torch.stack(F_list, dim=0)  # [B, L]
+
+    assert L == R.shape[2], (
+        "trajectories_from_logits invariant: L must equal R.shape[2]; got L=%s, R.shape=%s"
+        % (L, R.shape)
+    )
 
     if not return_trajectory_tensors:
         return {"R": R, "F": F, "S": S, "L": L}

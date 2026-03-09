@@ -193,6 +193,8 @@ class TestPoolPathParity:
                 return val.tolist()
             if isinstance(val, list):
                 return [_to_comparable(x) for x in val]
+            if isinstance(val, dict):
+                return {k: _to_comparable(v) for k, v in val.items()}
             return val
 
         assert result_sync is not None and result_pool is not None

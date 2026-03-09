@@ -1,17 +1,22 @@
 import gc
+import logging
 import os
 import sys
-from typing import Dict, List, Optional
-from tqdm import tqdm
-from rouge_score import rouge_scorer
-from collections import defaultdict
-from omegaconf import OmegaConf
-import numpy as np
-from torch import nn
-import torch
-from transformers import StoppingCriteria, StoppingCriteriaList, PreTrainedTokenizer
-from data.utils import IGNORE_INDEX
 import warnings
+from collections import defaultdict
+from typing import Dict, List, Optional
+
+import numpy as np
+import torch
+from omegaconf import OmegaConf
+from rouge_score import rouge_scorer
+from torch import nn
+from tqdm import tqdm
+from transformers import StoppingCriteria, StoppingCriteriaList, PreTrainedTokenizer
+
+from data.utils import IGNORE_INDEX
+
+logger = logging.getLogger("evaluator")
 
 
 def _tensor_to_list_of_floats(tensor: torch.Tensor) -> list:
@@ -101,52 +106,122 @@ def run_batchwise_evals(model, dataloader, batch_eval_fn, batch_eval_fn_args, ev
             batch_evals = batch_eval_fn(
                 model=model, batch=mini_batch, **batch_eval_fn_args
             )
-            indexwise_batch_evals = dict(zip(data_indices, batch_evals))
-            assert not (
-                evals[intra_item_idx].keys() & indexwise_batch_evals.keys()
-            ), "Data indices repeated while iterating dataloader"
-            evals[intra_item_idx] |= indexwise_batch_evals
+            if isinstance(batch_evals, list) and len(batch_evals) > 0 and isinstance(batch_evals[0], list):
+                n_options = len(batch_evals)
+                if intra_item_idx not in evals or not isinstance(evals[intra_item_idx], list):
+                    evals[intra_item_idx] = [dict() for _ in range(n_options)]
+                for k in range(n_options):
+                    indexwise = dict(zip(data_indices, batch_evals[k]))
+                    assert not (
+                        evals[intra_item_idx][k].keys() & indexwise.keys()
+                    ), "Data indices repeated while iterating dataloader"
+                    evals[intra_item_idx][k] |= indexwise
+            else:
+                indexwise_batch_evals = dict(zip(data_indices, batch_evals))
+                assert not (
+                    evals[intra_item_idx].keys() & indexwise_batch_evals.keys()
+                ), "Data indices repeated while iterating dataloader"
+                evals[intra_item_idx] |= indexwise_batch_evals
         # Free GPU cache between batches to avoid OOM with large models (e.g. 8B diffusion)
         if torch.cuda.is_available():
             torch.cuda.empty_cache()
             gc.collect()
     # evals looks like {iidx0: {idx453: {prob: 0.1, loss: 1}},
     #                   iidx1: {idx453: {prob: 0.2, loss: 2}}}
-    if len(evals) == 1:  # normal single answer dataset, no need for list
-        evals = next(iter(evals.values()))
+    # or when batch_eval_fn returns list of N option results: {iidx0: [dict0, dict1, ...], ...}
+    if len(evals) == 1:
+        single = next(iter(evals.values()))
+        if isinstance(single, list):
+            evals = single
+        else:
+            evals = single
     else:
-        # for each index return a dict with all intra_item_idx values in list
-        # after dict transpose looks like {idx453: {prob: [0.1, 0.2], loss: [1, 2]}}
-        evals = dict_transpose(evals)
-    print("Evaluated", len(evals), "examples")
+        single = next(iter(evals.values()))
+        if isinstance(single, list):
+            n_opts = len(single)
+            evals = [dict_transpose({k: evals[k][i] for k in evals}) for i in range(n_opts)]
+        else:
+            evals = dict_transpose(evals)
+    n_ex = len(evals) if isinstance(evals, dict) else (len(evals[0]) if isinstance(evals, list) and evals else 0)
+    print("Evaluated", n_ex, "examples")
     return evals
 
 
-def evaluate_probability(model, batch):
-    """Evaluate model probabilities and average token-level loss for a given batch."""
-    batch = {k: v.to(model.device) for k, v in batch.items()}
+def _batch_to_device(batch: dict, device: torch.device) -> dict:
+    """Move batch values to device. Handles list of tensors (e.g. labels_wrong from trajectory)."""
+    out = {}
+    for k, v in batch.items():
+        if isinstance(v, torch.Tensor):
+            out[k] = v.to(device)
+        elif isinstance(v, list) and len(v) > 0 and isinstance(v[0], torch.Tensor):
+            out[k] = [t.to(device) for t in v]
+        else:
+            out[k] = v
+    return out
+
+
+def _evaluate_probability_single(model, batch, labels):
+    """One option: compute probability for batch with given labels [B, L]."""
+    batch = _batch_to_device(batch, model.device)
+    batch = {**batch, "labels": labels.to(model.device) if isinstance(labels, torch.Tensor) else labels}
     with torch.no_grad():
         output = model(**batch)
     logits = output.logits
-    labels = batch["labels"]
-    shifted_labels = labels[..., 1:].contiguous()
+    shifted_labels = labels[..., 1:].contiguous().to(model.device)
     logits = logits[..., :-1, :].contiguous()
     loss_function = nn.CrossEntropyLoss(ignore_index=IGNORE_INDEX, reduction="none")
-    # agg loss across tokens
     losses = loss_function(logits.transpose(-1, -2), shifted_labels).sum(dim=-1)
-    num_token_gt = (batch["labels"] != IGNORE_INDEX).sum(-1)
+    num_token_gt = (labels != IGNORE_INDEX).sum(-1)
     avg_losses = losses / num_token_gt
     normalized_probs = torch.exp(-avg_losses)
-
-    # Single GPU→CPU transfer per tensor; no GPU-side cache
     avg_losses_list = _tensor_to_list_of_floats(avg_losses)
     normalized_probs_list = _tensor_to_list_of_floats(normalized_probs)
-    # Drop references to free GPU memory before next batch
     del logits, shifted_labels, losses, avg_losses, normalized_probs
-    return [
-        {"prob": prob, "avg_loss": avg_loss}
-        for prob, avg_loss in zip(normalized_probs_list, avg_losses_list)
-    ]
+    return [{"prob": p, "avg_loss": a} for p, a in zip(normalized_probs_list, avg_losses_list)]
+
+
+def evaluate_probability(model, batch, **fn_args):
+    """Evaluate model probabilities and average token-level loss for a given batch.
+
+    When fn_args has labels_field (e.g. labels_wrong) and that key is 3D [B, N, L]
+    or a list of N tensors, runs N times (one per option) and returns a list of N
+    lists of per-sample dicts, so run_batchwise_evals can produce pre_compute[\"wrong\"]
+    as list of N dicts for truth_ratio. Also supports batch[\"labels_wrong\"] or
+    batch[\"labels_correct\"] as list of tensors (trajectory per-sample batch_template).
+    """
+    device = model.device
+    batch = _batch_to_device(batch, device)
+
+    def run_n_options(lab_list):
+        """Run probability for each of N label tensors; return list of N result lists."""
+        return [
+            _evaluate_probability_single(model, {**batch, "labels": lab_list[k]}, lab_list[k])
+            for k in range(len(lab_list))
+        ]
+
+    labels_field = fn_args.get("labels_field")
+    if labels_field and labels_field in batch:
+        lab = batch[labels_field]
+        if isinstance(lab, torch.Tensor) and lab.dim() == 3:
+            n_opts = lab.shape[1]
+            return [
+                _evaluate_probability_single(model, batch, lab[:, k, :].contiguous())
+                for k in range(n_opts)
+            ]
+        if isinstance(lab, list) and len(lab) > 0 and isinstance(lab[0], torch.Tensor):
+            return run_n_options(lab)
+        lab_2d = lab.squeeze(1) if isinstance(lab, torch.Tensor) and lab.dim() == 3 else lab
+        return _evaluate_probability_single(model, batch, lab_2d)
+
+    # Trajectory path: batch_template has labels_wrong/labels_correct as list of N tensors (no fn_args).
+    for key in ("labels_wrong", "labels_correct"):
+        if key in batch:
+            val = batch[key]
+            if isinstance(val, list) and len(val) > 0 and isinstance(val[0], torch.Tensor):
+                return run_n_options(val)
+
+    labels = batch["labels"]
+    return _evaluate_probability_single(model, batch, labels)
 
 
 def evaluate_probability_confidence_ordered(model, batch):
@@ -181,6 +256,11 @@ def evaluate_probability_confidence_ordered(model, batch):
             lp = log_probs[i, pos, y].item()
             pos_probs.append(np.exp(lp))
         if not pos_probs:
+            logger.info(
+                "pre_compute probability (confidence_ordered): no valid target positions "
+                "for sample %s — all positions are ignore_index",
+                i,
+            )
             results.append({"prob": None, "avg_loss": None})
             continue
         pos_probs = np.array(pos_probs)
