@@ -1,7 +1,7 @@
 """
 Reproduce "no scores" in generalized trajectory path locally.
 Uses real TOFU data + mock R,F; forces use_generalized_sequence_probability path.
-Writes to .cursor/debug-0656be.log (instrumentation in trajectory_metrics.py).
+Output is to stdout; no fixed-path file writes.
 """
 from __future__ import annotations
 
@@ -160,7 +160,7 @@ def main():
         print("  index=%s correct_ok=%s wrong_ok=%s" % (idx_str, c, w))
     if len(bug_samples) > 20:
         print("  ... and %d more" % (len(bug_samples) - 20))
-    print("Done. Check /workspaces/dllm/.cursor/debug-0656be.log for instrumentation.")
+    print("Done.")
 
 
 if __name__ == "__main__":

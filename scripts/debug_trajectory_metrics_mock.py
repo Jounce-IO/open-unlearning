@@ -1,12 +1,11 @@
 """
-Minimal mock run of trajectory_metrics to trigger debug instrumentation without loading model/dataset.
-Use this to verify the on-demand code path and log shapes locally in a few seconds (no GPU needed).
+Minimal mock run of trajectory_metrics to verify the on-demand code path without loading model/dataset.
+Use this to check log shapes locally in a few seconds (no GPU needed).
 
 Run from dllm repo root:
   PYTHONPATH=open-unlearning/src uv run python open-unlearning/scripts/debug_trajectory_metrics_mock.py
 
-Logs go to /workspaces/dllm/.cursor/debug.log and to stderr ([DEBUG] lines). For GPU memory
-analysis you still need a real eval run (K8s job or full local eval with GPU).
+Output is to stdout/stderr. For GPU memory analysis use a real eval run (K8s job or full local eval with GPU).
 """
 import os
 import sys

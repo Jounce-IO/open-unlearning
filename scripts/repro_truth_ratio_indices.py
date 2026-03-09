@@ -1,7 +1,7 @@
 """
 Reproduce truth_ratio correct/wrong indices and "no valid pre_compute" locally.
 Uses real TOFU HF data, no GPU. Runs the same pre_compute flow as trajectory eval.
-Instrumentation writes to .cursor/debug-0656be.log for hypothesis analysis.
+Output is to stdout; no fixed-path file writes.
 """
 from __future__ import annotations
 
@@ -107,7 +107,7 @@ def main():
     )
     print("Forced case (all wrong None) truth_ratio agg_value:", out_forced2.get("agg_value"))
 
-    print("Done. Check .cursor/debug-0656be.log for hypothesis logs.")
+    print("Done.")
 
 
 if __name__ == "__main__":

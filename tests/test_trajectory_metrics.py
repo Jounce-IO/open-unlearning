@@ -739,10 +739,10 @@ class TestBuildTargetSequencesForSampler:
 
 
 class TestTrajectoryMetricsIndexErrorRepro:
-    """Reproduces IndexError when a batch has fewer steps than run_steps_to_use (for debug instrumentation)."""
+    """Reproduces IndexError when a batch has fewer steps than run_steps_to_use."""
 
     def test_get_logits_at_step_step_3_S_3_raises_index_error(self):
-        """Direct repro: R has S=3 (valid indices 0,1,2); loop uses step=3 → IndexError. Writes debug NDJSON before crash."""
+        """Direct repro: R has S=3 (valid indices 0,1,2); loop uses step=3 → IndexError."""
         V, L, S = 10, 5, 3
         R = torch.randn(1, V, L, S)
         F = torch.zeros(1, L, dtype=torch.long)
