@@ -3,6 +3,7 @@
 from typing import Dict, List, Optional, Union
 
 import os
+import numpy as np
 import logging
 from transformers import Trainer
 from torch.utils.data import Dataset
@@ -10,6 +11,89 @@ from transformers.trainer_utils import PREFIX_CHECKPOINT_DIR
 from typing import Any
 
 logger = logging.getLogger(__name__)
+
+# Keys that are never sent to W&B (metadata / retain-reference only).
+_WANDB_SKIP_KEYS = frozenset({
+    "config",
+    "run_info",
+    "trajectory_step_metadata",
+    "mia_min_k_by_step",
+    "forget_truth_ratio_by_step",
+})
+
+
+def _scalar_metrics_for_wandb(eval_metrics: dict) -> Dict[str, float]:
+    """Reduce evaluator output to scalar-only dict for W&B logging.
+
+    When training with report_to=wandb, only scalar aggregate evaluation
+    metrics are sent to W&B. Full results (value_by_index, step_distribution,
+    etc.) remain in the evaluator JSON files (e.g. TOFU_EVAL.json,
+    MUSE_EVAL.json); this function only affects what is passed to self.log().
+
+    Input: raw eval_metrics as returned by evaluators (TOFU, MUSE, LMEval).
+    Output: flat dict[str, float] suitable for Trainer.log().
+
+    Keys always skipped (never sent to W&B): config, run_info,
+    trajectory_step_metadata, mia_min_k_by_step, forget_truth_ratio_by_step.
+
+    Handling:
+    (1) Top-level scalar values (e.g. LMEval): log key -> float(value).
+    (2) Dict with scalar agg_value: log key -> float(agg_value).
+    (3) Dict with nested agg_value (view -> traj -> metric -> array): one
+        scalar per key via mean over steps (first view, first traj, first
+        inner metric); numpy arrays are reduced with np.nanmean(leaf).
+
+    Per-sample and per-step data (value_by_index, step_distribution) are
+    never sent to W&B and remain only in the evaluator's JSON files.
+    """
+    out: Dict[str, float] = {}
+    for key, value in eval_metrics.items():
+        if key in _WANDB_SKIP_KEYS:
+            continue
+        if isinstance(value, (int, float)):
+            out[key] = float(value)
+            continue
+        try:
+            if hasattr(value, "item"):
+                out[key] = float(value.item())
+                continue
+        except (ValueError, AttributeError):
+            pass
+        if isinstance(value, dict):
+            agg = value.get("agg_value")
+            if agg is None:
+                continue
+            if isinstance(agg, (int, float)):
+                out[key] = float(agg)
+                continue
+            try:
+                if hasattr(agg, "item"):
+                    out[key] = float(agg.item())
+                    continue
+            except (ValueError, AttributeError):
+                pass
+            if isinstance(agg, dict):
+                # Nested trajectory: view -> traj -> metric -> array
+                for view_val in agg.values():
+                    if not isinstance(view_val, dict):
+                        continue
+                    for traj_val in view_val.values():
+                        if not isinstance(traj_val, dict):
+                            continue
+                        for arr in traj_val.values():
+                            if arr is not None and hasattr(arr, "__len__") and len(arr) > 0:
+                                try:
+                                    out[key] = float(np.nanmean(np.asarray(arr, dtype=np.float64)))
+                                except (TypeError, ValueError):
+                                    pass
+                                break
+                        else:
+                            continue
+                        break
+                    else:
+                        continue
+                    break
+    return out
 
 
 class _DummyEvalDataset(Dataset):
@@ -78,7 +162,7 @@ class FinetuneTrainer(Trainer):
                             "tokenizer": self.tokenizer,
                         }
                         eval_metrics.update(evaluator.evaluate(**eval_args))
-                    self.log(eval_metrics)
+                    self.log(_scalar_metrics_for_wandb(eval_metrics))
                 else:
                     logger.warning(
                         "Custom evaluator can be run with this Trainer only when a single accelerator process is running."

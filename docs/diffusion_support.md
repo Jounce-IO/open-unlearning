@@ -105,6 +105,16 @@ dllm unlearn configs/unlearn/llada-8b/TOFU/forget01/WGA/wga-beta05.yaml --output
 
 See `dllm unlearn --help` for all flags. When running in K8s with `results.capture=true` and `results.createPr=true`, the job creates a PR that includes the unlearn report (config, model save path, W&B run URL).
 
+### W&B (Weights & Biases) logging
+
+When training with `report_to: wandb`, only **scalar aggregate** evaluation metrics are sent to W&B. The Trainer reduces evaluator output via `_scalar_metrics_for_wandb` in `src/trainer/base.py` before calling `self.log()`, so the W&B UI stays fast and readable.
+
+**What is logged:** One scalar per TOFU/MUSE metric display name (for trajectory metrics: mean over steps for the primary view/trajectory), and LMEval task/metric scalars as returned (e.g. `eval/mmlu/acc`, `eval/truthfulqa/mc1`).
+
+**What is not logged:** `config`, `run_info`, `trajectory_step_metadata`, retain-reference keys (`mia_min_k_by_step`, `forget_truth_ratio_by_step`), and all per-sample/per-step data (`value_by_index`, `step_distribution`). These are never sent to W&B.
+
+**Where to find full results:** The evaluator JSON files in the run directory (e.g. `evals/TOFU_EVAL.json`, `evals/MUSE_EVAL.json`) contain the full results, including `value_by_index` and `step_distribution`. See the docstring for `_scalar_metrics_for_wandb` in `src/trainer/base.py` for the exact reduction rules.
+
 ### Experiment config
 
 Use the diffusion unlearn experiment so the model is wrapped with training enabled:
