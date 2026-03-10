@@ -108,10 +108,9 @@ class Evaluator:
             raise RuntimeError(f"Failed to save {file}: {e}")
 
     def prepare_model(self, model):
-        """Prepare model for evaluation"""
+        """Prepare model for evaluation. Works with unwrapped causal LM (AR) or wrapped dLLM (has .model)."""
         model.eval()
-        # If model is already wrapped (e.g., DiffusionModelAdapter), it handles eval()
-        if hasattr(model, 'model'):
+        if hasattr(model, "model"):
             model.model.eval()
         return model
 
