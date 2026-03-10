@@ -42,6 +42,7 @@ from evals.metrics.step_wise_score import (
     extraction_strength_from_fixation,
 )
 from evals.metrics.trajectory_utils import (
+    build_ar_trajectory_r_f,
     trajectories_from_logits,
     effective_lengths_from_eos,
     compute_trajectories,
@@ -385,7 +386,7 @@ def _get_sampler_from_model(model) -> Optional[Any]:
     # Check if model is wrapped with DiffusionModelAdapter
     if hasattr(model, "sampler"):
         return model.sampler
-    
+
     # Check if model has a model attribute (nested wrapping)
     if hasattr(model, "model"):
         if hasattr(model.model, "sampler"):
@@ -393,8 +394,135 @@ def _get_sampler_from_model(model) -> Optional[Any]:
         # Check if model.model is the adapter
         if hasattr(model.model, "sampler"):
             return model.model.sampler
-    
+
     return None
+
+
+def _trajectories_from_ar_forward(
+    model: Any,
+    input_ids: torch.Tensor,
+    labels: Optional[torch.Tensor],
+    prompt_lens: list[int],
+    attention_mask: Optional[torch.Tensor],
+    device: torch.device,
+    uniform_logit_value: float = 0.0,
+) -> tuple[torch.Tensor, torch.Tensor, int, list[int], torch.Tensor]:
+    """
+    Build AR trajectory R, F from causal LM forward (token=step, uniform undecoded).
+
+    Returns (R, F, S, L_per_sample, sequences) where R [B, V, max_L, max_L], F [B, max_L],
+    S = max_L, L_per_sample is list of generated lengths, sequences = input_ids for eos view.
+    Short or empty generated regions: L_i < 1 skipped (not appended); missing positions
+    use uniform per contract (build_ar_trajectory_r_f uses uniform_logit_value).
+    """
+    B, T = input_ids.shape[0], input_ids.shape[1]
+    with torch.inference_mode():
+        outputs = model(
+            input_ids=input_ids.to(device),
+            attention_mask=attention_mask.to(device) if attention_mask is not None else None,
+        )
+        logits = outputs.logits  # [B, T, V] causal: logits[:, t, :] predicts token at t+1
+    V = logits.shape[-1]
+
+    L_per_sample: list[int] = []
+    traj_list: list[tuple[torch.Tensor, torch.Tensor, int, int]] = []
+    for i in range(B):
+        plen = prompt_lens[i]
+        if labels is not None:
+            L_i = max(0, (labels[i] != IGNORE_INDEX).sum().item())
+        else:
+            L_i = max(0, T - plen)
+        if L_i < 1:
+            L_per_sample.append(0)
+            continue
+        # Causal: logits at position (plen-1+k) predict token at position plen+k
+        start = plen - 1
+        end = start + L_i
+        if end > logits.shape[1]:
+            L_i = max(0, logits.shape[1] - start)
+            end = start + L_i
+        if L_i < 1:
+            L_per_sample.append(0)
+            continue
+        position_logits_i = logits[i, start:end, :].detach()  # [L_i, V]
+        R_i, F_i, S_i, L_out = build_ar_trajectory_r_f(
+            position_logits_i, uniform_logit_value=uniform_logit_value
+        )
+        traj_list.append((R_i, F_i, S_i, L_out))
+        L_per_sample.append(L_out)
+
+    if not traj_list:
+        max_L = 1
+        R = torch.zeros(B, V, max_L, max_L, device=device, dtype=logits.dtype)
+        R.fill_(uniform_logit_value)
+        F = torch.zeros(B, max_L, device=device, dtype=torch.long)
+        return R, F, max_L, L_per_sample, input_ids
+
+    max_L = max(t[3] for t in traj_list)
+    R_batch = torch.zeros(
+        B, V, max_L, max_L, device=traj_list[0][0].device, dtype=traj_list[0][0].dtype
+    )
+    R_batch.fill_(uniform_logit_value)
+    F_batch = torch.zeros(B, max_L, device=traj_list[0][1].device, dtype=torch.long)
+    traj_idx = 0
+    for i in range(B):
+        if L_per_sample[i] < 1:
+            F_batch[i, :] = max_L - 1
+            continue
+        R_i, F_i, S_i, L_i = traj_list[traj_idx]
+        R_batch[i, :, :L_i, :L_i] = R_i
+        F_batch[i, :L_i] = F_i
+        F_batch[i, L_i:] = L_i - 1
+        traj_idx += 1
+    return R_batch, F_batch, max_L, L_per_sample, input_ids
+
+
+def _generate_trajectories_ar_for_dataloader(
+    model: Any,
+    dataloader: DataLoader,
+    trajectory_config: Dict[str, Any],
+    device: torch.device,
+    tokenizer: Any = None,
+) -> Dict[str, Dict[str, Any]]:
+    """Generate AR trajectories (token=step, uniform undecoded) for all samples. Returns {idx_str: {R, F, S, L}}."""
+    trajectories_by_idx = {}
+    for batch_idx, batch in enumerate(dataloader):
+        input_ids = batch["input_ids"]
+        labels = batch.get("labels")
+        indices = batch.get(
+            "index",
+            torch.arange(
+                batch_idx * input_ids.shape[0],
+                (batch_idx + 1) * input_ids.shape[0],
+            ),
+        )
+        B = input_ids.shape[0]
+        _, prompt_lens = _build_prompts_for_sampler(
+            input_ids, labels, tokenizer, IGNORE_INDEX
+        )
+        if not prompt_lens:
+            prompt_lens = [input_ids.shape[1] // 2] * B  # fallback
+        R_batch, F_batch, S, L_per_sample, _ = _trajectories_from_ar_forward(
+            model,
+            input_ids,
+            labels,
+            prompt_lens,
+            batch.get("attention_mask"),
+            device,
+            uniform_logit_value=0.0,
+        )
+        for i in range(B):
+            if L_per_sample[i] < 1:
+                continue
+            idx = indices[i].item() if torch.is_tensor(indices[i]) else indices[i]
+            L_actual = L_per_sample[i]
+            trajectories_by_idx[str(idx)] = {
+                "R": R_batch[i, :, :L_actual, :L_actual].clone(),
+                "F": F_batch[i, :L_actual].clone(),
+                "S": L_actual,
+                "L": L_actual,
+            }
+    return trajectories_by_idx
 
 
 def _generate_trajectories_for_dataloader(
@@ -1906,13 +2034,15 @@ def trajectory_metrics(model, **kwargs):
             for v in include_views
         }
 
-        # Get sampler from model
+        # Get sampler from model; when None, use AR path (causal LM forward → build_ar_trajectory_r_f)
         sampler = _get_sampler_from_model(model)
-        if sampler is None:
-            raise ValueError(
-                "Model does not have a sampler. Trajectory metrics require a diffusion model with sampler. "
-                "Ensure model is wrapped with DiffusionModelAdapter or has accessible sampler."
-            )
+        is_ar = sampler is None
+        if is_ar:
+            try:
+                _device = getattr(model, "device", None) or next(model.parameters()).device
+            except (StopIteration, AttributeError):
+                _device = torch.device("cpu")
+            logger.info("Trajectory metrics: AR path (no sampler); token=step, uniform undecoded")
 
         # When privleak + dual dataset: use streaming MIA (batch-by-batch, only scores stored; no N trajectories in memory)
         trajectories_by_key = None
@@ -2025,61 +2155,77 @@ def trajectory_metrics(model, **kwargs):
                         config={"guardrail": guardrail_config_with_pools},
                     )
 
-                # Generate using sampler with logits tracking
-                _sampler_kw = _trajectory_sampler_kwargs(trajectory_config)
-                evaluation_mode = _sampler_kw.get("evaluation_mode", "unguided")
-                sample_kw = dict(
-                    inputs=prompts,
-                    config=None,  # Use default config
-                    return_dict=True,
-                    return_logits=True,
-                    **_sampler_kw,
-                )
-                if evaluation_mode in ("guided_native", "guided_skew") and labels is not None:
-                    L_gen = _sampler_kw.get("max_new_tokens")
-                    if L_gen is None:
-                        L_gen = max(
-                            labels.shape[1] - prompt_lens[j] for j in range(B)
+                # Generate trajectories: AR path (model forward) or dLLM path (sampler)
+                if is_ar:
+                    R, F, S, L_per_sample, sequences = _trajectories_from_ar_forward(
+                        model,
+                        input_ids,
+                        labels,
+                        prompt_lens,
+                        attention_mask,
+                        _device,
+                        uniform_logit_value=0.0,
+                    )
+                    L = S
+                    effective_lengths = list(L_per_sample)
+                    if all(lp == 0 for lp in L_per_sample):
+                        continue
+                    gpu_set_phase("trajectory_after_ar_forward", batch_idx=batch_idx)
+                else:
+                    _sampler_kw = _trajectory_sampler_kwargs(trajectory_config)
+                    evaluation_mode = _sampler_kw.get("evaluation_mode", "unguided")
+                    sample_kw = dict(
+                        inputs=prompts,
+                        config=None,
+                        return_dict=True,
+                        return_logits=True,
+                        **_sampler_kw,
+                    )
+                    if evaluation_mode in ("guided_native", "guided_skew") and labels is not None:
+                        L_gen = _sampler_kw.get("max_new_tokens")
+                        if L_gen is None:
+                            L_gen = max(
+                                labels.shape[1] - prompt_lens[j] for j in range(B)
+                            )
+                        else:
+                            L_gen = int(L_gen)
+                        target_sequences = _build_target_sequences_for_sampler(
+                            labels, prompt_lens, L_gen, IGNORE_INDEX
+                        )
+                        sample_kw["target_sequences"] = target_sequences
+                        sample_kw["evaluation_mode"] = evaluation_mode
+                    sampler_output = sampler.sample(**sample_kw)
+                    gpu_set_phase("trajectory_after_sampler", batch_idx=batch_idx)
+
+                    logits_history = sampler_output.logits_history
+                    fixation_steps = sampler_output.fixation_steps
+
+                    if logits_history is None or len(logits_history) == 0:
+                        logger.warning(f"Batch {batch_idx}: No logits_history returned from sampler")
+                        continue
+                    if fixation_steps is None:
+                        logger.warning(f"Batch {batch_idx}: No fixation_steps returned from sampler")
+                        continue
+
+                    out = trajectories_from_logits(
+                        logits_history, fixation_steps, prompt_lens, return_trajectory_tensors=False
+                    )
+                    R, F, S, L = out["R"], out["F"], out["S"], out["L"]
+                    del logits_history
+                    L_per_sample = [L] * B
+
+                    sequences = getattr(sampler_output, "sequences", None)
+                    eos_token_id = getattr(tokenizer, "eos_token_id", None) if tokenizer else None
+                    if eos_token_id is None and trajectory_config:
+                        eos_token_id = trajectory_config.get("eos_token_id")
+                    if sequences is not None and sequences.dim() >= 2 and "eos" in include_views:
+                        effective_lengths = effective_lengths_from_eos(
+                            sequences, prompt_lens, L, eos_token_id
                         )
                     else:
-                        L_gen = int(L_gen)
-                    target_sequences = _build_target_sequences_for_sampler(
-                        labels, prompt_lens, L_gen, IGNORE_INDEX
-                    )
-                    sample_kw["target_sequences"] = target_sequences
-                    sample_kw["evaluation_mode"] = evaluation_mode
-                sampler_output = sampler.sample(**sample_kw)
-                gpu_set_phase("trajectory_after_sampler", batch_idx=batch_idx)
+                        effective_lengths = [L] * B
 
-                # Extract logits and fixation steps
-                logits_history = sampler_output.logits_history
-                fixation_steps = sampler_output.fixation_steps
-
-                if logits_history is None or len(logits_history) == 0:
-                    logger.warning(f"Batch {batch_idx}: No logits_history returned from sampler")
-                    continue
-        
-                if fixation_steps is None:
-                    logger.warning(f"Batch {batch_idx}: No fixation_steps returned from sampler")
-                    continue
-
-                out = trajectories_from_logits(
-                    logits_history, fixation_steps, prompt_lens, return_trajectory_tensors=False
-                )
-                R, F, S, L = out["R"], out["F"], out["S"], out["L"]
-                del logits_history # Release list of tensors immediately after stacking/slicing
-
-                # Effective length per sample (for eos view): first EOS in generated region, or L
-                sequences = getattr(sampler_output, "sequences", None)
-                eos_token_id = getattr(tokenizer, "eos_token_id", None) if tokenizer else None
-                if eos_token_id is None and trajectory_config:
-                    eos_token_id = trajectory_config.get("eos_token_id")
-                if sequences is not None and sequences.dim() >= 2 and "eos" in include_views:
-                    effective_lengths = effective_lengths_from_eos(
-                        sequences, prompt_lens, L, eos_token_id
-                    )
-                else:
-                    effective_lengths = [L] * B
+                # L_per_sample used below for per-sample L when is_ar (already set for dLLM as [L]*B)
 
                 if run_steps_to_use is None:
                     run_steps_to_use, run_step_values_metadata = _derive_steps_to_use(
@@ -2131,8 +2277,11 @@ def trajectory_metrics(model, **kwargs):
 
                 # Process each sample in batch (each sample uses its own R, F; logits computed on-demand)
                 for sample_idx in range(B):
+                    L_actual = L_per_sample[sample_idx] if sample_idx < len(L_per_sample) else L
+                    if L_actual < 1:
+                        continue
                     idx_str = str(indices[sample_idx].item() if torch.is_tensor(indices[sample_idx]) else indices[sample_idx])
-                    sample_traj = {"R": R[sample_idx], "F": F[sample_idx], "S": S, "L": L}
+                    sample_traj = {"R": R[sample_idx], "F": F[sample_idx], "S": S, "L": L_actual}
                     use_generalized = (
                         trajectory_config.get("use_generalized_sequence_probability", True)
                         if trajectory_config else False
@@ -2149,13 +2298,11 @@ def trajectory_metrics(model, **kwargs):
                 # So if logits are [1, L, V], after processing: logits [1, L-1, V], labels [1, L-1]
                     # This means we need labels of length L to get L-1 after shift
                     if sample_labels is not None:
-                        # Extract generated region: from prompt_end to prompt_end + L
-                        # L is now the generated length (not full sequence length)
-                        generated_labels = sample_labels[sample_prompt_len:sample_prompt_len + L]
-                        # Pad with IGNORE_INDEX if needed (shouldn't happen, but safety check)
-                        if generated_labels.shape[0] < L:
+                        # Extract generated region: from prompt_end to prompt_end + L_actual
+                        generated_labels = sample_labels[sample_prompt_len:sample_prompt_len + L_actual]
+                        if generated_labels.shape[0] < L_actual:
                             padding = torch.full(
-                                (L - generated_labels.shape[0],),
+                                (L_actual - generated_labels.shape[0],),
                                 IGNORE_INDEX,
                                 dtype=generated_labels.dtype,
                                 device=generated_labels.device
@@ -2164,9 +2311,9 @@ def trajectory_metrics(model, **kwargs):
                     else:
                         generated_labels = None
                     if generated_labels is not None:
-                        assert generated_labels.shape[0] == L, (
-                            "batch_template invariant: generated_labels length must equal L; "
-                            "got %s, L=%s" % (generated_labels.shape[0], L)
+                        assert generated_labels.shape[0] == L_actual, (
+                            "batch_template invariant: generated_labels length must equal L_actual; "
+                            "got %s, L_actual=%s" % (generated_labels.shape[0], L_actual)
                         )
             
                     # Create batch template for logit metrics
@@ -2714,9 +2861,18 @@ def trajectory_metrics(model, **kwargs):
                 )
             logger.info("Privleak with dual dataset: generating trajectories for forget and holdout")
             gpu_set_phase("privleak_dual_forget")
-            forget_traj = _generate_trajectories_for_dataloader(sampler, dataloader, trajectory_config)
-            gpu_set_phase("privleak_dual_holdout")
-            holdout_traj = _generate_trajectories_for_dataloader(sampler, holdout_dataloader, trajectory_config)
+            if is_ar:
+                forget_traj = _generate_trajectories_ar_for_dataloader(
+                    model, dataloader, trajectory_config, _device, tokenizer
+                )
+                gpu_set_phase("privleak_dual_holdout")
+                holdout_traj = _generate_trajectories_ar_for_dataloader(
+                    model, holdout_dataloader, trajectory_config, _device, tokenizer
+                )
+            else:
+                forget_traj = _generate_trajectories_for_dataloader(sampler, dataloader, trajectory_config)
+                gpu_set_phase("privleak_dual_holdout")
+                holdout_traj = _generate_trajectories_for_dataloader(sampler, holdout_dataloader, trajectory_config)
             if forget_traj and holdout_traj:
                 trajectories_by_key = {"forget": forget_traj, "holdout": holdout_traj}
                 S_dual = next(iter(forget_traj.values()))["S"]

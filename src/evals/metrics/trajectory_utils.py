@@ -10,7 +10,51 @@ This module provides functions to:
 """
 
 import torch
-from typing import List, Optional, Union
+from typing import List, Optional, Tuple, Union
+
+
+def build_ar_trajectory_r_f(
+    position_logits: torch.Tensor,
+    uniform_logit_value: float = 0.0,
+) -> Tuple[torch.Tensor, torch.Tensor, int, int]:
+    """
+    Build AR trajectory R and fixation F from per-position logits (token=step, uniform undecoded).
+
+    For AR: step index s = token position; S = L. At step s, positions 0..s are decoded
+    (use model logits); positions s+1..L-1 are undecoded (uniform 1/V via constant logits).
+
+    Args:
+        position_logits: [L, V] logits at each position (L = sequence length, V = vocab size).
+        uniform_logit_value: Value used for undecoded positions (constant logits → softmax 1/V).
+            Default 0.0.
+
+    Returns:
+        R: [V, L, S] tensor with S=L. R[v, l, s] = position_logits[l, v] if l <= s else uniform_logit_value.
+        F: [L] long tensor with F[l] = l (causal fixation).
+        S: int, number of steps (= L).
+        L: int, sequence length.
+    """
+    if position_logits.dim() != 2:
+        raise ValueError(
+            f"position_logits must be 2-d [L, V], got shape {position_logits.shape}"
+        )
+    L, V = position_logits.shape
+    if L < 1:
+        raise ValueError("L must be >= 1")
+    device = position_logits.device
+    dtype = position_logits.dtype
+    S = L
+    R = torch.full(
+        (V, L, S),
+        uniform_logit_value,
+        device=device,
+        dtype=dtype,
+    )
+    for s in range(S):
+        for l in range(s + 1):
+            R[:, l, s] = position_logits[l, :].clone()
+    F = torch.arange(L, device=device, dtype=torch.long)
+    return R, F, S, L
 
 
 def stack_logits_history(logits_history: List[torch.Tensor]) -> torch.Tensor:
