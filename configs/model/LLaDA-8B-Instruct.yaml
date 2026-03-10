@@ -1,4 +1,5 @@
 model_handler: AutoModelForCausalLM
+model_type: dllm
 model_args:
   pretrained_model_name_or_path: "GSAI-ML/LLaDA-8B-Instruct"
   device_map: cuda

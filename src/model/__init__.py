@@ -58,6 +58,24 @@ def get_dtype(model_args):
     return torch.float32
 
 
+def _resolve_model_type(model_cfg: DictConfig) -> str:
+    """Resolve model_type (ar | dllm) from config. Explicit wins; default: dllm when diffusion_adapter present else ar."""
+    with open_dict(model_cfg):
+        explicit = model_cfg.get("model_type", None)
+        if explicit is not None and str(explicit).strip() != "":
+            val = str(explicit).strip().lower()
+            if val not in ("ar", "dllm"):
+                raise ValueError(
+                    f"Unsupported model_type '{explicit}'. Allowed values: ar | dllm. "
+                    "See specs/002-ar-llm-unlearning-pipeline/contracts/config-model-type.md."
+                )
+            return val
+        # Default: dllm when diffusion_adapter present, else ar
+        if model_cfg.get("diffusion_adapter", None) is not None:
+            return "dllm"
+        return "ar"
+
+
 def get_model(model_cfg: DictConfig, resume_from_checkpoint: str | None = None):
     assert model_cfg is not None, ValueError("Model config not found.")
     logger.info("=== Starting model loading ===")
@@ -66,6 +84,10 @@ def get_model(model_cfg: DictConfig, resume_from_checkpoint: str | None = None):
         assert model_args_dict is not None, ValueError("model_args absent in configs/model.")
         tokenizer_args = model_cfg.get("tokenizer_args", None)
         model_handler = model_cfg.get("model_handler", "AutoModelForCausalLM")
+
+    # Resolve model_type from run config (used for both load-from-HF and resume)
+    model_type = _resolve_model_type(model_cfg)
+    logger.info("Resolved model_type: %s", model_type)
 
     if resume_from_checkpoint:
         # Load model and tokenizer from checkpoint (no HuggingFace download).
@@ -134,7 +156,12 @@ def get_model(model_cfg: DictConfig, resume_from_checkpoint: str | None = None):
         tokenizer = get_tokenizer(tokenizer_args)
         logger.info("Tokenizer loaded successfully")
     
-    # Auto-wrap diffusion models to be compatible with AR-based metrics
+    # When model_type is ar, do not wrap; return loaded model and tokenizer as-is
+    if model_type == "ar":
+        logger.info("model_type=ar: skipping diffusion wrap; returning causal LM as-is")
+        return model, tokenizer
+
+    # model_type is dllm (or defaulted to dllm): wrap diffusion models for AR-compatible metrics
     # (only if adapter is available from main dllm repo)
     if _DIFFUSION_ADAPTER_AVAILABLE:
         # Add mask token for diffusion models (required by samplers)
@@ -154,8 +181,8 @@ def get_model(model_cfg: DictConfig, resume_from_checkpoint: str | None = None):
         model = wrap_model_if_diffusion(model, tokenizer, config=diffusion_config)
     else:
         # Adapter not available - check if this looks like a diffusion model (will fail trajectory metrics)
-        model_type = type(model).__name__.lower()
-        if any(x in model_type for x in ("llada", "dream", "diffusion", "mdlm", "bd3lm")):
+        loaded_type = type(model).__name__.lower()
+        if any(x in loaded_type for x in ("llada", "dream", "diffusion", "mdlm", "bd3lm")):
             logger.warning(
                 "DiffusionModelAdapter not available (dllm.integrations import failed). "
                 "Trajectory metrics will fail. Ensure PYTHONPATH includes the repo root (e.g. export PYTHONPATH=/app)."
