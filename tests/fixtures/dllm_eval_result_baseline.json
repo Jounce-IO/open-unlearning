@@ -1,0 +1,19 @@
+{
+    "run_info": {
+        "world_size": 1,
+        "total_samples": 1,
+        "data_parallel": false
+    },
+    "forget_Q_A_Prob": {
+        "agg_value": 0.0
+    },
+    "retain_Q_A_Prob": {
+        "agg_value": 0.0
+    },
+    "forget_truth_ratio": {
+        "agg_value": 0.0
+    },
+    "retain_truth_ratio": {
+        "agg_value": 0.0
+    }
+}
