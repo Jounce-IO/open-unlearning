@@ -15,5 +15,7 @@ overwrite: false
 forget_split: forget10
 holdout_split: holdout10
 retain_logs_path: null
+# When true, save value_by_index in logs for use as retain reference (FQ/ks_test, privleak). Override: eval.tofu_trajectory.retain_reference_mode=true
+retain_reference_mode: false
 question_key: "question"
 batch_size: 32
