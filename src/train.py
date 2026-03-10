@@ -92,11 +92,23 @@ def main(cfg: DictConfig):
 
     if trainer_args.do_train:
         trainer.add_callback(_WandbRunIdCallback(trainer_args.output_dir))
+        make_checkpoint_loadable_fn = None
+        try:
+            from dllm.utils.checkpoint import MakeCheckpointLoadableCallback, make_checkpoint_loadable
+            trainer.add_callback(MakeCheckpointLoadableCallback())
+            make_checkpoint_loadable_fn = make_checkpoint_loadable
+        except ImportError:
+            pass
         if resume_from_checkpoint:
             print(f"Resuming training from checkpoint: {resume_from_checkpoint}", flush=True)
         trainer.train(resume_from_checkpoint=resume_from_checkpoint)
         trainer.save_state()
         trainer.save_model(trainer_args.output_dir)
+        if make_checkpoint_loadable_fn is not None:
+            try:
+                make_checkpoint_loadable_fn(trainer.model, trainer_args.output_dir)
+            except Exception:
+                pass
         # Write W&B run URL so parent (e.g. dllm unlearn) can include it in the report
         try:
             import wandb
