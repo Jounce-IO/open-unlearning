@@ -1,3 +1,4 @@
+import json
 import os
 
 import hydra
@@ -8,6 +9,25 @@ from model import get_model
 from trainer import load_trainer
 from evals import get_evaluators
 from trainer.utils import seed_everything
+
+
+class _WandbDllmConfigCallback(TrainerCallback):
+    """If DLLM_UNLEARN_CONFIG_PATH is set (by dllm unlearn), load the JSON and update wandb.config under key 'dllm' so the run has the full dllm config YAML contents in W&B."""
+
+    def on_train_begin(self, args, state, control, **kwargs):
+        config_path = os.environ.get("DLLM_UNLEARN_CONFIG_PATH", "").strip()
+        if not config_path or not os.path.isfile(config_path):
+            return control
+        try:
+            import wandb
+            if wandb.run is None:
+                return control
+            with open(config_path, "r") as f:
+                dllm_config = json.load(f)
+            wandb.config.update({"dllm": dllm_config}, allow_val_change=True)
+        except Exception:
+            pass
+        return control
 
 
 class _WandbRunIdCallback(TrainerCallback):
@@ -92,11 +112,24 @@ def main(cfg: DictConfig):
 
     if trainer_args.do_train:
         trainer.add_callback(_WandbRunIdCallback(trainer_args.output_dir))
+        trainer.add_callback(_WandbDllmConfigCallback())
+        make_checkpoint_loadable_fn = None
+        try:
+            from dllm.utils.checkpoint import MakeCheckpointLoadableCallback, make_checkpoint_loadable
+            trainer.add_callback(MakeCheckpointLoadableCallback())
+            make_checkpoint_loadable_fn = make_checkpoint_loadable
+        except ImportError:
+            pass
         if resume_from_checkpoint:
             print(f"Resuming training from checkpoint: {resume_from_checkpoint}", flush=True)
         trainer.train(resume_from_checkpoint=resume_from_checkpoint)
         trainer.save_state()
         trainer.save_model(trainer_args.output_dir)
+        if make_checkpoint_loadable_fn is not None:
+            try:
+                make_checkpoint_loadable_fn(trainer.model, trainer_args.output_dir)
+            except Exception:
+                pass
         # Write W&B run URL so parent (e.g. dllm unlearn) can include it in the report
         try:
             import wandb
