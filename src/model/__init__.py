@@ -129,6 +129,10 @@ def get_model(model_cfg: DictConfig, resume_from_checkpoint: str | None = None):
                     del model_args["pretrained_model_name_or_path"]
         logger.info(f"Model path: {model_path}")
         model_path = _resolve_gcs_model_path(model_path)
+        # Use resolved path for tokenizer so HuggingFace does not receive gs://
+        tokenizer_args = OmegaConf.create(dict(OmegaConf.to_container(tokenizer_args, resolve=True)))
+        with open_dict(tokenizer_args):
+            tokenizer_args["pretrained_model_name_or_path"] = model_path
         logger.info(f"Model handler: {model_handler}")
         torch_dtype = get_dtype(model_args)
         logger.info(f"Torch dtype: {torch_dtype}")
