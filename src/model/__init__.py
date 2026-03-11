@@ -33,6 +33,40 @@ logger = logging.getLogger(__name__)
 MODEL_REGISTRY: Dict[str, Any] = {}
 
 
+def _resolve_gcs_model_path(model_path: str) -> str:
+    """If model_path is gs://, resolve to a local directory so HuggingFace from_pretrained can load it.
+    Tries dllm.eval.resolve_model_path when available (e.g. when run from dllm repo); else gsutil."""
+    if not (model_path or "").strip().startswith("gs://"):
+        return model_path
+    try:
+        from dllm.eval import resolve_model_path
+        resolved = resolve_model_path(model_path)
+        logger.info("Resolved GCS model path via dllm: %s -> %s", model_path, resolved)
+        return resolved
+    except ImportError:
+        pass
+    import subprocess
+    import tempfile
+    local_base = tempfile.mkdtemp(prefix="dllm_model_")
+    gcs_path = model_path.rstrip("/")
+    try:
+        subprocess.run(
+            ["gsutil", "-m", "cp", "-r", gcs_path, local_base + "/"],
+            check=True,
+            capture_output=True,
+            text=True,
+        )
+        # gsutil cp -r gs://b/path/to/model /tmp/x creates /tmp/x/model
+        resolved = os.path.join(local_base, os.path.basename(gcs_path))
+        logger.info("Resolved GCS model path via gsutil: %s -> %s", model_path, resolved)
+        return resolved
+    except (subprocess.CalledProcessError, FileNotFoundError) as e:
+        raise ValueError(
+            f"GCS model path {model_path!r} could not be resolved. "
+            "When run from the dllm repo, dllm.eval.resolve_model_path is used; otherwise gsutil is required."
+        ) from e
+
+
 def _register_model(model_class):
     MODEL_REGISTRY[model_class.__name__] = model_class
 
@@ -94,6 +128,11 @@ def get_model(model_cfg: DictConfig, resume_from_checkpoint: str | None = None):
                 if model_path is not None:
                     del model_args["pretrained_model_name_or_path"]
         logger.info(f"Model path: {model_path}")
+        model_path = _resolve_gcs_model_path(model_path)
+        # Use resolved path for tokenizer so HuggingFace does not receive gs://
+        tokenizer_args = OmegaConf.create(dict(OmegaConf.to_container(tokenizer_args, resolve=True)))
+        with open_dict(tokenizer_args):
+            tokenizer_args["pretrained_model_name_or_path"] = model_path
         logger.info(f"Model handler: {model_handler}")
         torch_dtype = get_dtype(model_args)
         logger.info(f"Torch dtype: {torch_dtype}")

@@ -119,7 +119,9 @@ class UnlearningMetric:
             for key, include_cfg in include_cfgs.items():
                 access_name = include_cfg.get("access_key", key)
                 _results = _logs.get(key, None)
-                reference_logs[reference_log_name][access_name] = _results
+                # Do not overwrite an existing value with None (e.g. mia_min_k -> retain then forget_truth_ratio -> retain; second key missing would otherwise clear retain)
+                if _results is not None or access_name not in reference_logs[reference_log_name]:
+                    reference_logs[reference_log_name][access_name] = _results
                 if _results is None:
                     logger.warning(
                         f"{key} evals not present in the {path}, setting it to None, may result in error soon if code attempts to access."

@@ -753,6 +753,90 @@ class TestTrajectoryMetricsIndexErrorRepro:
                 _get_logits_at_step(traj, "steps", step)
 
 
+class TestTrajectoryMetricsProgressLogging:
+    """Regression: progress logging in batch loop must not raise and must emit expected messages."""
+
+    def test_trajectory_batch_loop_emits_progress_logs_without_error(self):
+        """When trajectory_metrics runs the batch loop, progress logs are emitted (no exception)."""
+        from evals.metrics.trajectory_metrics import trajectory_metrics
+        from unittest.mock import patch
+
+        # Minimal mock setup: 1 sample so we get 1 batch and hit the progress log path
+        V, L_gen, S = 100, 10, 4
+        full_len = 5 + L_gen
+        logits_history = [torch.randn(1, full_len, V) for _ in range(S)]
+        fixation_steps = torch.randint(0, S, (1, full_len))
+
+        class MockSamplerOutput:
+            __slots__ = ("sequences", "histories", "logits_history", "fixation_steps")
+            def __init__(self, sequences, histories, logits_history, fixation_steps):
+                self.sequences = sequences
+                self.histories = histories
+                self.logits_history = logits_history
+                self.fixation_steps = fixation_steps
+
+        sampler = Mock()
+        sampler.sample = Mock(
+            return_value=MockSamplerOutput(
+                sequences=torch.randint(0, V, (1, full_len)),
+                histories=None,
+                logits_history=logits_history,
+                fixation_steps=fixation_steps,
+            )
+        )
+        model = Mock()
+        model.sampler = sampler
+        tokenizer = Mock()
+        tokenizer.decode = Mock(return_value="x")
+        tokenizer.batch_decode = Mock(return_value=["x"] * S)
+        tokenizer.eos_token_id = 2
+
+        class DS(torch.utils.data.Dataset):
+            def __len__(self):
+                return 1
+            def __getitem__(self, i):
+                return {
+                    "input_ids": torch.randint(0, V, (full_len,)),
+                    "labels": torch.randint(0, V, (full_len,)),
+                }
+
+        def collator(batch):
+            return {
+                "input_ids": torch.stack([b["input_ids"] for b in batch]),
+                "labels": torch.stack([b["labels"] for b in batch]),
+                "index": torch.tensor(list(range(len(batch)))),
+            }
+
+        raw_fn = trajectory_metrics._metric_fn if hasattr(trajectory_metrics, "_metric_fn") else trajectory_metrics
+        trajectory_config = {
+            "return_logits": True,
+            "return_fixation_steps": True,
+            "metric_worker_pool_size": 0,
+            "sampler_kwargs": {"steps": S, "max_new_tokens": L_gen, "trajectory_sample_interval": 8},
+        }
+        kwargs = {
+            "metric_name": "trajectory_all",
+            "cache": {},
+            "metrics": ["probability"],
+            "data": DS(),
+            "collators": collator,
+            "tokenizer": tokenizer,
+            "batch_size": 1,
+            "trajectory_config": trajectory_config,
+        }
+        log_calls = []
+        with patch("evals.metrics.trajectory_metrics.logger") as mock_log:
+            mock_log.info = lambda *args, **kwargs: log_calls.append(("info", args, kwargs))
+            mock_log.warning = lambda *args, **kwargs: log_calls.append(("warning", args, kwargs))
+            mock_log.debug = lambda *args, **kwargs: None
+            mock_log.error = lambda *args, **kwargs: log_calls.append(("error", args, kwargs))
+            result = raw_fn(model, **kwargs)
+        assert result is not None
+        info_args = [c[1] for c in log_calls if c[0] == "info" and c[1]]
+        progress_msgs = [str(a) for a in info_args if any("Trajectory batch" in str(a) or "diffusion sampling done" in str(a) for a in a)]
+        assert len(progress_msgs) >= 1, "Expected at least one progress log (Trajectory batch or diffusion sampling done); got %s" % info_args[:5]
+
+
 class TestTrajectoryMetricsErrorHandling:
     """Tests for error handling in trajectory_metrics."""
     

@@ -326,6 +326,7 @@ class Evaluator:
             kwargs = {
                 "tokenizer": kwargs.get("tokenizer", None),
                 "template_args": kwargs.get("template_args", None),
+                "eval_cfg": self.eval_cfg,
             }
             if self.eval_cfg.get("samples") is not None:
                 kwargs["samples"] = self.eval_cfg.samples
