@@ -263,6 +263,21 @@ class Evaluator:
                 "eval_cfg": self.eval_cfg,
                 **base_kwargs,
             }
+            # Pass first metric's reference_logs so trajectory_metrics can load retain_model_logs
+            # (forget_quality / privleak); otherwise they warn and return None.
+            first_reference_logs = first_cfg.get("reference_logs")
+            if first_reference_logs is not None:
+                try:
+                    from omegaconf import OmegaConf
+                    merged_args["reference_logs"] = OmegaConf.to_container(
+                        first_reference_logs, resolve=True
+                    )
+                except Exception:
+                    merged_args["reference_logs"] = (
+                        dict(first_reference_logs)
+                        if hasattr(first_reference_logs, "items")
+                        else first_reference_logs
+                    )
             result = first_metric(
                 model,
                 metric_name=first_name,
