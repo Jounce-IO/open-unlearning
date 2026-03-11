@@ -181,10 +181,25 @@ The metrics **privleak** and **forget_quality** compare the unlearned model to a
 
 **Reference_logs loading and logs**
 
-The loader (`evals.metrics.base.UnlearningMetric.prepare_kwargs_evaluate_metric`) reads the JSON at `path` and fills `reference_logs` from the config’s `include` keys. For trajectory eval, only **mia_min_k** and **forget_truth_ratio** are requested (see `configs/eval/tofu_metrics/trajectory_all.yaml`). The loader also injects **retain_mia_by_step** and **retain_forget_tr_by_step** when present in the file (for step-matched privleak and forget_quality). You can tell load success from the logs:
+The loader (`evals.metrics.base.UnlearningMetric.prepare_kwargs_evaluate_metric`) reads the JSON at `path` and fills `reference_logs` from the config’s `include` keys. For trajectory eval, only **mia_min_k** and **forget_truth_ratio** are requested (see `configs/eval/tofu_metrics/trajectory_all.yaml`). The loader also injects **retain_mia_by_step** and **retain_forget_tr_by_step** when present in the file (for step-matched privleak and forget_quality).
 
-- **No usable keys:** `reference_logs: no usable keys found for retain_model_logs (path=...). privleak and forget_quality may fail or use fallbacks.` → Wrong path, missing file, or file has no expected keys.
-- **Partial or full:** `reference_logs: loaded retain_model_logs from <path>: found [retain, retain_mia_by_step, retain_forget_tr_by_step, ...]; missing requested: []` or `... missing requested: [key1, key2].` → Some or all requested keys were loaded; any missing key is logged separately as a warning.
+**Retain reference JSON contract.** The file at `retain_logs_path` may contain top-level and/or `trajectory_all` keys. For trajectory unlearn eval, the loader expects (from config `include`): **mia_min_k**, **forget_truth_ratio** (aggregate), and optionally **mia_min_k_by_step**, **forget_truth_ratio_by_step** (step-keyed). The loader **normalizes** aggregate values: if `mia_min_k` or `forget_truth_ratio` has a nested `agg_value` (e.g. view→traj→metric) or an `auc` field, the loader extracts one scalar and exposes it as `retain["agg_value"]` so **privleak** and **rel_diff** receive a number (no TypeError). If no scalar can be extracted, the loader does not set usable `retain` and sets `_required_but_missing`. By-step keys are exposed as **retain_mia_by_step** and **retain_forget_tr_by_step** for step-matched trajectory_privleak and trajectory_forget_quality. When the path is provided but data is missing or invalid, metrics **do not** fall back to `ref_value`; they log ERROR and return `agg_value=None`. For the full contract (writer↔loader↔metrics), see the dllm repo: `specs/005-reference-logs-integration-fixes/contracts/retain-reference-json.md` (if present).
+
+**Strict rule: no fallback.** If something requested is not found in the file, we log ERROR and do not use that reference (no partial data, no defaults). Specifically:
+
+- **Any requested include key missing:** Log ERROR per missing key and ERROR that not all requested keys were found; remove that ref from `reference_logs` so it is not passed to metrics.
+- **No usable data after load:** Log ERROR that no usable reference data was found (wrong path, wrong keys, or empty file).
+- **Step-matched data missing (trajectory):** If the file has no `retain_mia_by_step` / `retain_forget_tr_by_step`, we log ERROR once and do not pass `reference_logs` to per-step privleak/ks_test (no fallback to aggregate retain).
+
+Log messages:
+
+- **Path provided but key not found (ERROR):** `reference_logs path was provided but key 'X' not found in <path>. No fallback.`
+- **Not all requested keys (ERROR):** `reference_logs path was provided but not all requested keys found in <path>: missing [X, Y]. Not using reference_logs for <ref_name>.`
+- **No usable data (ERROR):** `reference_logs path was provided but no usable reference data found in <path> (key=retain_model_logs). ...`
+- **Step-matched not in file (ERROR):** `reference_logs was provided but step-matched retain (retain_mia_by_step) not found in file. trajectory_privleak will not receive reference_logs. No fallback.` (and analogous for ks_test / retain_forget_tr_by_step).
+- **Success (INFO):** `reference_logs: loaded <ref_name> from <path>: found [retain, retain_mia_by_step, ...].`
+
+When reference was required but data is missing (e.g. requested keys not in file, or step-matched data not in file), the loader or trajectory sets a sentinel (`_required_but_missing`) so that **privleak**, **ks_test**, and **rel_diff** do not fall back to `ref_value` or silent None: they log ERROR and return `agg_value=None`.
 
 #### 2. Register the metric handler
 Register the handler to link the class to the configs via the class name in [`METRIC_REGISTRY`](../src/evals/metrics/__init__.py).

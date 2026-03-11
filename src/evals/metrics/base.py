@@ -9,6 +9,39 @@ from data import get_datasets, get_collators
 logger = logging.getLogger("metrics")
 
 
+def _extract_retain_agg_scalar(val: Any) -> Any:
+    """Extract a single number from a retain metric value for privleak/rel_diff.
+
+    Handles: (1) scalar agg_value, (2) auc when agg_value missing (e.g. mia_min_k),
+    (3) nested agg_value (view -> traj -> metric) by taking first numeric found.
+    Returns None if no number can be extracted.
+    """
+    if val is None:
+        return None
+    if isinstance(val, (int, float)) and not isinstance(val, bool):
+        return float(val)
+    if not isinstance(val, dict):
+        return None
+    agg = val.get("agg_value")
+    if isinstance(agg, (int, float)) and not isinstance(agg, bool):
+        return float(agg)
+    if isinstance(agg, dict):
+        for v in agg.values():
+            if isinstance(v, (int, float)) and not isinstance(v, bool):
+                return float(v)
+            if isinstance(v, dict):
+                for w in v.values():
+                    if isinstance(w, (int, float)) and not isinstance(w, bool):
+                        return float(w)
+                    if isinstance(w, dict) and "privleak" in w:
+                        p = w["privleak"]
+                        if isinstance(p, (int, float)) and not isinstance(p, bool):
+                            return float(p)
+    if "auc" in val and isinstance(val.get("auc"), (int, float)):
+        return float(val["auc"])
+    return None
+
+
 class UnlearningMetric:
     def __init__(
         self,
@@ -67,8 +100,8 @@ class UnlearningMetric:
         - Loads reference_logs from JSON when reference_logs config has a path: for each
           entry, reads the file and populates requested include keys plus (when present)
           retain_mia_by_step and retain_forget_tr_by_step for step-matched privleak/ks_test.
-          Logs a summary so you can distinguish "no usable keys found" (WARNING) from
-          "loaded: found [X]; missing [Y]" (INFO, or INFO + per-key WARNING for missing).
+          Strict: if any requested key is not found, log ERROR and do not use that ref (no fallback).
+          Logs ERROR when no usable data or when step-matched data is missing (trajectory); INFO on success.
         Returns:
             Dict: Updated kwargs with data, collators, pre_compute, and reference_logs.
         """
@@ -172,10 +205,23 @@ class UnlearningMetric:
                     found_include.append(key)
                 else:
                     missing_include.append(key)
-                    logger.warning(
-                        f"reference_logs: key '{key}' not present in {path}, set to None; may cause errors if a metric accesses it."
+                    logger.error(
+                        "reference_logs path was provided but key %r not found in %s. No fallback.",
+                        key,
+                        path,
                     )
-            # Retain trajectory: per-step refs for step-matched privleak/FQ (top-level or under trajectory_all)
+            # If any requested key was missing, do not use this ref at all (no fallback to partial).
+            if missing_include:
+                logger.error(
+                    "reference_logs path was provided but not all requested keys found in %s: missing %s. Not using reference_logs for %s.",
+                    path,
+                    missing_include,
+                    reference_log_name,
+                )
+                reference_logs.pop(reference_log_name, None)
+                reference_logs["_required_but_missing"] = True  # So trajectory/metrics do not fall back to ref_value
+                continue
+            # All requested keys found; inject by-step and aggregate retain when present in file
             _mia = _logs.get("mia_min_k_by_step") or _traj.get("mia_min_k_by_step")
             _tr = _logs.get("forget_truth_ratio_by_step") or _traj.get("forget_truth_ratio_by_step")
             if _mia is not None:
@@ -187,19 +233,34 @@ class UnlearningMetric:
                     first_step = next(iter(_tr.values()))
                     if isinstance(first_step, dict) and first_step.get("value_by_index"):
                         reference_logs[reference_log_name]["retain"] = first_step
-            # Summary logging: distinguish "no usable keys" from "partial" or "full" load
+            # Normalize retain so privleak/rel_diff receive a scalar agg_value (no dict → TypeError).
+            ref = reference_logs[reference_log_name]
+            if ref.get("retain") is not None:
+                scalar = _extract_retain_agg_scalar(ref["retain"])
+                if scalar is not None:
+                    ref["retain"] = {"agg_value": scalar}
+                else:
+                    logger.error(
+                        "reference_logs path was provided but retain value could not be normalized to a scalar (nested or invalid). "
+                        "Not using reference for privleak/rel_diff. No fallback.",
+                    )
+                    ref["retain"] = None
+                    reference_logs["_required_but_missing"] = True
+            # Summary logging: "no usable keys" (ERROR) vs "loaded" (INFO)
             ref = reference_logs[reference_log_name]
             has_retain = ref.get("retain") is not None
             has_mia_by_step = ref.get("retain_mia_by_step") is not None
             has_tr_by_step = ref.get("retain_forget_tr_by_step") is not None
             has_any_useful = has_retain or has_mia_by_step or has_tr_by_step or len(found_include) > 0
             if not has_any_useful:
-                logger.warning(
-                    "reference_logs: no usable keys found for %s (path=%s). privleak and forget_quality may fail or use fallbacks.",
-                    reference_log_name,
+                logger.error(
+                    "reference_logs path was provided but no usable reference data found in %s (key=%s). "
+                    "Expected at least one of: retain, retain_mia_by_step, retain_forget_tr_by_step, or requested include keys. "
+                    "privleak and forget_quality cannot use retain reference.",
                     path,
+                    reference_log_name,
                 )
-            else:
+            elif not missing_include:
                 found_list = list(found_include)
                 if has_mia_by_step:
                     found_list.append("retain_mia_by_step")
@@ -208,11 +269,10 @@ class UnlearningMetric:
                 if has_retain:
                     found_list.append("retain")
                 logger.info(
-                    "reference_logs: loaded %s from %s: found [%s]%s",
+                    "reference_logs: loaded %s from %s: found [%s].",
                     reference_log_name,
                     path,
                     ", ".join(sorted(set(found_list))),
-                    f"; missing requested: [{', '.join(missing_include)}]" if missing_include else ".",
                 )
         if reference_logs:
             kwargs.update({"reference_logs": reference_logs})

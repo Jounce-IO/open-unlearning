@@ -54,7 +54,13 @@ def ks_test(model, **kwargs):
         return {"agg_value": None}
     reference_logs = kwargs.get("reference_logs", None)
     if reference_logs:
-        reference_logs = reference_logs["retain_model_logs"]
+        reference_logs = reference_logs.get("retain_model_logs") or {}
+        if reference_logs.get("_required_but_missing"):
+            logger.error(
+                "reference_logs was required but data was missing (e.g. step-matched retain not in file). "
+                "Setting forget_quality to None. No fallback."
+            )
+            return {"agg_value": None}
         retain_vbi = (reference_logs.get("retain") or {}).get("value_by_index") or {}
         retain_tr_stats = np.array(
             [
@@ -90,6 +96,14 @@ def privleak(model, **kwargs):
     score = kwargs["pre_compute"]["forget"]["agg_value"]
     if score is None:
         return {"agg_value": None}
+    ref_logs = kwargs.get("reference_logs") or {}
+    retain_logs = ref_logs.get("retain_model_logs") or {}
+    if retain_logs.get("_required_but_missing"):
+        logger.error(
+            "reference_logs was required but data was missing (e.g. step-matched retain not in file). "
+            "Not using ref_value. No fallback."
+        )
+        return {"agg_value": None}
     try:
         ref = kwargs["reference_logs"]["retain_model_logs"]["retain"]["agg_value"]
     except Exception as _:
@@ -99,6 +113,12 @@ def privleak(model, **kwargs):
             RETAIN_LOGS_PATH_NONE_MSG,
         )
         ref = kwargs["ref_value"]
+    if ref is None or (isinstance(ref, dict) or not isinstance(ref, (int, float))):
+        logger.error(
+            "reference_logs was provided but retain agg_value is not a number (got %s). Not using ref_value. No fallback.",
+            type(ref).__name__,
+        )
+        return {"agg_value": None}
     score = 1 - score
     ref = 1 - ref
     return {"agg_value": (score - ref) / (ref + 1e-10) * 100}
@@ -108,6 +128,13 @@ def privleak(model, **kwargs):
 def rel_diff(model, **kwargs):
     """Compare two forget and retain model scores using a relative comparison of a single statistic."""
     score = kwargs["pre_compute"]["forget"]["agg_value"]
+    ref_logs = kwargs.get("reference_logs") or {}
+    retain_logs = ref_logs.get("retain_model_logs") or {}
+    if retain_logs.get("_required_but_missing"):
+        logger.error(
+            "reference_logs was required but data was missing. Not using ref_value. No fallback."
+        )
+        return {"agg_value": None}
     try:
         ref = kwargs["reference_logs"]["retain_model_logs"]["retain"]["agg_value"]
     except Exception as _:
@@ -117,4 +144,10 @@ def rel_diff(model, **kwargs):
             RETAIN_LOGS_PATH_NONE_MSG,
         )
         ref = kwargs["ref_value"]
+    if ref is None or (isinstance(ref, dict) or not isinstance(ref, (int, float))):
+        logger.error(
+            "reference_logs was provided but retain agg_value is not a number (got %s). Not using ref_value. No fallback.",
+            type(ref).__name__,
+        )
+        return {"agg_value": None}
     return {"agg_value": (score - ref) / (ref + 1e-10) * 100}

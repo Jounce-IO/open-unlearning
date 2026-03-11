@@ -67,3 +67,23 @@ class TestPrivleakReferenceLogsSingleArg:
                 ref_value=kwargs["ref_value"],
                 **{k: v for k, v in kwargs.items() if k not in ("model", "tokenizer", "pre_compute")},
             )
+
+    def test_privleak_reject_non_scalar_retain_agg_value_returns_none(self, caplog):
+        """When reference_logs path was provided but retain['agg_value'] is a dict, log ERROR and return agg_value=None; do not use ref_value (T008, contract test 3)."""
+        metric = METRICS_REGISTRY.get("privleak")
+        assert metric is not None
+        ref_logs = {
+            "retain_model_logs": {
+                "retain": {"agg_value": {"nested": "not a number"}},
+            }
+        }
+        result = metric._metric_fn(
+            model=None,
+            pre_compute={"forget": {"agg_value": 0.3}},
+            reference_logs=ref_logs,
+            ref_value=999.0,
+        )
+        assert result.get("agg_value") is None
+        assert "retain agg_value is not a number" in caplog.text or "agg_value is not a number" in caplog.text
+        # ref_value=999 was not used (result would be a large number if it were)
+        assert result["agg_value"] is None
