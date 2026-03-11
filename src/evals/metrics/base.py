@@ -115,10 +115,27 @@ class UnlearningMetric:
                 "path not specified for {reference_log_name} in {metric_name}"
             )
             _logs = self.load_logs_from_file(path)
+            _traj = _logs.get("trajectory_all") or {}
             reference_logs[reference_log_name] = {}
             for key, include_cfg in include_cfgs.items():
                 access_name = include_cfg.get("access_key", key)
                 _results = _logs.get(key, None)
+                if _results is None:
+                    _results = _traj.get(key, None)
+                if _results is None and key == "forget_truth_ratio":
+                    _results = (
+                        _logs.get("forget_Truth_Ratio")
+                        or _traj.get("forget_Truth_Ratio")
+                        or _logs.get("trajectory_forget_Truth_Ratio")
+                        or _traj.get("trajectory_forget_Truth_Ratio")
+                    )
+                if _results is None and key == "retain_Truth_Ratio":
+                    _results = (
+                        _logs.get("retain_Truth_Ratio")
+                        or _traj.get("retain_Truth_Ratio")
+                        or _logs.get("trajectory_retain_Truth_Ratio")
+                        or _traj.get("trajectory_retain_Truth_Ratio")
+                    )
                 # Do not overwrite an existing value with None (e.g. mia_min_k -> retain then forget_truth_ratio -> retain; second key missing would otherwise clear retain)
                 if _results is not None or access_name not in reference_logs[reference_log_name]:
                     reference_logs[reference_log_name][access_name] = _results
@@ -127,13 +144,17 @@ class UnlearningMetric:
                         f"{key} evals not present in the {path}, setting it to None, may result in error soon if code attempts to access."
                     )
             # Retain trajectory: per-step refs for step-matched privleak/FQ (top-level or under trajectory_all)
-            _traj = _logs.get("trajectory_all") or {}
             _mia = _logs.get("mia_min_k_by_step") or _traj.get("mia_min_k_by_step")
             _tr = _logs.get("forget_truth_ratio_by_step") or _traj.get("forget_truth_ratio_by_step")
             if _mia is not None:
                 reference_logs[reference_log_name]["retain_mia_by_step"] = _mia
             if _tr is not None:
                 reference_logs[reference_log_name]["retain_forget_tr_by_step"] = _tr
+                # If "retain" (for forget_truth_ratio) was never set, use first step as aggregate so ks_test has a retain ref
+                if reference_logs[reference_log_name].get("retain") is None and _tr:
+                    first_step = next(iter(_tr.values()))
+                    if isinstance(first_step, dict) and first_step.get("value_by_index"):
+                        reference_logs[reference_log_name]["retain"] = first_step
         if reference_logs:
             kwargs.update({"reference_logs": reference_logs})
 

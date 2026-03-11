@@ -1362,26 +1362,32 @@ def _call_metric_at_step(
             if pre_compute_step:
                 metric_kwargs["pre_compute"] = pre_compute_step
 
-    # Step-matched retain reference for privleak / ks_test when retain trajectory is loaded
+    # Step-matched retain reference for privleak / ks_test when retain trajectory is loaded.
+    # Look up by step value first (canonical: retain files may key by actual step), then by step_index (position) for backward compat.
     if metric.name in ("privleak", "ks_test"):
         ref_logs = kwargs.get("reference_logs") or {}
         retain_logs = ref_logs.get("retain_model_logs") or {}
         step_index = kwargs.get("step_index")
-        if step_index is None:
-            step_index = kwargs.get("step")
-        if step_index is not None and retain_logs:
-            step_str = str(step_index)
-            step_retain = None
-            if metric.name == "privleak" and retain_logs.get("retain_mia_by_step") and step_str in retain_logs["retain_mia_by_step"]:
-                step_retain = retain_logs["retain_mia_by_step"][step_str]
-            elif metric.name == "ks_test" and retain_logs.get("retain_forget_tr_by_step") and step_str in retain_logs["retain_forget_tr_by_step"]:
-                step_retain = retain_logs["retain_forget_tr_by_step"][step_str]
-            if step_retain is not None:
-                ref_logs_step = copy.deepcopy(ref_logs)
-                if "retain_model_logs" not in ref_logs_step:
-                    ref_logs_step["retain_model_logs"] = {}
-                ref_logs_step["retain_model_logs"]["retain"] = step_retain
-                metric_kwargs["reference_logs"] = ref_logs_step
+        step_val = kwargs.get("step")
+        if step_index is None and step_val is not None:
+            step_index = step_val
+        step_retain = None
+        if retain_logs:
+            step_str_by_val = str(step_val) if step_val is not None else None
+            step_str_by_idx = str(step_index) if step_index is not None else None
+            if metric.name == "privleak" and retain_logs.get("retain_mia_by_step"):
+                by_step = retain_logs["retain_mia_by_step"]
+                step_retain = (by_step.get(step_str_by_val) if step_str_by_val else None) or (by_step.get(step_str_by_idx) if step_str_by_idx else None)
+            elif metric.name == "ks_test" and retain_logs.get("retain_forget_tr_by_step"):
+                by_step = retain_logs["retain_forget_tr_by_step"]
+                step_retain = (by_step.get(step_str_by_val) if step_str_by_val else None) or (by_step.get(step_str_by_idx) if step_str_by_idx else None)
+        if step_retain is not None:
+            ref_logs_step = copy.deepcopy(ref_logs)
+            if "retain_model_logs" not in ref_logs_step:
+                ref_logs_step["retain_model_logs"] = {}
+            ref_logs_step["retain_model_logs"]["retain"] = step_retain
+            metric_kwargs["reference_logs"] = ref_logs_step
+        # No fallback to aggregate ref_logs when step_retain is None: missing step match means we do not pass reference_logs; metric will fail/warn as designed.
 
     # Call the metric's underlying function
     # Note: We call _metric_fn directly, not evaluate(), because:
@@ -2671,14 +2677,14 @@ def trajectory_metrics(model, **kwargs):
                     pre_result = privleak_accumulators[step].aggregate()
                     ref_logs = kwargs.get("reference_logs") or {}
                     retain_logs = ref_logs.get("retain_model_logs") or {}
-                    step_index = run_steps_to_use.index(step) if step in run_steps_to_use else step
-                    step_str = str(step_index)
-                    if retain_logs.get("retain_mia_by_step") and step_str in retain_logs["retain_mia_by_step"]:
+                    by_step = retain_logs.get("retain_mia_by_step") or {}
+                    step_retain = by_step.get(str(step)) or by_step.get(str(run_steps_to_use.index(step) if step in run_steps_to_use else step))
+                    if step_retain is not None:
                         ref_logs = copy.deepcopy(ref_logs)
                         if "retain_model_logs" not in ref_logs:
                             ref_logs["retain_model_logs"] = {}
                         ref_logs["retain_model_logs"] = dict(retain_logs)
-                        ref_logs["retain_model_logs"]["retain"] = retain_logs["retain_mia_by_step"][step_str]
+                        ref_logs["retain_model_logs"]["retain"] = step_retain
                     privleak_result = _get_metric_from_registry("privleak")._metric_fn(
                         model=None,
                         pre_compute=pre_result,
@@ -2774,14 +2780,14 @@ def trajectory_metrics(model, **kwargs):
                     )
                     ref_logs = kwargs.get("reference_logs") or {}
                     retain_logs = ref_logs.get("retain_model_logs") or {}
-                    step_index = steps_to_use_dual.index(step) if step in steps_to_use_dual else step
-                    step_str = str(step_index)
-                    if retain_logs.get("retain_mia_by_step") and step_str in retain_logs["retain_mia_by_step"]:
+                    by_step = retain_logs.get("retain_mia_by_step") or {}
+                    step_retain = by_step.get(str(step)) or by_step.get(str(steps_to_use_dual.index(step) if step in steps_to_use_dual else step))
+                    if step_retain is not None:
                         ref_logs = copy.deepcopy(ref_logs)
                         if "retain_model_logs" not in ref_logs:
                             ref_logs["retain_model_logs"] = {}
                         ref_logs["retain_model_logs"] = dict(retain_logs)
-                        ref_logs["retain_model_logs"]["retain"] = retain_logs["retain_mia_by_step"][step_str]
+                        ref_logs["retain_model_logs"]["retain"] = step_retain
                     privleak_result = _get_metric_from_registry("privleak")._metric_fn(
                         model=dual_wrapper,
                         pre_compute=pre_result,
@@ -3004,10 +3010,18 @@ def trajectory_metrics(model, **kwargs):
                 if "privleak" in loaded_metrics:
                     arr = agg_value_by_view.get(first_view, {}).get("steps", {}).get("privleak", np.array([]))
                     if hasattr(arr, "__len__") and len(arr) > 0:
+                        ordered_steps = (
+                            list(run_steps_to_use)
+                            if run_steps_to_use is not None
+                            else sorted(step_values_by_view.get(first_view, {}).get("steps", {}).keys(), key=lambda x: (x if isinstance(x, (int, float)) else 0))
+                        )
+                        if len(ordered_steps) < len(arr):
+                            ordered_steps = list(range(len(arr)))
                         mia_by_step = {}
                         for i in range(len(arr)):
                             v = arr[i]
-                            mia_by_step[str(i)] = {"agg_value": float(v) if hasattr(v, "item") else v}
+                            step = ordered_steps[i] if i < len(ordered_steps) else i
+                            mia_by_step[str(step)] = {"agg_value": float(v) if hasattr(v, "item") else v}
                         out["mia_min_k_by_step"] = mia_by_step
                 if "truth_ratio" in loaded_metrics and step_vals:
                     ordered_steps = (
@@ -3023,7 +3037,7 @@ def trajectory_metrics(model, **kwargs):
                                 str(i): {"score": float(v) if v is not None else None}
                                 for i, v in enumerate(vals)
                             }
-                            tr_by_step[str(step_idx)] = {"value_by_index": value_by_index}
+                            tr_by_step[str(step)] = {"value_by_index": value_by_index}
                     if tr_by_step:
                         out["forget_truth_ratio_by_step"] = tr_by_step
             if executor is not None:
