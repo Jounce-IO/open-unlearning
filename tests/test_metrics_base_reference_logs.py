@@ -45,3 +45,33 @@ class TestReferenceLogsByStepLoading:
         assert ref["retain_mia_by_step"] == mock_logs["mia_min_k_by_step"]
         assert "retain_forget_tr_by_step" in ref
         assert ref["retain_forget_tr_by_step"] == mock_logs["forget_truth_ratio_by_step"]
+
+
+class TestReferenceLogsDoNotOverwriteWithNone:
+    """When multiple include keys map to the same access_key (e.g. retain), do not overwrite an existing value with None when a later key is missing (regression for retain slot)."""
+
+    def test_loader_preserves_retain_when_second_key_missing(self):
+        metric = UnlearningMetric("test_metric", _dummy_metric_fn)
+        # _logs has mia_min_k but not forget_truth_ratio (both map to access_key retain in trajectory_all)
+        mock_logs = {
+            "mia_min_k": {"forget": {}, "holdout": {}, "auc": 0.5, "agg_value": 0.5},
+            # forget_truth_ratio missing -> _logs.get("forget_truth_ratio", None) = None
+        }
+        with patch.object(metric, "load_logs_from_file", return_value=mock_logs):
+            kwargs = metric.prepare_kwargs_evaluate_metric(
+                Mock(),
+                "test_metric",
+                reference_logs={
+                    "retain_model_logs": {
+                        "path": "/tmp/fake_retain.json",
+                        "include": {
+                            "mia_min_k": {"access_key": "retain"},
+                            "forget_truth_ratio": {"access_key": "retain"},
+                        },
+                    }
+                },
+            )
+        ref = kwargs.get("reference_logs", {}).get("retain_model_logs") or {}
+        assert "retain" in ref
+        assert ref["retain"] is not None
+        assert ref["retain"] == mock_logs["mia_min_k"]

@@ -1334,8 +1334,8 @@ def _call_metric_at_step(
         )
     
     # Prepare kwargs for metric function
-    # Remove model, tokenizer, and pre_compute from kwargs (we pass computed pre_compute below)
-    kwargs_clean = {k: v for k, v in kwargs.items() if k not in ["model", "tokenizer", "pre_compute"]}
+    # Remove model, tokenizer, pre_compute, and reference_logs from kwargs (we pass computed pre_compute and step-specific reference_logs below)
+    kwargs_clean = {k: v for k, v in kwargs.items() if k not in ["model", "tokenizer", "pre_compute", "reference_logs"]}
     metric_config_no_precompute = {k: v for k, v in metric_config.items() if k != "pre_compute"}
     metric_kwargs = {
         "model": model_wrapper,
@@ -2665,7 +2665,7 @@ def trajectory_metrics(model, **kwargs):
                         pre_compute=pre_result,
                         reference_logs=ref_logs,
                         ref_value=privleak_cfg.get("ref_value", 0.5),
-                        **{k: v for k, v in kwargs.items() if k not in ("model", "tokenizer", "pre_compute")},
+                        **{k: v for k, v in kwargs.items() if k not in ("model", "tokenizer", "pre_compute", "reference_logs")},
                     )
                     pv = privleak_result.get("agg_value")
                     for view in include_views:
@@ -2768,7 +2768,7 @@ def trajectory_metrics(model, **kwargs):
                         pre_compute=pre_result,
                         reference_logs=ref_logs,
                         ref_value=privleak_cfg.get("ref_value", 0.5),
-                        **{k: v for k, v in kwargs.items() if k not in ("model", "tokenizer", "pre_compute")},
+                        **{k: v for k, v in kwargs.items() if k not in ("model", "tokenizer", "pre_compute", "reference_logs")},
                     )
                     pv = privleak_result.get("agg_value")
                     for view in include_views:

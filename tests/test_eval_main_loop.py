@@ -7,6 +7,7 @@ Without hasattr guard, LMEvalEvaluator raises AttributeError.
 
 import sys
 from pathlib import Path
+from unittest.mock import Mock, patch, MagicMock
 
 from omegaconf import OmegaConf
 
@@ -57,3 +58,34 @@ def test_eval_loop_handles_lmeval_without_attribute_error():
                 evaluator.metrics,
                 evaluator.eval_cfg.get("retain_logs_path"),
             )
+
+
+def test_evaluator_passes_eval_cfg_to_metric_fn_in_per_metric_loop():
+    """Evaluator must pass eval_cfg (and thus retain_reference_mode) to metric_fn so trajectory_metrics can write by_step keys."""
+    from evals.base import Evaluator
+    from evals import get_evaluators
+
+    eval_cfg = OmegaConf.create({
+        "handler": "TOFUEvaluator",
+        "output_dir": "/tmp/test_eval_cfg",
+        "overwrite": True,
+        "metrics": {
+            "trajectory_all": {
+                "handler": "trajectory_metrics",
+                "datasets": {},
+                "metrics": ["privleak", "truth_ratio"],
+            }
+        },
+    })
+    with patch("evals.base.get_metrics") as get_metrics_mock:
+        mock_metric_fn = Mock(return_value={"agg_value": 0.5})
+        get_metrics_mock.return_value = {"trajectory_all": mock_metric_fn}
+        evaluators = get_evaluators({"tofu_trajectory": eval_cfg})
+    ev = evaluators["tofu_trajectory"]
+    mock_model = MagicMock()
+    with patch.object(ev, "load_logs_from_file", return_value={}), patch.object(ev, "save_logs"), patch.object(ev, "prepare_model", return_value=mock_model):
+        ev.evaluate(mock_model)
+    mock_metric_fn.assert_called_once()
+    call_kwargs = mock_metric_fn.call_args[1]
+    assert "eval_cfg" in call_kwargs, "metric_fn must receive eval_cfg so trajectory_metrics can write by_step keys in retain_reference_mode"
+    assert call_kwargs["eval_cfg"] is ev.eval_cfg
