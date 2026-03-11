@@ -587,9 +587,14 @@ def _compute_retain_mu_by_step(
     rouge_type = trajectory_config.get("rouge_type") or kwargs.get("rouge_type", "rougeL_recall")
     rouge_scorer_instance = rouge_scorer.RougeScorer(["rouge1", "rougeL"], use_stemmer=True)
     per_step_lists = defaultdict(lambda: {"prob": [], "rouge": [], "tr": []})
+    _retain_batches = len(retain_dataloader)
+    _retain_log_interval = max(1, _retain_batches // 10) if _retain_batches else 1
+    logger.info("Retain MU: %s batches to process", _retain_batches)
 
     for batch_idx, batch in enumerate(retain_dataloader):
         gpu_set_phase("retain_mu_batch", batch_idx=batch_idx)
+        if batch_idx % _retain_log_interval == 0 or batch_idx == 0 or batch_idx == _retain_batches - 1:
+            logger.info("Retain MU batch %s/%s", batch_idx + 1, _retain_batches)
         input_ids = batch["input_ids"]
         labels = batch.get("labels")
         attention_mask = batch.get("attention_mask")
@@ -2001,10 +2006,18 @@ def trajectory_metrics(model, **kwargs):
             all_rouge_futures: list = []
             effective_length_by_index: dict[str, int] = {}
             prompt_len_by_index: dict[str, int] = {}
+            # Progress logging: log every 5% of batches or at least every 5 batches, plus first and last
+            _log_interval = max(1, expected_batches // 20) if expected_batches else 1
         # Process each batch
             for batch_idx, batch in enumerate(dataloader):
                 gpu_set_phase("trajectory_batch_start", batch_idx=batch_idx)
                 _batch_t0 = time.perf_counter()
+                if batch_idx % _log_interval == 0 or batch_idx == 0 or batch_idx == expected_batches - 1:
+                    _pct = 100 * (batch_idx + 1) / expected_batches if expected_batches else 0
+                    logger.info(
+                        "Trajectory batch %s/%s (%.0f%%), %s samples total",
+                        batch_idx + 1, expected_batches, _pct, n_samples,
+                    )
                 input_ids = batch["input_ids"]
                 labels = batch.get("labels")
                 attention_mask = batch.get("attention_mask")
@@ -2049,7 +2062,13 @@ def trajectory_metrics(model, **kwargs):
                     sample_kw["target_sequences"] = target_sequences
                     sample_kw["evaluation_mode"] = evaluation_mode
                 sampler_output = sampler.sample(**sample_kw)
+                _batch_elapsed = time.perf_counter() - _batch_t0
                 gpu_set_phase("trajectory_after_sampler", batch_idx=batch_idx)
+                if batch_idx % _log_interval == 0 or batch_idx == 0 or batch_idx == expected_batches - 1:
+                    logger.info(
+                        "Batch %s/%s: diffusion sampling done in %.1fs",
+                        batch_idx + 1, expected_batches, _batch_elapsed,
+                    )
 
                 # Extract logits and fixation steps
                 logits_history = sampler_output.logits_history
