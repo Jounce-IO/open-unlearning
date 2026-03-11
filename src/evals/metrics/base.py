@@ -126,11 +126,14 @@ class UnlearningMetric:
                     logger.warning(
                         f"{key} evals not present in the {path}, setting it to None, may result in error soon if code attempts to access."
                     )
-            # Retain trajectory: per-step refs for step-matched privleak/FQ
-            if _logs.get("mia_min_k_by_step") is not None:
-                reference_logs[reference_log_name]["retain_mia_by_step"] = _logs["mia_min_k_by_step"]
-            if _logs.get("forget_truth_ratio_by_step") is not None:
-                reference_logs[reference_log_name]["retain_forget_tr_by_step"] = _logs["forget_truth_ratio_by_step"]
+            # Retain trajectory: per-step refs for step-matched privleak/FQ (top-level or under trajectory_all)
+            _traj = _logs.get("trajectory_all") or {}
+            _mia = _logs.get("mia_min_k_by_step") or _traj.get("mia_min_k_by_step")
+            _tr = _logs.get("forget_truth_ratio_by_step") or _traj.get("forget_truth_ratio_by_step")
+            if _mia is not None:
+                reference_logs[reference_log_name]["retain_mia_by_step"] = _mia
+            if _tr is not None:
+                reference_logs[reference_log_name]["retain_forget_tr_by_step"] = _tr
         if reference_logs:
             kwargs.update({"reference_logs": reference_logs})
 

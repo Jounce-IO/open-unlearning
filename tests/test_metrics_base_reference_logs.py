@@ -46,6 +46,37 @@ class TestReferenceLogsByStepLoading:
         assert "retain_forget_tr_by_step" in ref
         assert ref["retain_forget_tr_by_step"] == mock_logs["forget_truth_ratio_by_step"]
 
+    def test_prepare_kwargs_finds_by_step_keys_under_trajectory_all(self):
+        """When retain file has by_step keys under trajectory_all (coalesced run), loader still finds them."""
+        metric = UnlearningMetric("test_metric", _dummy_metric_fn)
+        mock_logs = {
+            "trajectory_all": {
+                "agg_value": {},
+                "mia_min_k_by_step": {"0": {"agg_value": 0.2}, "1": {"agg_value": 0.3}},
+                "forget_truth_ratio_by_step": {
+                    "0": {"value_by_index": {"0": {"score": 0.5}}},
+                    "1": {"value_by_index": {"0": {"score": 0.6}}},
+                },
+            },
+            "run_info": {},
+        }
+        with patch.object(metric, "load_logs_from_file", return_value=mock_logs):
+            kwargs = metric.prepare_kwargs_evaluate_metric(
+                Mock(),
+                "test_metric",
+                reference_logs={
+                    "retain_model_logs": {
+                        "path": "/tmp/fake_retain.json",
+                        "include": {},
+                    }
+                },
+            )
+        ref = kwargs["reference_logs"].get("retain_model_logs") or {}
+        assert "retain_mia_by_step" in ref
+        assert ref["retain_mia_by_step"] == mock_logs["trajectory_all"]["mia_min_k_by_step"]
+        assert "retain_forget_tr_by_step" in ref
+        assert ref["retain_forget_tr_by_step"] == mock_logs["trajectory_all"]["forget_truth_ratio_by_step"]
+
 
 class TestReferenceLogsDoNotOverwriteWithNone:
     """When multiple include keys map to the same access_key (e.g. retain), do not overwrite an existing value with None when a later key is missing (regression for retain slot)."""
