@@ -94,6 +94,354 @@ def test_coalesced_trajectory_passes_reference_logs_to_metric():
         )
 
 
+def test_coalesced_trajectory_first_metric_without_reference_logs_completes():
+    """Coalesced path when first metric has no reference_logs: evaluate completes and metric is called (reference_logs may be absent)."""
+    from evals.base import Evaluator
+    from evals import get_evaluators
+
+    eval_cfg = OmegaConf.create({
+        "handler": "TOFUEvaluator",
+        "output_dir": "/tmp/test_coalesced_no_ref",
+        "overwrite": True,
+        "coalesce_trajectory_metrics": True,
+        "metrics": {
+            "trajectory_all": {
+                "handler": "trajectory_metrics",
+                "datasets": {},
+                "collators": {},
+                "metrics": ["privleak"],
+                "metric_display_names": ["trajectory_privleak"],
+            },
+            "trajectory_b": {
+                "handler": "trajectory_metrics",
+                "datasets": {},
+                "collators": {},
+                "metrics": ["privleak"],
+                "metric_display_names": ["trajectory_privleak_b"],
+            },
+        },
+    })
+    mock_metric = Mock(return_value={
+        "trajectory_all": {"agg_value": 0.5},
+        "trajectory_b": {"agg_value": 0.5},
+    })
+    with patch("evals.base.get_metrics") as get_metrics_mock:
+        get_metrics_mock.return_value = {
+            "trajectory_all": mock_metric,
+            "trajectory_b": Mock(return_value={"agg_value": 0.5}),
+        }
+        evaluators = get_evaluators({"tofu_trajectory": eval_cfg})
+    ev = evaluators["tofu_trajectory"]
+    mock_model = MagicMock()
+    with (
+        patch.object(ev, "load_logs_from_file", return_value={}),
+        patch.object(ev, "save_logs"),
+        patch.object(ev, "prepare_model", return_value=mock_model),
+    ):
+        ev.evaluate(mock_model)
+    mock_metric.assert_called_once()
+    call_kwargs = mock_metric.call_args[1]
+    assert "reference_logs" not in call_kwargs or call_kwargs.get("reference_logs") in (None, {}), (
+        "When first metric has no reference_logs config, we must not inject it."
+    )
+
+
+def test_coalesced_trajectory_empty_reference_logs_passed_as_empty_dict():
+    """Coalesced path when first metric has reference_logs: {} — metric receives reference_logs as empty dict."""
+    from evals.base import Evaluator
+    from evals import get_evaluators
+
+    eval_cfg = OmegaConf.create({
+        "handler": "TOFUEvaluator",
+        "output_dir": "/tmp/test_coalesced_empty_ref",
+        "overwrite": True,
+        "coalesce_trajectory_metrics": True,
+        "metrics": {
+            "trajectory_all": {
+                "handler": "trajectory_metrics",
+                "reference_logs": {},
+                "datasets": {},
+                "collators": {},
+                "metrics": ["privleak"],
+                "metric_display_names": ["trajectory_privleak"],
+            },
+            "trajectory_b": {
+                "handler": "trajectory_metrics",
+                "datasets": {},
+                "collators": {},
+                "metrics": ["privleak"],
+                "metric_display_names": ["trajectory_privleak_b"],
+            },
+        },
+    })
+    mock_metric = Mock(return_value={
+        "trajectory_all": {"agg_value": 0.5},
+        "trajectory_b": {"agg_value": 0.5},
+    })
+    with patch("evals.base.get_metrics") as get_metrics_mock:
+        get_metrics_mock.return_value = {
+            "trajectory_all": mock_metric,
+            "trajectory_b": Mock(return_value={"agg_value": 0.5}),
+        }
+        evaluators = get_evaluators({"tofu_trajectory": eval_cfg})
+    ev = evaluators["tofu_trajectory"]
+    mock_model = MagicMock()
+    with (
+        patch.object(ev, "load_logs_from_file", return_value={}),
+        patch.object(ev, "save_logs"),
+        patch.object(ev, "prepare_model", return_value=mock_model),
+    ):
+        ev.evaluate(mock_model)
+    mock_metric.assert_called_once()
+    call_kwargs = mock_metric.call_args[1]
+    assert "reference_logs" in call_kwargs
+    assert call_kwargs["reference_logs"] == {}
+
+
+def test_per_metric_path_passes_reference_logs():
+    """Per-metric path (no coalescing): single metric still receives reference_logs from its config."""
+    from evals.base import Evaluator
+    from evals import get_evaluators
+
+    with __retain_fixture_file__() as retain_path:
+        eval_cfg = OmegaConf.create({
+            "handler": "TOFUEvaluator",
+            "output_dir": "/tmp/test_per_metric_ref",
+            "overwrite": True,
+            "coalesce_trajectory_metrics": False,
+            "metrics": {
+                "trajectory_all": {
+                    "handler": "trajectory_metrics",
+                    "reference_logs": {
+                        "retain_model_logs": {
+                            "path": str(retain_path),
+                            "include": {"mia_min_k": {"access_key": "retain"}},
+                        },
+                    },
+                    "datasets": {},
+                    "collators": {},
+                    "metrics": ["privleak"],
+                    "metric_display_names": ["trajectory_privleak"],
+                },
+            },
+        })
+        mock_metric = Mock(return_value={"trajectory_all": {"agg_value": 0.5}})
+        with patch("evals.base.get_metrics") as get_metrics_mock:
+            get_metrics_mock.return_value = {"trajectory_all": mock_metric}
+            evaluators = get_evaluators({"tofu_trajectory": eval_cfg})
+        ev = evaluators["tofu_trajectory"]
+        mock_model = MagicMock()
+        with (
+            patch.object(ev, "load_logs_from_file", return_value={}),
+            patch.object(ev, "save_logs"),
+            patch.object(ev, "prepare_model", return_value=mock_model),
+        ):
+            ev.evaluate(mock_model)
+        mock_metric.assert_called_once()
+        call_kwargs = mock_metric.call_args[1]
+        assert "reference_logs" in call_kwargs
+        assert "retain_model_logs" in call_kwargs["reference_logs"]
+
+
+def test_coalesced_trajectory_three_metrics_still_passes_first_reference_logs():
+    """Coalesced path with three metrics: first metric's reference_logs is still passed."""
+    from evals.base import Evaluator
+    from evals import get_evaluators
+
+    with __retain_fixture_file__() as retain_path:
+        eval_cfg = OmegaConf.create({
+            "handler": "TOFUEvaluator",
+            "output_dir": "/tmp/test_coalesced_three",
+            "overwrite": True,
+            "coalesce_trajectory_metrics": True,
+            "retain_logs_path": str(retain_path),
+            "metrics": {
+                "trajectory_all": {
+                    "handler": "trajectory_metrics",
+                    "reference_logs": {
+                        "retain_model_logs": {
+                            "path": str(retain_path),
+                            "include": {"mia_min_k": {"access_key": "retain"}},
+                        },
+                    },
+                    "datasets": {},
+                    "collators": {},
+                    "metrics": ["privleak"],
+                    "metric_display_names": ["a"],
+                },
+                "trajectory_b": {
+                    "handler": "trajectory_metrics",
+                    "datasets": {},
+                    "collators": {},
+                    "metrics": ["privleak"],
+                    "metric_display_names": ["b"],
+                },
+                "trajectory_c": {
+                    "handler": "trajectory_metrics",
+                    "datasets": {},
+                    "collators": {},
+                    "metrics": ["privleak"],
+                    "metric_display_names": ["c"],
+                },
+            },
+        })
+        mock_metric = Mock(return_value={
+            "trajectory_all": {"agg_value": 0.5},
+            "trajectory_b": {"agg_value": 0.5},
+            "trajectory_c": {"agg_value": 0.5},
+        })
+        with patch("evals.base.get_metrics") as get_metrics_mock:
+            get_metrics_mock.return_value = {
+                "trajectory_all": mock_metric,
+                "trajectory_b": Mock(return_value={"agg_value": 0.5}),
+                "trajectory_c": Mock(return_value={"agg_value": 0.5}),
+            }
+            evaluators = get_evaluators({"tofu_trajectory": eval_cfg})
+        ev = evaluators["tofu_trajectory"]
+        mock_model = MagicMock()
+        with (
+            patch.object(ev, "load_logs_from_file", return_value={}),
+            patch.object(ev, "save_logs"),
+            patch.object(ev, "prepare_model", return_value=mock_model),
+        ):
+            ev.evaluate(mock_model)
+        mock_metric.assert_called_once()
+        call_kwargs = mock_metric.call_args[1]
+        assert "reference_logs" in call_kwargs
+        assert "retain_model_logs" in call_kwargs["reference_logs"]
+
+
+def test_coalesced_reference_logs_path_resolved_from_omegaconf():
+    """When first metric's reference_logs uses OmegaConf interpolation, path is resolved in merged_args."""
+    from evals.base import Evaluator
+    from evals import get_evaluators
+
+    with __retain_fixture_file__() as retain_path:
+        eval_cfg = OmegaConf.create({
+            "retain_logs_path": str(retain_path),
+            "handler": "TOFUEvaluator",
+            "output_dir": "/tmp/test_coalesced_resolve",
+            "overwrite": True,
+            "coalesce_trajectory_metrics": True,
+            "metrics": {
+                "trajectory_all": {
+                    "handler": "trajectory_metrics",
+                    "reference_logs": {
+                        "retain_model_logs": {
+                            "path": "${retain_logs_path}",
+                            "include": {"mia_min_k": {"access_key": "retain"}},
+                        },
+                    },
+                    "datasets": {},
+                    "collators": {},
+                    "metrics": ["privleak"],
+                    "metric_display_names": ["a"],
+                },
+                "trajectory_b": {
+                    "handler": "trajectory_metrics",
+                    "datasets": {},
+                    "collators": {},
+                    "metrics": ["privleak"],
+                    "metric_display_names": ["b"],
+                },
+            },
+        })
+        mock_metric = Mock(return_value={
+            "trajectory_all": {"agg_value": 0.5},
+            "trajectory_b": {"agg_value": 0.5},
+        })
+        with patch("evals.base.get_metrics") as get_metrics_mock:
+            get_metrics_mock.return_value = {
+                "trajectory_all": mock_metric,
+                "trajectory_b": Mock(return_value={"agg_value": 0.5}),
+            }
+            evaluators = get_evaluators({"tofu_trajectory": eval_cfg})
+        ev = evaluators["tofu_trajectory"]
+        mock_model = MagicMock()
+        with (
+            patch.object(ev, "load_logs_from_file", return_value={}),
+            patch.object(ev, "save_logs"),
+            patch.object(ev, "prepare_model", return_value=mock_model),
+        ):
+            ev.evaluate(mock_model)
+        mock_metric.assert_called_once()
+        call_kwargs = mock_metric.call_args[1]
+        assert "reference_logs" in call_kwargs
+        ref = call_kwargs["reference_logs"].get("retain_model_logs")
+        assert ref is not None
+        assert ref.get("path") == str(retain_path), (
+            "OmegaConf.to_container(resolve=True) should resolve ${retain_logs_path} to the actual path."
+        )
+
+
+def test_coalesced_reference_logs_fallback_when_to_container_raises():
+    """When OmegaConf.to_container raises in the reference_logs block, fallback to dict() so metric still receives reference_logs."""
+    from omegaconf import OmegaConf as OC
+    from evals.base import Evaluator
+    from evals import get_evaluators
+
+    with __retain_fixture_file__() as retain_path:
+        eval_cfg = OmegaConf.create({
+            "handler": "TOFUEvaluator",
+            "output_dir": "/tmp/test_coalesced_fallback",
+            "overwrite": True,
+            "coalesce_trajectory_metrics": True,
+            "retain_logs_path": str(retain_path),
+            "metrics": {
+                "trajectory_all": {
+                    "handler": "trajectory_metrics",
+                    "reference_logs": {
+                        "retain_model_logs": {
+                            "path": str(retain_path),
+                            "include": {"mia_min_k": {"access_key": "retain"}},
+                        },
+                    },
+                    "datasets": {},
+                    "collators": {},
+                    "metrics": ["privleak"],
+                    "metric_display_names": ["a"],
+                },
+                "trajectory_b": {
+                    "handler": "trajectory_metrics",
+                    "datasets": {},
+                    "collators": {},
+                    "metrics": ["privleak"],
+                    "metric_display_names": ["b"],
+                },
+            },
+        })
+        mock_metric = Mock(return_value={
+            "trajectory_all": {"agg_value": 0.5},
+            "trajectory_b": {"agg_value": 0.5},
+        })
+        with patch("evals.base.get_metrics") as get_metrics_mock:
+            get_metrics_mock.return_value = {
+                "trajectory_all": mock_metric,
+                "trajectory_b": Mock(return_value={"agg_value": 0.5}),
+            }
+            evaluators = get_evaluators({"tofu_trajectory": eval_cfg})
+        ev = evaluators["tofu_trajectory"]
+        mock_model = MagicMock()
+        real_to_container = OC.to_container
+        # First to_container call is for logs["config"] (eval_cfg), second is for reference_logs in coalesced block.
+        side_effects = [
+            lambda *a, **kw: real_to_container(*a, **kw),
+            RuntimeError("simulated"),
+        ]
+
+        with (
+            patch.object(ev, "load_logs_from_file", return_value={}),
+            patch.object(ev, "save_logs"),
+            patch.object(ev, "prepare_model", return_value=mock_model),
+        ):
+            with patch("omegaconf.OmegaConf.to_container", side_effect=side_effects):
+                ev.evaluate(mock_model)
+        mock_metric.assert_called_once()
+        call_kwargs = mock_metric.call_args[1]
+        assert "reference_logs" in call_kwargs
+        assert "retain_model_logs" in call_kwargs["reference_logs"]
+
+
 class __retain_fixture_file__:
     """Context manager that creates a minimal retain JSON and yields its path."""
 
