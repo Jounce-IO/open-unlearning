@@ -179,6 +179,13 @@ The metrics **privleak** and **forget_quality** compare the unlearned model to a
 
 3. **When retain_logs_path is None:** The evaluator logs a warning at the start of the run, at the start of evaluation, and when the metric runs. The run continues; privleak uses the default and forget_quality returns None.
 
+**Reference_logs loading and logs**
+
+The loader (`evals.metrics.base.UnlearningMetric.prepare_kwargs_evaluate_metric`) reads the JSON at `path` and fills `reference_logs` from the config’s `include` keys. For trajectory eval, only **mia_min_k** and **forget_truth_ratio** are requested (see `configs/eval/tofu_metrics/trajectory_all.yaml`). The loader also injects **retain_mia_by_step** and **retain_forget_tr_by_step** when present in the file (for step-matched privleak and forget_quality). You can tell load success from the logs:
+
+- **No usable keys:** `reference_logs: no usable keys found for retain_model_logs (path=...). privleak and forget_quality may fail or use fallbacks.` → Wrong path, missing file, or file has no expected keys.
+- **Partial or full:** `reference_logs: loaded retain_model_logs from <path>: found [retain, retain_mia_by_step, retain_forget_tr_by_step, ...]; missing requested: []` or `... missing requested: [key1, key2].` → Some or all requested keys were loaded; any missing key is logged separately as a warning.
+
 #### 2. Register the metric handler
 Register the handler to link the class to the configs via the class name in [`METRIC_REGISTRY`](../src/evals/metrics/__init__.py).
 

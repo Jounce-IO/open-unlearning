@@ -7,6 +7,10 @@ defaults:
   - ../../data/datasets@datasets: TOFU_MIA
   - ../../collator@collators: DataCollatorForSupervisedDatasetwithIndex
 
+# Reference logs: retain-model eval results for privleak and forget_quality (ks_test).
+# Only these two keys are required; the loader also injects retain_mia_by_step and
+# retain_forget_tr_by_step from the file when present (for step-matched comparison).
+# See evals.metrics.base UnlearningMetric.prepare_kwargs_evaluate_metric.
 reference_logs:
   retain_model_logs:
     path: ${eval.tofu_trajectory.retain_logs_path}
@@ -15,13 +19,6 @@ reference_logs:
         access_key: retain
       forget_truth_ratio:
         access_key: retain
-      # For PrivLeak/FQ step-matched comparison (trajectory_model_utility uses current model retain pass, not reference_logs)
-      retain_Q_A_Prob:
-        access_key: retain_Q_A_Prob
-      retain_Q_A_ROUGE:
-        access_key: retain_Q_A_ROUGE
-      retain_Truth_Ratio:
-        access_key: retain_Truth_Ratio
 
 pre_compute:
   mia_min_k:

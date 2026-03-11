@@ -62,9 +62,15 @@ class UnlearningMetric:
 
     def prepare_kwargs_evaluate_metric(self, model, metric_name, cache={}, **kwargs):
         """Prepare the kwargs required to call the metric_fn defined by user.
-        - Loads datasets, collators, results for pre_compute metrics
+
+        - Loads datasets, collators, and results for pre_compute metrics.
+        - Loads reference_logs from JSON when reference_logs config has a path: for each
+          entry, reads the file and populates requested include keys plus (when present)
+          retain_mia_by_step and retain_forget_tr_by_step for step-matched privleak/ks_test.
+          Logs a summary so you can distinguish "no usable keys found" (WARNING) from
+          "loaded: found [X]; missing [Y]" (INFO, or INFO + per-key WARNING for missing).
         Returns:
-            Dict: Updated kwargs with datasets, collators, pre_compute results loaded
+            Dict: Updated kwargs with data, collators, pre_compute, and reference_logs.
         """
         # Load datasets
         dataset_cfgs = kwargs.pop("datasets", None)
@@ -103,20 +109,29 @@ class UnlearningMetric:
         if pre_metric_results:
             kwargs.update({"pre_compute": pre_metric_results})
 
-        # Load reference logs
+        # Load reference logs from JSON (retain-model eval results for privleak / forget_quality).
+        # Only keys listed in reference_log_cfg.include are requested; the loader also injects
+        # retain_mia_by_step and retain_forget_tr_by_step from the file when present (for
+        # step-matched privleak/ks_test). Metrics that require reference_logs: privleak,
+        # forget_quality (ks_test), trajectory_privleak, trajectory_forget_quality (see
+        # evals.metrics.privacy.RETAIN_LOGS_METRICS). After loading we log a summary so you
+        # can distinguish "no keys found" (wrong path or empty file) from "partial" (some
+        # keys found, some missing).
         reference_logs_cfgs = kwargs.pop("reference_logs", {})
         reference_logs = {}
         for reference_log_name, reference_log_cfg in reference_logs_cfgs.items():
             path = reference_log_cfg.get("path", None)
             if path is None:
                 continue
-            include_cfgs = reference_log_cfg.get("include", None)
+            include_cfgs = reference_log_cfg.get("include", None) or {}
             assert path is not None, ValueError(
                 "path not specified for {reference_log_name} in {metric_name}"
             )
             _logs = self.load_logs_from_file(path)
             _traj = _logs.get("trajectory_all") or {}
             reference_logs[reference_log_name] = {}
+            found_include = []
+            missing_include = []
             for key, include_cfg in include_cfgs.items():
                 access_name = include_cfg.get("access_key", key)
                 _results = _logs.get(key, None)
@@ -136,12 +151,29 @@ class UnlearningMetric:
                         or _logs.get("trajectory_retain_Truth_Ratio")
                         or _traj.get("trajectory_retain_Truth_Ratio")
                     )
+                if _results is None and key == "retain_Q_A_Prob":
+                    _results = (
+                        _logs.get("retain_Q_A_Prob")
+                        or _traj.get("retain_Q_A_Prob")
+                        or _logs.get("trajectory_retain_Q_A_Prob")
+                        or _traj.get("trajectory_retain_Q_A_Prob")
+                    )
+                if _results is None and key == "retain_Q_A_ROUGE":
+                    _results = (
+                        _logs.get("retain_Q_A_ROUGE")
+                        or _traj.get("retain_Q_A_ROUGE")
+                        or _logs.get("trajectory_retain_Q_A_ROUGE")
+                        or _traj.get("trajectory_retain_Q_A_ROUGE")
+                    )
                 # Do not overwrite an existing value with None (e.g. mia_min_k -> retain then forget_truth_ratio -> retain; second key missing would otherwise clear retain)
                 if _results is not None or access_name not in reference_logs[reference_log_name]:
                     reference_logs[reference_log_name][access_name] = _results
-                if _results is None:
+                if _results is not None:
+                    found_include.append(key)
+                else:
+                    missing_include.append(key)
                     logger.warning(
-                        f"{key} evals not present in the {path}, setting it to None, may result in error soon if code attempts to access."
+                        f"reference_logs: key '{key}' not present in {path}, set to None; may cause errors if a metric accesses it."
                     )
             # Retain trajectory: per-step refs for step-matched privleak/FQ (top-level or under trajectory_all)
             _mia = _logs.get("mia_min_k_by_step") or _traj.get("mia_min_k_by_step")
@@ -155,6 +187,33 @@ class UnlearningMetric:
                     first_step = next(iter(_tr.values()))
                     if isinstance(first_step, dict) and first_step.get("value_by_index"):
                         reference_logs[reference_log_name]["retain"] = first_step
+            # Summary logging: distinguish "no usable keys" from "partial" or "full" load
+            ref = reference_logs[reference_log_name]
+            has_retain = ref.get("retain") is not None
+            has_mia_by_step = ref.get("retain_mia_by_step") is not None
+            has_tr_by_step = ref.get("retain_forget_tr_by_step") is not None
+            has_any_useful = has_retain or has_mia_by_step or has_tr_by_step or len(found_include) > 0
+            if not has_any_useful:
+                logger.warning(
+                    "reference_logs: no usable keys found for %s (path=%s). privleak and forget_quality may fail or use fallbacks.",
+                    reference_log_name,
+                    path,
+                )
+            else:
+                found_list = list(found_include)
+                if has_mia_by_step:
+                    found_list.append("retain_mia_by_step")
+                if has_tr_by_step:
+                    found_list.append("retain_forget_tr_by_step")
+                if has_retain:
+                    found_list.append("retain")
+                logger.info(
+                    "reference_logs: loaded %s from %s: found [%s]%s",
+                    reference_log_name,
+                    path,
+                    ", ".join(sorted(set(found_list))),
+                    f"; missing requested: [{', '.join(missing_include)}]" if missing_include else ".",
+                )
         if reference_logs:
             kwargs.update({"reference_logs": reference_logs})
 

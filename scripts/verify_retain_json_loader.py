@@ -1,6 +1,10 @@
 #!/usr/bin/env python3
-"""Prove that the reference_logs loader (base.py) can load the retain results JSON.
-Run from repo root: uv run python scripts/verify_retain_json_loader.py
+"""Verify that the reference_logs loader (evals.metrics.base) loads retain results JSON.
+
+Uses the same include as trajectory_all.yaml: only mia_min_k and forget_truth_ratio.
+The loader auto-injects retain_mia_by_step and retain_forget_tr_by_step when present.
+
+Run from open-unlearning: uv run python scripts/verify_retain_json_loader.py
 """
 from pathlib import Path
 import sys
@@ -24,15 +28,13 @@ def _dummy_fn(**kwargs):
 
 def main():
     metric = UnlearningMetric("trajectory_all", _dummy_fn)
+    # Match trajectory_all.yaml: only keys required for privleak/forget_quality
     reference_logs_config = {
         "retain_model_logs": {
             "path": str(retain_json),
             "include": {
                 "mia_min_k": {"access_key": "retain"},
                 "forget_truth_ratio": {"access_key": "retain"},
-                "retain_Q_A_Prob": {"access_key": "retain_Q_A_Prob"},
-                "retain_Q_A_ROUGE": {"access_key": "retain_Q_A_ROUGE"},
-                "retain_Truth_Ratio": {"access_key": "retain_Truth_Ratio"},
             },
         },
     }
