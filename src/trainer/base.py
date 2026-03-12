@@ -213,6 +213,7 @@ class FinetuneTrainer(Trainer):
         for name, dataset in eval_dataset.items():
             if dataset is None or len(dataset) == 0:
                 continue
+            # get_eval_dataloader may shard per rank; all-reduce below makes metrics global.
             dataloader = self.get_eval_dataloader(dataset)
             method_loss_sum = 0.0
             method_n = 0
