@@ -221,10 +221,12 @@ class Evaluator:
         for m in self.metrics:
             cfg = metrics_cfg.get(m)
             handlers.append(cfg.get("handler") if cfg is not None and hasattr(cfg, "get") else None)
+        # Use coalesced path for 2+ metrics when coalesce=True, or for 1 trajectory_metrics metric
+        # (so trajectory_all uses same path and avoids per-metric to_container → dict.args bug).
         all_trajectory = (
-            coalesce
-            and len(self.metrics) >= 2
+            len(self.metrics) >= 1
             and all(h == "trajectory_metrics" for h in handlers if h is not None)
+            and (coalesce or len(self.metrics) == 1)
         )
         if all_trajectory:
             already = [m for m in self.metrics if not overwrite and m in logs and logs[m]]
