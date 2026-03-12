@@ -189,9 +189,15 @@ class FinetuneTrainer(Trainer):
         ignore_keys: Optional[List[str]] = None,
         metric_key_prefix: str = "eval",
         trial: Dict[str, Any] = None,
-    ) -> Dict[str, float]:
-        """Evaluate on each named dataset; report method loss and constant CE loss per set."""
-        import torch as th
+    ):
+        """Evaluate on each named dataset; report method loss and constant CE loss per set.
+
+        Both method loss and CE loss are sample-weighted averages (sum of loss*bs / sum of bs).
+        Returns EvalLoopOutput to match parent Trainer.evaluate() return type.
+        """
+        import torch
+        from transformers.trainer_utils import EvalLoopOutput
+
         eval_metrics: Dict[str, float] = {}
         ce_available = False
         try:
@@ -215,7 +221,7 @@ class FinetuneTrainer(Trainer):
             self.model.eval()
             for batch in dataloader:
                 batch = self._prepare_inputs(batch)
-                with th.no_grad():
+                with torch.no_grad():
                     loss, _, _ = self.prediction_step(
                         self.model, batch, prediction_loss_only=False, ignore_keys=ignore_keys or []
                     )
@@ -245,4 +251,9 @@ class FinetuneTrainer(Trainer):
                 eval_metrics[f"{metric_key_prefix}_{name}_loss_ce"] = ce_loss_sum / ce_n
         if eval_metrics:
             self.log(_scalar_metrics_for_wandb(eval_metrics))
-        return eval_metrics
+        return EvalLoopOutput(
+            predictions=None,
+            label_ids=None,
+            metrics=eval_metrics,
+            num_samples=None,
+        )

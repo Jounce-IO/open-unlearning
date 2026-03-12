@@ -57,7 +57,9 @@ def test_four_way_evaluate_returns_method_and_ce_keys_when_available():
         eval_dataset=eval_dict,
         tokenizer=tokenizer,
     )
-    metrics = trainer.evaluate(eval_dataset=eval_dict, metric_key_prefix="eval")
+    result = trainer.evaluate(eval_dataset=eval_dict, metric_key_prefix="eval")
+    # Four-way path returns EvalLoopOutput to match parent Trainer.evaluate()
+    metrics = result.metrics
     assert "eval_forget_loss" in metrics
     assert "eval_retain_loss" in metrics
     assert isinstance(metrics["eval_forget_loss"], (int, float))
