@@ -5,9 +5,10 @@ from typing import Dict, List, Optional, Union
 import os
 import numpy as np
 import logging
+import torch
 from transformers import Trainer
 from torch.utils.data import Dataset
-from transformers.trainer_utils import PREFIX_CHECKPOINT_DIR
+from transformers.trainer_utils import EvalLoopOutput, PREFIX_CHECKPOINT_DIR
 from typing import Any
 
 logger = logging.getLogger(__name__)
@@ -194,11 +195,10 @@ class FinetuneTrainer(Trainer):
 
         Both method loss and CE loss are sample-weighted averages (sum of loss*bs / sum of bs).
         Returns EvalLoopOutput to match parent Trainer.evaluate() return type.
+        Under multi-GPU, sums and counts are all-reduced so metrics are global; logging on rank 0 only.
         """
-        import torch
-        from transformers.trainer_utils import EvalLoopOutput
-
         eval_metrics: Dict[str, float] = {}
+        device = getattr(self.args, "device", torch.device("cpu"))
         ce_available = False
         try:
             from dllm.core.schedulers import LinearAlphaScheduler
@@ -245,11 +245,23 @@ class FinetuneTrainer(Trainer):
                                 ce_n += batch["input_ids"].size(0)
                         except Exception:
                             pass
+            # All-reduce so multi-GPU runs get correct global averages and a single log.
+            stats = torch.tensor(
+                [method_loss_sum, float(method_n), ce_loss_sum, float(ce_n)],
+                device=device,
+                dtype=torch.float64,
+            )
+            if torch.distributed.is_available() and torch.distributed.is_initialized():
+                torch.distributed.all_reduce(stats, op=torch.distributed.ReduceOp.SUM)
+            method_loss_sum = stats[0].item()
+            method_n = int(round(stats[1].item()))
+            ce_loss_sum = stats[2].item()
+            ce_n = int(round(stats[3].item()))
             if method_n > 0:
                 eval_metrics[f"{metric_key_prefix}_{name}_loss"] = method_loss_sum / method_n
             if ce_n > 0:
                 eval_metrics[f"{metric_key_prefix}_{name}_loss_ce"] = ce_loss_sum / ce_n
-        if eval_metrics:
+        if eval_metrics and self.is_world_process_zero():
             self.log(_scalar_metrics_for_wandb(eval_metrics))
         return EvalLoopOutput(
             predictions=None,
