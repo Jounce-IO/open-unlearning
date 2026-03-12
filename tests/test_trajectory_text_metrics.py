@@ -345,10 +345,11 @@ class TestTrajectoryMetricsWithTwoMetrics:
             # This should run without errors
             result = raw_fn(model, **kwargs)
             
-            # Check result structure (agg_value is keyed by view: full, eos; then traj type)
+            # Check result structure (unified: one display key or legacy top-level agg_value)
             assert isinstance(result, dict)
-            if "agg_value" in result:
-                agg_value_by_view = result["agg_value"]
+            payload = result if "agg_value" in result else (next(iter(result.values())) if len(result) == 1 else {})
+            if payload and "agg_value" in payload:
+                agg_value_by_view = payload["agg_value"]
                 assert isinstance(agg_value_by_view, dict)
                 # At least one view (e.g. "full") present
                 views = [k for k in agg_value_by_view if k in ("full", "eos")]

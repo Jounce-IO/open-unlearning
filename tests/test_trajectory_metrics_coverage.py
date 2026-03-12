@@ -26,6 +26,18 @@ from evals.metrics.trajectory_metrics import (
 from evals.metrics import METRICS_REGISTRY
 
 
+def _trajectory_result_payload(result):
+    """Unified shape: result may be {display_key: {agg_value, value_by_index, step_distribution}} or legacy {agg_value, ...}. Return the dict that contains agg_value (and step_distribution if present)."""
+    if not isinstance(result, dict):
+        return {}
+    if "agg_value" in result and result.get("step_distribution") is not None:
+        return result
+    for v in result.values():
+        if isinstance(v, dict) and "agg_value" in v:
+            return v
+    return result
+
+
 class TestGetSamplerFromModelCoverage:
     """Tests to cover missing lines in _get_sampler_from_model."""
     
@@ -342,8 +354,9 @@ class TestTrajectoryMetricsMainCoverage:
                     batch_size=1,
                 )
                 
-                assert "agg_value" in result
-                assert "step_distribution" in result
+                payload = _trajectory_result_payload(result)
+                assert "agg_value" in payload
+                assert "step_distribution" in payload
     
     def test_empty_logits_history_continue(self):
         """Test lines 703-704: empty logits_history continues."""
@@ -372,7 +385,8 @@ class TestTrajectoryMetricsMainCoverage:
             batch_size=1,
         )
         
-        assert "agg_value" in result
+        payload = _trajectory_result_payload(result)
+        assert "agg_value" in payload
     
     def test_none_fixation_steps_continue(self):
         """Test lines 707-708: None fixation_steps continues."""
@@ -401,7 +415,8 @@ class TestTrajectoryMetricsMainCoverage:
             batch_size=1,
         )
         
-        assert "agg_value" in result
+        payload = _trajectory_result_payload(result)
+        assert "agg_value" in payload
     
     def test_fixation_steps_padding(self):
         """Test lines 946-950: fixation_steps padding when shorter than L.
@@ -449,7 +464,8 @@ class TestTrajectoryMetricsMainCoverage:
                     tokenizer=tokenizer,
                     batch_size=1,
                 )
-                assert "agg_value" in result
+                payload = _trajectory_result_payload(result)
+                assert "agg_value" in payload
     
     def test_generated_labels_padding(self):
         """Test lines 986-993: generated labels padding when shorter than L.
@@ -495,7 +511,8 @@ class TestTrajectoryMetricsMainCoverage:
                     tokenizer=tokenizer,
                     batch_size=1,
                 )
-                assert "agg_value" in result
+                payload = _trajectory_result_payload(result)
+                assert "agg_value" in payload
     
     def test_result_dict_value_by_index_extraction(self):
         """Test lines 837-866: result dict with value_by_index extraction."""
@@ -539,7 +556,8 @@ class TestTrajectoryMetricsMainCoverage:
                     batch_size=1,
                 )
                 
-                assert "agg_value" in result
+                payload = _trajectory_result_payload(result)
+                assert "agg_value" in payload
     
     def test_result_dict_first_numeric_value(self):
         """Test lines 862-866: result dict with first numeric value."""
@@ -581,7 +599,8 @@ class TestTrajectoryMetricsMainCoverage:
                     batch_size=1,
                 )
                 
-                assert "agg_value" in result
+                payload = _trajectory_result_payload(result)
+                assert "agg_value" in payload
     
     def test_result_list_first_numeric_value(self):
         """Test lines 873-880: result list with first numeric value."""
@@ -623,7 +642,8 @@ class TestTrajectoryMetricsMainCoverage:
                     batch_size=1,
                 )
                 
-                assert "agg_value" in result
+                payload = _trajectory_result_payload(result)
+                assert "agg_value" in payload
     
     def test_result_numeric_value(self):
         """Test line 882: result is numeric value."""
@@ -664,7 +684,8 @@ class TestTrajectoryMetricsMainCoverage:
                     batch_size=1,
                 )
                 
-                assert "agg_value" in result
+                payload = _trajectory_result_payload(result)
+                assert "agg_value" in payload
     
     def test_aggregation_missing_step_nan(self):
         """Test line 927: missing step in aggregation results in NaN."""
@@ -716,9 +737,10 @@ class TestTrajectoryMetricsMainCoverage:
                     batch_size=1,
                 )
                 
-                assert "agg_value" in result
+                payload = _trajectory_result_payload(result)
+                assert "agg_value" in payload
                 # agg_value is keyed by view first (e.g. "full", "eos"), then traj ("steps"), then metric name
-                agg_by_view = result["agg_value"]
+                agg_by_view = payload["agg_value"]
                 first_view = next(iter(agg_by_view.keys()))
                 agg_array = agg_by_view[first_view]["steps"]["probability"]
                 assert len(agg_array) > 0
@@ -774,7 +796,8 @@ class TestTrajectoryMetricsHighImportance:
                     batch_size=1,
                 )
                 
-                assert "agg_value" in result
+                payload = _trajectory_result_payload(result)
+                assert "agg_value" in payload
     
     def test_result_dict_value_by_index_with_first_numeric(self):
         """Test lines 851-856: value_by_index with first numeric value (not prob/score/value)."""
@@ -821,7 +844,8 @@ class TestTrajectoryMetricsHighImportance:
                     batch_size=1,
                 )
                 
-                assert "agg_value" in result
+                payload = _trajectory_result_payload(result)
+                assert "agg_value" in payload
     
     def test_result_dict_with_prob_key(self):
         """Test line 857-858: result dict with prob key."""
@@ -865,7 +889,8 @@ class TestTrajectoryMetricsHighImportance:
                     batch_size=1,
                 )
                 
-                assert "agg_value" in result
+                payload = _trajectory_result_payload(result)
+                assert "agg_value" in payload
     
     def test_result_dict_with_score_key(self):
         """Test line 859-860: result dict with score key."""
@@ -909,7 +934,8 @@ class TestTrajectoryMetricsHighImportance:
                     batch_size=1,
                 )
                 
-                assert "agg_value" in result
+                payload = _trajectory_result_payload(result)
+                assert "agg_value" in payload
     
     def test_result_dict_first_numeric_fallback(self):
         """Test lines 861-866: result dict with first numeric value fallback."""
@@ -953,7 +979,8 @@ class TestTrajectoryMetricsHighImportance:
                     batch_size=1,
                 )
                 
-                assert "agg_value" in result
+                payload = _trajectory_result_payload(result)
+                assert "agg_value" in payload
     
     def test_result_list_with_prob(self):
         """Test line 871-872: result list with dict containing prob."""
@@ -997,7 +1024,8 @@ class TestTrajectoryMetricsHighImportance:
                     batch_size=1,
                 )
                 
-                assert "agg_value" in result
+                payload = _trajectory_result_payload(result)
+                assert "agg_value" in payload
     
     def test_result_list_with_score(self):
         """Test line 873-874: result list with dict containing score."""
@@ -1041,7 +1069,8 @@ class TestTrajectoryMetricsHighImportance:
                     batch_size=1,
                 )
                 
-                assert "agg_value" in result
+                payload = _trajectory_result_payload(result)
+                assert "agg_value" in payload
     
     def test_result_list_first_numeric_fallback(self):
         """Test lines 875-880: result list with dict containing first numeric value."""
@@ -1085,7 +1114,8 @@ class TestTrajectoryMetricsHighImportance:
                     batch_size=1,
                 )
                 
-                assert "agg_value" in result
+                payload = _trajectory_result_payload(result)
+                assert "agg_value" in payload
     
     def test_result_numeric_direct(self):
         """Test line 882: result is direct numeric value."""
@@ -1129,7 +1159,8 @@ class TestTrajectoryMetricsHighImportance:
                     batch_size=1,
                 )
                 
-                assert "agg_value" in result
+                payload = _trajectory_result_payload(result)
+                assert "agg_value" in payload
     
     def test_result_dict_value_by_index_with_prob_key(self):
         """Test lines 849-850: value_by_index with prob key in first_value dict."""
@@ -1176,7 +1207,8 @@ class TestTrajectoryMetricsHighImportance:
                     batch_size=1,
                 )
                 
-                assert "agg_value" in result
+                payload = _trajectory_result_payload(result)
+                assert "agg_value" in payload
 
 
 class TestTrajectoryMetricsMediumImportance:
@@ -1271,7 +1303,8 @@ class TestTrajectoryMetricsMediumImportance:
                 )
                 
                 # Should still return results (with None for failed steps)
-                assert "agg_value" in result
+                payload = _trajectory_result_payload(result)
+                assert "agg_value" in payload
     
     def test_metric_error_not_generation_related_raises(self):
         """Test lines 521-525: error not generation-related raises ValueError."""

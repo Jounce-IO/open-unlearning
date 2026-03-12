@@ -2990,10 +2990,9 @@ def trajectory_metrics(model, **kwargs):
         if prompt_len_by_index:
             trajectory_step_metadata["prompt_len_by_index"] = prompt_len_by_index
 
-        # Single-pass: return one result per display name so evaluator merges into logs.
+        # Single path: build one result dict; display part (per-name or single key), then canonical keys once.
         internal_names = list(loaded_metrics.keys())
         if full_display_order and len(full_display_order) >= len(full_internal_order):
-            # Map each (filtered) internal name to its display name by original config order
             try:
                 display_names = [
                     full_display_order[full_internal_order.index(k)]
@@ -3004,10 +3003,16 @@ def trajectory_metrics(model, **kwargs):
                 display_names = full_display_order[: len(internal_names)]
         else:
             display_names = list(full_display_order)[: len(internal_names)] if full_display_order else []
+        display_key = (
+            full_display_order[0]
+            if full_display_order
+            else kwargs.get("metric_name", "trajectory_all")
+        )
+
+        result = {}
         if len(display_names) == len(internal_names) and len(internal_names) > 0:
-            out = {}
             for display_name, internal_name in zip(display_names, internal_names):
-                out[display_name] = {
+                result[display_name] = {
                     "agg_value": {
                         view: {
                             traj: {internal_name: agg_value_by_view[view][traj][internal_name]}
@@ -3024,58 +3029,77 @@ def trajectory_metrics(model, **kwargs):
                         for view in include_views
                     },
                 }
-            out["trajectory_step_metadata"] = {
+            result["trajectory_step_metadata"] = {
                 "agg_value": None,
                 "trajectory_step_metadata": trajectory_step_metadata,
             }
-            # Retain trajectory: per-step refs for step-matched FQ/PrivLeak when loading later.
-            eval_cfg = kwargs.get("eval_cfg")
-            if eval_cfg is not None and getattr(eval_cfg, "get", lambda k, d=None: d)("retain_reference_mode", False):
-                first_view = include_views[0] if include_views else "full"
-                step_vals = step_values_by_view.get(first_view, {}).get("steps", {})
-                if "privleak" in loaded_metrics:
-                    arr = agg_value_by_view.get(first_view, {}).get("steps", {}).get("privleak", np.array([]))
-                    if hasattr(arr, "__len__") and len(arr) > 0:
-                        ordered_steps = (
-                            list(run_steps_to_use)
-                            if run_steps_to_use is not None
-                            else sorted(step_values_by_view.get(first_view, {}).get("steps", {}).keys(), key=lambda x: (x if isinstance(x, (int, float)) else 0))
-                        )
-                        if len(ordered_steps) < len(arr):
-                            ordered_steps = list(range(len(arr)))
-                        mia_by_step = {}
-                        for i in range(len(arr)):
-                            v = arr[i]
-                            step = ordered_steps[i] if i < len(ordered_steps) else i
-                            mia_by_step[str(step)] = {"agg_value": float(v) if hasattr(v, "item") else v}
-                        out["mia_min_k_by_step"] = mia_by_step
-                if "truth_ratio" in loaded_metrics and step_vals:
+        else:
+            result[display_key] = {
+                "agg_value": agg_value_by_view,
+                "value_by_index": {},
+                "step_distribution": step_distribution_by_view,
+            }
+
+        eval_cfg = kwargs.get("eval_cfg")
+        if eval_cfg is not None and getattr(eval_cfg, "get", lambda k, d=None: d)("retain_reference_mode", False):
+            first_view = include_views[0] if include_views else "full"
+            step_vals = step_values_by_view.get(first_view, {}).get("steps", {})
+            if "privleak" in loaded_metrics:
+                arr = agg_value_by_view.get(first_view, {}).get("steps", {}).get("privleak", np.array([]))
+                if hasattr(arr, "__len__") and len(arr) > 0:
                     ordered_steps = (
                         list(run_steps_to_use)
                         if run_steps_to_use is not None
-                        else sorted(step_vals.keys(), key=lambda x: (x if isinstance(x, (int, float)) else 0))
+                        else sorted(step_values_by_view.get(first_view, {}).get("steps", {}).keys(), key=lambda x: (x if isinstance(x, (int, float)) else 0))
                     )
-                    tr_by_step = {}
-                    for step_idx, step in enumerate(ordered_steps):
-                        if step in step_vals and "truth_ratio" in step_vals[step]:
-                            vals = step_vals[step]["truth_ratio"]
-                            value_by_index = {
-                                str(i): {"score": float(v) if v is not None else None}
-                                for i, v in enumerate(vals)
-                            }
-                            tr_by_step[str(step)] = {"value_by_index": value_by_index}
-                    if tr_by_step:
-                        out["forget_truth_ratio_by_step"] = tr_by_step
-            if executor is not None:
-                executor.shutdown(wait=True)
-            return out
+                    if len(ordered_steps) < len(arr):
+                        ordered_steps = list(range(len(arr)))
+                    mia_by_step = {}
+                    for i in range(len(arr)):
+                        v = arr[i]
+                        step = ordered_steps[i] if i < len(ordered_steps) else i
+                        mia_by_step[str(step)] = {"agg_value": float(v) if hasattr(v, "item") else v}
+                    result["mia_min_k_by_step"] = mia_by_step
+                    first_mia = next(iter(mia_by_step.values()), None)
+                    if first_mia is not None and isinstance(first_mia.get("agg_value"), (int, float)):
+                        result["mia_min_k"] = {"agg_value": first_mia["agg_value"]}
+                    else:
+                        mean_val = float(np.nanmean(arr)) if hasattr(arr, "__len__") and len(arr) > 0 else 0.0
+                        result["mia_min_k"] = {"agg_value": mean_val}
+            if "truth_ratio" in loaded_metrics and step_vals:
+                ordered_steps = (
+                    list(run_steps_to_use)
+                    if run_steps_to_use is not None
+                    else sorted(step_vals.keys(), key=lambda x: (x if isinstance(x, (int, float)) else 0))
+                )
+                tr_by_step = {}
+                for step in ordered_steps:
+                    if step in step_vals and "truth_ratio" in step_vals[step]:
+                        vals = step_vals[step]["truth_ratio"]
+                        value_by_index = {
+                            str(i): {"score": float(v) if v is not None else None}
+                            for i, v in enumerate(vals)
+                        }
+                        tr_by_step[str(step)] = {"value_by_index": value_by_index}
+                if tr_by_step:
+                    result["forget_truth_ratio_by_step"] = tr_by_step
+                    first_ftr = next(iter(tr_by_step.values()), None)
+                    if first_ftr is not None and isinstance(first_ftr.get("value_by_index"), dict):
+                        result["forget_truth_ratio"] = dict(first_ftr)
+                    elif first_ftr is not None and isinstance(first_ftr.get("agg_value"), (int, float)):
+                        result["forget_truth_ratio"] = {"agg_value": first_ftr["agg_value"]}
+                    else:
+                        all_scores = []
+                        for st_v in tr_by_step.values():
+                            vbi = st_v.get("value_by_index") or {}
+                            for ent in vbi.values():
+                                if isinstance(ent, dict) and "score" in ent and isinstance(ent["score"], (int, float)):
+                                    all_scores.append(ent["score"])
+                        agg = float(np.nanmean(all_scores)) if all_scores else 0.0
+                        result["forget_truth_ratio"] = {"agg_value": agg}
 
         if executor is not None:
             executor.shutdown(wait=True)
-        return {
-            "agg_value": agg_value_by_view,
-            "value_by_index": {},
-            "step_distribution": step_distribution_by_view,
-        }
+        return result
 
 
