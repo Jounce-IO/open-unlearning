@@ -199,6 +199,7 @@ class FinetuneTrainer(Trainer):
         """
         eval_metrics: Dict[str, float] = {}
         device = getattr(self.args, "device", torch.device("cpu"))
+        num_samples = 0
         ce_available = False
         try:
             from dllm.core.schedulers import LinearAlphaScheduler
@@ -262,11 +263,12 @@ class FinetuneTrainer(Trainer):
                 eval_metrics[f"{metric_key_prefix}_{name}_loss"] = method_loss_sum / method_n
             if ce_n > 0:
                 eval_metrics[f"{metric_key_prefix}_{name}_loss_ce"] = ce_loss_sum / ce_n
+            num_samples += len(dataset)
         if eval_metrics and self.is_world_process_zero():
             self.log(_scalar_metrics_for_wandb(eval_metrics))
         return EvalLoopOutput(
             predictions=None,
             label_ids=None,
             metrics=eval_metrics,
-            num_samples=None,
+            num_samples=num_samples if num_samples > 0 else None,
         )
