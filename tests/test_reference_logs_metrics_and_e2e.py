@@ -485,7 +485,7 @@ class TestTrajectoryPerStepRefs:
         assert captured.get("reference_logs", {}).get("retain_model_logs", {}).get("retain") == {"agg_value": 0.28}
 
     def test_H4_per_step_ref_missing_raises(self):
-        """H4: reference provided but step 10 not in retain_mia_by_step → trajectory raises; no fallback."""
+        """H4: reference provided but step 10 not in retain_mia_by_step → RetainReferenceValidationError raised (real error, not just logged)."""
         from evals.metrics.trajectory_metrics import _call_metric_at_step
 
         mock_metric = Mock()
@@ -498,7 +498,7 @@ class TestTrajectoryPerStepRefs:
         }
         logits = torch.zeros(50, 5)
         batch_template = {"input_ids": torch.zeros(1, 5, dtype=torch.long), "labels": torch.zeros(1, 5, dtype=torch.long)}
-        with pytest.raises((RetainReferenceValidationError, ValueError)):
+        with pytest.raises(RetainReferenceValidationError) as exc_info:
             _call_metric_at_step(
                 metric=mock_metric,
                 logits=logits,
@@ -507,6 +507,32 @@ class TestTrajectoryPerStepRefs:
                 step_index=10,
                 step=10,
             )
+        assert "reference_logs was provided" in str(exc_info.value)
+
+    def test_H4_ks_test_per_step_ref_missing_raises(self):
+        """Reference provided but step not in retain_forget_tr_by_step → RetainReferenceValidationError raised (real error, not just logged)."""
+        from evals.metrics.trajectory_metrics import _call_metric_at_step
+
+        mock_metric = Mock()
+        mock_metric.name = "ks_test"
+        mock_metric._metric_fn = lambda **kw: {"agg_value": 0.5}
+        ref_logs = {
+            "retain_model_logs": {
+                "retain_forget_tr_by_step": {"0": {"value_by_index": {"0": {"score": 0.5}}, "agg_value": 0.5}},
+            }
+        }
+        logits = torch.zeros(50, 5)
+        batch_template = {"input_ids": torch.zeros(1, 5, dtype=torch.long), "labels": torch.zeros(1, 5, dtype=torch.long)}
+        with pytest.raises(RetainReferenceValidationError) as exc_info:
+            _call_metric_at_step(
+                metric=mock_metric,
+                logits=logits,
+                batch_template=batch_template,
+                reference_logs=ref_logs,
+                step_index=5,
+                step=5,
+            )
+        assert "reference_logs was provided" in str(exc_info.value)
 
     def test_H5_both_metrics_at_step_receive_correct_slots(self):
         """H5: Both privleak and ks_test at same step; privleak gets retain from retain_mia_by_step, ks_test gets retain_ftr from retain_forget_tr_by_step."""

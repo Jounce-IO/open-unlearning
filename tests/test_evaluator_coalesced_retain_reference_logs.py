@@ -196,8 +196,9 @@ def test_coalesced_trajectory_empty_reference_logs_passed_as_empty_dict():
         ev.evaluate(mock_model)
     mock_metric.assert_called_once()
     call_kwargs = mock_metric.call_args[1]
-    assert "reference_logs" in call_kwargs
-    assert call_kwargs["reference_logs"] == {}
+    # When config has empty reference_logs (no path), we do not pass reference_logs so the metric
+    # does not require step-matched reference (e.g. retain_reference_mode run).
+    assert "reference_logs" not in call_kwargs
 
 
 def test_per_metric_path_passes_reference_logs():

@@ -306,15 +306,26 @@ class Evaluator:
                 if first_reference_logs is not None:
                     try:
                         from omegaconf import OmegaConf
-                        merged_args["reference_logs"] = OmegaConf.to_container(
+                        ref_container = OmegaConf.to_container(
                             first_reference_logs, resolve=True
                         )
+                        # Only pass reference_logs when path is set (non-null). When path is null
+                        # (e.g. retain_reference_mode run producing the reference), do not pass
+                        # so the metric does not require step-matched reference data.
+                        rml = (ref_container or {}).get("retain_model_logs") or {}
+                        path_val = rml.get("path") if hasattr(rml, "get") else None
+                        if path_val and str(path_val).strip().lower() not in ("null", "none", ""):
+                            merged_args["reference_logs"] = ref_container
                     except Exception:
-                        merged_args["reference_logs"] = (
+                        ref_container = (
                             dict(first_reference_logs)
                             if hasattr(first_reference_logs, "items")
                             else first_reference_logs
                         )
+                        rml = (ref_container or {}).get("retain_model_logs") or {}
+                        path_val = rml.get("path") if hasattr(rml, "get") else None
+                        if path_val and str(path_val).strip().lower() not in ("null", "none", ""):
+                            merged_args["reference_logs"] = ref_container
             result = first_metric(
                 model,
                 metric_name=first_name,

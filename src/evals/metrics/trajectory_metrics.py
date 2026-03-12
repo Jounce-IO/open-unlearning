@@ -1120,6 +1120,9 @@ def _compute_pre_compute_metrics_at_step(
             pre_compute_results[access_key] = pre_result
 
         except Exception as e:
+            from evals.metrics.base import RetainReferenceValidationError
+            if isinstance(e, RetainReferenceValidationError):
+                raise
             logger.warning(
                 f"Error computing pre-compute metric {pre_metric_name} at step: {e}",
                 exc_info=True
@@ -1507,6 +1510,9 @@ def _call_metric_at_step(
             result = batch_fn(model=model_wrapper, batch=batch)
             return result
         except Exception as e:
+            from evals.metrics.base import RetainReferenceValidationError
+            if isinstance(e, RetainReferenceValidationError):
+                raise
             logger.warning(
                 f"Error calling batch function for {metric_name}: {e}. "
                 f"Falling back to metric function.",
@@ -2541,6 +2547,9 @@ def trajectory_metrics(model, **kwargs):
                                         torch.cuda.empty_cache()
                         
                                 except Exception as e:
+                                    from evals.metrics.base import RetainReferenceValidationError
+                                    if isinstance(e, RetainReferenceValidationError):
+                                        raise
                                     logger.warning(
                                         f"Error computing {metric_name} at step {step} for {traj_name}: {e}",
                                         exc_info=True
