@@ -284,6 +284,74 @@ class TestSinglePathOneReturnNoEarlyExit:
         assert "agg_value" in payload
 
 
+class TestRetainMuComponentsByStep:
+    """When hm_aggregate is used with a retain dataset, result includes retain_mu_components_by_step."""
+
+    def test_retain_mu_components_by_step_present_when_hm_aggregate_and_retain_data(self):
+        """With hm_aggregate in metrics and data.retain, result has retain_mu_components_by_step with Prob, ROUGE, Truth_Ratio per step."""
+        model, _, data_list, collator, tokenizer = _minimal_model_sampler_data()
+        data = {"forget": data_list, "retain": data_list}
+        retain_agg_stub = {
+            "0": {
+                "retain_Q_A_Prob": {"agg_value": 0.5},
+                "retain_Q_A_ROUGE": {"agg_value": 0.3},
+                "retain_Truth_Ratio": {"agg_value": 0.9},
+            },
+        }
+        trajectory_metrics_fn = METRICS_REGISTRY["trajectory_metrics"]._metric_fn
+        with patch(
+            "evals.metrics.trajectory_metrics._call_metric_at_step",
+            return_value={"agg_value": 0.5},
+        ), patch(
+            "evals.metrics.trajectory_metrics._compute_retain_mu_by_step",
+            return_value=retain_agg_stub,
+        ):
+            result = trajectory_metrics_fn(
+                model=model,
+                metrics=["probability", "hm_aggregate"],
+                data=data,
+                collators=collator,
+                tokenizer=tokenizer,
+                batch_size=1,
+                trajectory_config={
+                    "return_logits": True,
+                    "return_fixation_steps": True,
+                    "sampler_kwargs": {"steps": 4, "max_new_tokens": 32, "trajectory_sample_interval": 8},
+                },
+            )
+        assert isinstance(result, dict)
+        assert "retain_mu_components_by_step" in result
+        comp = result["retain_mu_components_by_step"]
+        assert comp["0"]["retain_Q_A_Prob"] == 0.5
+        assert comp["0"]["retain_Q_A_ROUGE"] == 0.3
+        assert comp["0"]["retain_Truth_Ratio"] == 0.9
+
+    def test_retain_mu_components_by_step_absent_when_no_hm_aggregate(self):
+        """Without hm_aggregate in metrics, result does not include retain_mu_components_by_step."""
+        model, _, data_list, collator, tokenizer = _minimal_model_sampler_data()
+        data = {"forget": data_list, "retain": data_list}
+        trajectory_metrics_fn = METRICS_REGISTRY["trajectory_metrics"]._metric_fn
+        with patch(
+            "evals.metrics.trajectory_metrics._call_metric_at_step",
+            return_value={"agg_value": 0.5},
+        ):
+            result = trajectory_metrics_fn(
+                model=model,
+                metrics=["probability"],
+                data=data,
+                collators=collator,
+                tokenizer=tokenizer,
+                batch_size=1,
+                trajectory_config={
+                    "return_logits": True,
+                    "return_fixation_steps": True,
+                    "sampler_kwargs": {"steps": 4, "max_new_tokens": 32, "trajectory_sample_interval": 8},
+                },
+            )
+        assert isinstance(result, dict)
+        assert "retain_mu_components_by_step" not in result
+
+
 class TestCoalescedVsPerMetricResultShape:
     """Coalesced (one metric name) vs per-metric (metric_name) produce consistent shape."""
 

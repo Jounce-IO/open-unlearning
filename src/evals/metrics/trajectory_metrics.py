@@ -2459,6 +2459,11 @@ def trajectory_metrics(model, **kwargs):
                                         continue
                                     if metric_name in rouge_metrics_in_run or metric_name == "probability":
                                         continue
+                                    # When producing reference (no reference provided), skip metrics that only compare to reference.
+                                    if metric_name == "ks_test":
+                                        ref_logs = kwargs.get("reference_logs") or {}
+                                        if not ref_logs.get("retain_model_logs"):
+                                            continue
 
                                     gpu_set_phase("trajectory_metric", metric=metric_name, batch_idx=batch_idx, step=step)
 
@@ -3097,6 +3102,20 @@ def trajectory_metrics(model, **kwargs):
                                     all_scores.append(ent["score"])
                         agg = float(np.nanmean(all_scores)) if all_scores else 0.0
                         result["forget_truth_ratio"] = {"agg_value": agg}
+
+        # Expose retain MU components per step so reports show which of Prob/ROUGE/Truth_Ratio is 0 when hm_aggregate is 0.
+        retain_agg_by_step = kwargs.get("retain_agg_by_step") or {}
+        if "hm_aggregate" in loaded_metrics and retain_agg_by_step:
+            components = {}
+            for step_key, pre in retain_agg_by_step.items():
+                components[str(step_key)] = {}
+                for name in ("retain_Q_A_Prob", "retain_Q_A_ROUGE", "retain_Truth_Ratio"):
+                    ent = pre.get(name)
+                    if isinstance(ent, dict) and "agg_value" in ent:
+                        v = ent["agg_value"]
+                        components[str(step_key)][name] = float(v) if isinstance(v, (int, float, np.floating)) else v
+            if components:
+                result["retain_mu_components_by_step"] = components
 
         if executor is not None:
             executor.shutdown(wait=True)
