@@ -77,3 +77,50 @@ def test_no_nested_structures_or_skip_keys_in_output():
     assert out == {"a": 1.0, "b": 3.0}
     for v in out.values():
         assert isinstance(v, float)
+
+
+def test_four_way_validation_loss_keys_included():
+    """Four-way validation: eval_forget_loss, eval_retain_loss, eval_holdout_loss, eval_utility_loss are logged when present."""
+    metrics = {
+        "eval_forget_loss": 1.2,
+        "eval_retain_loss": 0.9,
+        "eval_holdout_loss": 1.0,
+        "eval_utility_loss": 1.1,
+    }
+    out = _scalar_metrics_for_wandb(metrics)
+    assert "eval_forget_loss" in out
+    assert "eval_retain_loss" in out
+    assert "eval_holdout_loss" in out
+    assert "eval_utility_loss" in out
+    assert out["eval_forget_loss"] == 1.2
+    assert out["eval_retain_loss"] == 0.9
+    assert out["eval_holdout_loss"] == 1.0
+    assert out["eval_utility_loss"] == 1.1
+    for v in out.values():
+        assert isinstance(v, float)
+
+
+def test_four_way_validation_eight_keys_method_and_ce():
+    """Four-way validation: all 8 keys (method loss + constant CE) are logged when present."""
+    metrics = {
+        "eval_forget_loss": 1.2,
+        "eval_forget_loss_ce": 1.15,
+        "eval_retain_loss": 0.9,
+        "eval_retain_loss_ce": 0.88,
+        "eval_holdout_loss": 1.0,
+        "eval_holdout_loss_ce": 0.98,
+        "eval_utility_loss": 1.1,
+        "eval_utility_loss_ce": 1.05,
+    }
+    out = _scalar_metrics_for_wandb(metrics)
+    assert out["eval_forget_loss"] == 1.2
+    assert out["eval_forget_loss_ce"] == 1.15
+    assert out["eval_retain_loss"] == 0.9
+    assert out["eval_retain_loss_ce"] == 0.88
+    assert out["eval_holdout_loss"] == 1.0
+    assert out["eval_holdout_loss_ce"] == 0.98
+    assert out["eval_utility_loss"] == 1.1
+    assert out["eval_utility_loss_ce"] == 1.05
+    assert len(out) == 8
+    for v in out.values():
+        assert isinstance(v, float)

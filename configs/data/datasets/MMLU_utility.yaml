@@ -1,0 +1,13 @@
+# MMLU one-subject dataset for four-way utility validation (general knowledge).
+# Same format as training: input_ids, labels (prompt masked). Capped at 100 in get_data.
+# Use in data.validation_splits.utility when building eval_dataset.
+MMLU_utility:
+  handler: MMLUUtilityDataset
+  args:
+    hf_args:
+      path: cais/mmlu
+      name: abstract_algebra
+      split: test
+    question_key: question
+    answer_key: answer
+    max_length: 512

@@ -12,6 +12,9 @@ from typing import Any
 
 logger = logging.getLogger(__name__)
 
+# Four-way validation: max samples per validation set (fixed slice for determinism).
+FOUR_WAY_VALIDATION_CAP = 100
+
 # Keys that are never sent to W&B (metadata / retain-reference only).
 _WANDB_SKIP_KEYS = frozenset({
     "config",
@@ -171,5 +174,75 @@ class FinetuneTrainer(Trainer):
 
         if eval_dataset is None:
             return {}
-        # Run the default HF Trainer evaluate method when eval dataset is provided
+        # Four-way validation: eval_dataset is a dict of named datasets (forget, retain, holdout, utility).
+        # Compute both method loss and constant CE loss per set, then merge and log.
+        if isinstance(eval_dataset, dict):
+            return self._evaluate_four_way(
+                eval_dataset, ignore_keys, metric_key_prefix, trial
+            )
+        # Single dataset: default HF Trainer evaluate
         return super().evaluate(eval_dataset, ignore_keys, metric_key_prefix)
+
+    def _evaluate_four_way(
+        self,
+        eval_dataset: Dict[str, Dataset],
+        ignore_keys: Optional[List[str]] = None,
+        metric_key_prefix: str = "eval",
+        trial: Dict[str, Any] = None,
+    ) -> Dict[str, float]:
+        """Evaluate on each named dataset; report method loss and constant CE loss per set."""
+        import torch as th
+        eval_metrics: Dict[str, float] = {}
+        ce_available = False
+        try:
+            from dllm.core.schedulers import LinearAlphaScheduler
+            from dllm.core.trainers.mdlm import compute_masked_ce_eval_loss
+            adapter = getattr(self.model, "adapter_config", None)
+            tokenizer = getattr(self.model, "tokenizer", None)
+            if adapter is not None and tokenizer is not None:
+                ce_available = True
+        except Exception:
+            pass
+
+        for name, dataset in eval_dataset.items():
+            if dataset is None or len(dataset) == 0:
+                continue
+            dataloader = self.get_eval_dataloader(dataset)
+            method_loss_sum = 0.0
+            method_n = 0
+            ce_loss_sum = 0.0
+            ce_n = 0
+            self.model.eval()
+            for batch in dataloader:
+                batch = self._prepare_inputs(batch)
+                with th.no_grad():
+                    loss, _, _ = self.prediction_step(
+                        self.model, batch, prediction_loss_only=False, ignore_keys=ignore_keys or []
+                    )
+                    if loss is not None:
+                        method_loss_sum += loss.item() * batch["input_ids"].size(0)
+                        method_n += batch["input_ids"].size(0)
+                    if ce_available:
+                        try:
+                            inner = getattr(self.model, "model", self.model)
+                            sched = getattr(
+                                getattr(self.model, "adapter_config", None),
+                                "scheduler",
+                                None,
+                            ) or LinearAlphaScheduler()
+                            proc = getattr(self.model, "tokenizer", None)
+                            if inner is not None and proc is not None and getattr(proc, "mask_token_id", None) is not None:
+                                ce = compute_masked_ce_eval_loss(
+                                    inner, batch, proc, sched, fixed_t=0.5
+                                )
+                                ce_loss_sum += ce.item() * batch["input_ids"].size(0)
+                                ce_n += batch["input_ids"].size(0)
+                        except Exception:
+                            pass
+            if method_n > 0:
+                eval_metrics[f"{metric_key_prefix}_{name}_loss"] = method_loss_sum / method_n
+            if ce_n > 0:
+                eval_metrics[f"{metric_key_prefix}_{name}_loss_ce"] = ce_loss_sum / ce_n
+        if eval_metrics:
+            self.log(_scalar_metrics_for_wandb(eval_metrics))
+        return eval_metrics
