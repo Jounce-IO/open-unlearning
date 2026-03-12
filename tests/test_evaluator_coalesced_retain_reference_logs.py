@@ -33,15 +33,15 @@ def test_coalesced_trajectory_passes_reference_logs_to_metric():
             "metrics": {
                 "trajectory_all": {
                     "handler": "trajectory_metrics",
-                    "reference_logs": {
-                        "retain_model_logs": {
-                            "path": str(retain_path),
-                            "include": {
-                                "mia_min_k": {"access_key": "retain"},
-                                "forget_truth_ratio": {"access_key": "retain"},
+                        "reference_logs": {
+                            "retain_model_logs": {
+                                "path": str(retain_path),
+                                "include": {
+                                    "mia_min_k": {"access_key": "retain"},
+                                    "forget_truth_ratio": {"access_key": "retain_ftr"},
+                                },
                             },
                         },
-                    },
                     "datasets": {},
                     "collators": {},
                     "metrics": ["privleak", "truth_ratio"],
@@ -76,7 +76,6 @@ def test_coalesced_trajectory_passes_reference_logs_to_metric():
         ev = evaluators["tofu_trajectory"]
         mock_model = MagicMock()
         with (
-            patch.object(ev, "load_logs_from_file", return_value={}),
             patch.object(ev, "save_logs"),
             patch.object(ev, "prepare_model", return_value=mock_model),
         ):
@@ -90,8 +89,11 @@ def test_coalesced_trajectory_passes_reference_logs_to_metric():
         )
         ref_logs = call_kwargs["reference_logs"]
         assert "retain_model_logs" in ref_logs, (
-            "reference_logs must contain retain_model_logs (from first metric config) when retain_logs_path is set."
+            "reference_logs must contain retain_model_logs (loaded at start when path is set)."
         )
+        rml = ref_logs["retain_model_logs"]
+        assert rml.get("retain") is not None, "retain slot must be set from mia_min_k"
+        assert rml.get("retain_ftr") is not None, "retain_ftr slot must be set from forget_truth_ratio"
 
 
 def test_coalesced_trajectory_first_metric_without_reference_logs_completes():
@@ -232,7 +234,6 @@ def test_per_metric_path_passes_reference_logs():
         ev = evaluators["tofu_trajectory"]
         mock_model = MagicMock()
         with (
-            patch.object(ev, "load_logs_from_file", return_value={}),
             patch.object(ev, "save_logs"),
             patch.object(ev, "prepare_model", return_value=mock_model),
         ):
@@ -240,7 +241,8 @@ def test_per_metric_path_passes_reference_logs():
         mock_metric.assert_called_once()
         call_kwargs = mock_metric.call_args[1]
         assert "reference_logs" in call_kwargs
-        assert "retain_model_logs" in call_kwargs["reference_logs"]
+        rml = call_kwargs["reference_logs"].get("retain_model_logs")
+        assert rml is not None and rml.get("retain") is not None, "Loaded reference must have retain slot"
 
 
 def test_coalesced_trajectory_three_metrics_still_passes_first_reference_logs():
@@ -300,7 +302,6 @@ def test_coalesced_trajectory_three_metrics_still_passes_first_reference_logs():
         ev = evaluators["tofu_trajectory"]
         mock_model = MagicMock()
         with (
-            patch.object(ev, "load_logs_from_file", return_value={}),
             patch.object(ev, "save_logs"),
             patch.object(ev, "prepare_model", return_value=mock_model),
         ):
@@ -308,7 +309,8 @@ def test_coalesced_trajectory_three_metrics_still_passes_first_reference_logs():
         mock_metric.assert_called_once()
         call_kwargs = mock_metric.call_args[1]
         assert "reference_logs" in call_kwargs
-        assert "retain_model_logs" in call_kwargs["reference_logs"]
+        rml = call_kwargs["reference_logs"].get("retain_model_logs")
+        assert rml is not None and rml.get("retain") is not None
 
 
 def test_coalesced_reference_logs_path_resolved_from_omegaconf():
@@ -359,7 +361,6 @@ def test_coalesced_reference_logs_path_resolved_from_omegaconf():
         ev = evaluators["tofu_trajectory"]
         mock_model = MagicMock()
         with (
-            patch.object(ev, "load_logs_from_file", return_value={}),
             patch.object(ev, "save_logs"),
             patch.object(ev, "prepare_model", return_value=mock_model),
         ):
@@ -368,9 +369,9 @@ def test_coalesced_reference_logs_path_resolved_from_omegaconf():
         call_kwargs = mock_metric.call_args[1]
         assert "reference_logs" in call_kwargs
         ref = call_kwargs["reference_logs"].get("retain_model_logs")
-        assert ref is not None
-        assert ref.get("path") == str(retain_path), (
-            "OmegaConf.to_container(resolve=True) should resolve ${retain_logs_path} to the actual path."
+        assert ref is not None, "reference_logs must contain retain_model_logs (loaded at start)."
+        assert ref.get("retain") is not None, (
+            "Path was resolved and file loaded; retain slot must be set from canonical mia_min_k."
         )
 
 
@@ -443,7 +444,7 @@ def test_coalesced_reference_logs_fallback_when_to_container_raises():
 
 
 class __retain_fixture_file__:
-    """Context manager that creates a minimal retain JSON and yields its path."""
+    """Context manager that creates a minimal canonical retain JSON and yields its path."""
 
     def __init__(self):
         self.tmp = None
@@ -453,9 +454,10 @@ class __retain_fixture_file__:
         self.tmp = tempfile.NamedTemporaryFile(
             mode="w", suffix=".json", delete=False
         )
+        # Canonical form: mia_min_k = {agg_value: number}, forget_truth_ratio = {value_by_index and/or agg_value}
         json.dump({
-            "mia_min_k": {"retain": {"agg_value": 0.1}},
-            "forget_truth_ratio": {"retain": {"value_by_index": {"0": {"score": 0.5}}}},
+            "mia_min_k": {"agg_value": 0.1},
+            "forget_truth_ratio": {"value_by_index": {"0": {"score": 0.5}}, "agg_value": 0.5},
         }, self.tmp)
         self.tmp.close()
         return self.tmp.name

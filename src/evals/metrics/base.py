@@ -9,6 +9,165 @@ from data import get_datasets, get_collators
 logger = logging.getLogger("metrics")
 
 
+class RetainReferenceValidationError(ValueError):
+    """Raised when a retain reference file is provided but invalid or non-canonical."""
+
+    pass
+
+
+def _is_canonical_mia(val: Any) -> bool:
+    """Accept only mia_min_k shape: {"agg_value": <int or float>}."""
+    if val is None or not isinstance(val, dict):
+        return False
+    agg = val.get("agg_value")
+    if agg is None:
+        return False
+    if not isinstance(agg, (int, float)) or isinstance(agg, bool):
+        return False
+    return True
+
+
+def _is_canonical_ftr(val: Any) -> bool:
+    """Accept only forget_truth_ratio canonical: value_by_index and/or agg_value (number)."""
+    if val is None or not isinstance(val, dict):
+        return False
+    vbi = val.get("value_by_index")
+    if vbi is not None:
+        if not isinstance(vbi, dict):
+            return False
+        for k, v in vbi.items():
+            if not isinstance(v, dict) or not isinstance(v.get("score"), (int, float)):
+                return False
+            if isinstance(v.get("score"), bool):
+                return False
+    agg = val.get("agg_value")
+    if agg is not None:
+        if not isinstance(agg, (int, float)) or isinstance(agg, bool):
+            return False
+    if vbi is None and agg is None:
+        return False
+    return True
+
+
+def _validate_canonical_mia(val: Any, path: str, key: str) -> None:
+    if not _is_canonical_mia(val):
+        raise RetainReferenceValidationError(
+            f"Retain reference at {path!r}: {key} must be canonical "
+            f'{{"agg_value": number}}, got {type(val).__name__}'
+        )
+
+
+def _validate_canonical_ftr(val: Any, path: str, key: str) -> None:
+    if not _is_canonical_ftr(val):
+        raise RetainReferenceValidationError(
+            f"Retain reference at {path!r}: {key} must be canonical "
+            f'(value_by_index and/or agg_value number), got {type(val).__name__}'
+        )
+
+
+def _validate_by_step_mia(by_step: Any, path: str) -> None:
+    if not isinstance(by_step, dict):
+        raise RetainReferenceValidationError(
+            f"Retain reference at {path!r}: mia_min_k_by_step must be a dict of step -> {{agg_value: number}}"
+        )
+    for step_k, step_v in by_step.items():
+        if not _is_canonical_mia(step_v):
+            raise RetainReferenceValidationError(
+                f"Retain reference at {path!r}: mia_min_k_by_step[{step_k!r}] must be "
+                f'{{"agg_value": number}}, got {type(step_v).__name__}'
+            )
+
+
+def _validate_by_step_ftr(by_step: Any, path: str) -> None:
+    if not isinstance(by_step, dict):
+        raise RetainReferenceValidationError(
+            f"Retain reference at {path!r}: forget_truth_ratio_by_step must be a dict of step -> value_by_index/agg_value"
+        )
+    for step_k, step_v in by_step.items():
+        if not _is_canonical_ftr(step_v):
+            raise RetainReferenceValidationError(
+                f"Retain reference at {path!r}: forget_truth_ratio_by_step[{step_k!r}] must be canonical"
+            )
+
+
+def load_and_validate_reference(
+    reference_logs_cfgs: Dict[str, Any],
+    load_fn: Callable[[str], Dict],
+) -> Dict[str, Any]:
+    """Load and validate reference file(s) once. Raises RetainReferenceValidationError if invalid.
+    Returns the reference_logs dict (no path); for use when reference path is provided."""
+    result = {}
+    for reference_log_name, reference_log_cfg in reference_logs_cfgs.items():
+        path = reference_log_cfg.get("path") if isinstance(reference_log_cfg, dict) else None
+        if not path:
+            continue
+        include_cfgs = (reference_log_cfg.get("include") or {}) if isinstance(reference_log_cfg, dict) else {}
+        try:
+            _logs = load_fn(path)
+        except Exception as e:
+            raise RetainReferenceValidationError(
+                f"Retain reference path {path!r} could not be loaded: {e}"
+            ) from e
+        _traj = _logs.get("trajectory_all") or {}
+        ref = {}
+        access_names_seen = {}
+        for key, include_cfg in include_cfgs.items():
+            access_name = include_cfg.get("access_key", key) if isinstance(include_cfg, dict) else key
+            if access_name in access_names_seen:
+                raise RetainReferenceValidationError(
+                    f"Retain reference at {path!r}: distinct access_key required for each include key; "
+                    f"{key!r} and {access_names_seen[access_name]!r} both use access_key {access_name!r}."
+                )
+            access_names_seen[access_name] = key
+            _results = _logs.get(key)
+            if _results is None:
+                _results = _traj.get(key)
+            if _results is None and key == "forget_truth_ratio":
+                _results = (
+                    _logs.get("forget_Truth_Ratio")
+                    or _traj.get("forget_Truth_Ratio")
+                    or _logs.get("trajectory_forget_Truth_Ratio")
+                    or _traj.get("trajectory_forget_Truth_Ratio")
+                )
+            if _results is None:
+                by_step = _logs.get("mia_min_k_by_step") or _traj.get("mia_min_k_by_step") if key == "mia_min_k" else _logs.get("forget_truth_ratio_by_step") or _traj.get("forget_truth_ratio_by_step")
+                if by_step and isinstance(by_step, dict):
+                    first_step = next(iter(by_step.values()), None)
+                    if key == "mia_min_k" and first_step is not None and _is_canonical_mia(first_step):
+                        _results = first_step
+                    elif key == "forget_truth_ratio" and first_step is not None and _is_canonical_ftr(first_step):
+                        _results = first_step
+                if _results is None:
+                    raise RetainReferenceValidationError(
+                        f"Retain reference at {path!r}: required key {key!r} not found in file "
+                        "(and no canonical first step in by_step)."
+                    )
+            if key == "mia_min_k":
+                _validate_canonical_mia(_results, path, key)
+                ref[access_name] = _results
+            elif key == "forget_truth_ratio":
+                _validate_canonical_ftr(_results, path, key)
+                ref[access_name] = _results
+            else:
+                ref[access_name] = _results
+        _mia = _logs.get("mia_min_k_by_step") or _traj.get("mia_min_k_by_step")
+        _tr = _logs.get("forget_truth_ratio_by_step") or _traj.get("forget_truth_ratio_by_step")
+        if _mia is not None:
+            _validate_by_step_mia(_mia, path)
+            ref["retain_mia_by_step"] = _mia
+        if _tr is not None:
+            _validate_by_step_ftr(_tr, path)
+            ref["retain_forget_tr_by_step"] = _tr
+        if ref:
+            result[reference_log_name] = ref
+            logger.info(
+                "reference_logs: loaded and validated %s from %s.",
+                reference_log_name,
+                path,
+            )
+    return result
+
+
 def _extract_retain_agg_scalar(val: Any) -> Any:
     """Extract a single number from a retain metric value for privleak/rel_diff.
 
@@ -142,138 +301,23 @@ class UnlearningMetric:
         if pre_metric_results:
             kwargs.update({"pre_compute": pre_metric_results})
 
-        # Load reference logs from JSON (retain-model eval results for privleak / forget_quality).
-        # Only keys listed in reference_log_cfg.include are requested; the loader also injects
-        # retain_mia_by_step and retain_forget_tr_by_step from the file when present (for
-        # step-matched privleak/ks_test). Metrics that require reference_logs: privleak,
-        # forget_quality (ks_test), trajectory_privleak, trajectory_forget_quality (see
-        # evals.metrics.privacy.RETAIN_LOGS_METRICS). After loading we log a summary so you
-        # can distinguish "no keys found" (wrong path or empty file) from "partial" (some
-        # keys found, some missing).
+        # Load reference logs from JSON when config has path. Validate completely; raise on invalid.
+        # If reference_logs is already loaded (no path), use as is.
         reference_logs_cfgs = kwargs.pop("reference_logs", {})
         reference_logs = {}
-        for reference_log_name, reference_log_cfg in reference_logs_cfgs.items():
-            path = reference_log_cfg.get("path", None)
-            if path is None:
-                continue
-            include_cfgs = reference_log_cfg.get("include", None) or {}
-            assert path is not None, ValueError(
-                "path not specified for {reference_log_name} in {metric_name}"
+        has_path = False
+        if reference_logs_cfgs:
+            for _rn, _rc in reference_logs_cfgs.items():
+                if isinstance(_rc, dict) and _rc.get("path"):
+                    has_path = True
+                    break
+        if has_path:
+            reference_logs = load_and_validate_reference(
+                reference_logs_cfgs,
+                self.load_logs_from_file,
             )
-            _logs = self.load_logs_from_file(path)
-            _traj = _logs.get("trajectory_all") or {}
-            reference_logs[reference_log_name] = {}
-            found_include = []
-            missing_include = []
-            for key, include_cfg in include_cfgs.items():
-                access_name = include_cfg.get("access_key", key)
-                _results = _logs.get(key, None)
-                if _results is None:
-                    _results = _traj.get(key, None)
-                if _results is None and key == "forget_truth_ratio":
-                    _results = (
-                        _logs.get("forget_Truth_Ratio")
-                        or _traj.get("forget_Truth_Ratio")
-                        or _logs.get("trajectory_forget_Truth_Ratio")
-                        or _traj.get("trajectory_forget_Truth_Ratio")
-                    )
-                if _results is None and key == "retain_Truth_Ratio":
-                    _results = (
-                        _logs.get("retain_Truth_Ratio")
-                        or _traj.get("retain_Truth_Ratio")
-                        or _logs.get("trajectory_retain_Truth_Ratio")
-                        or _traj.get("trajectory_retain_Truth_Ratio")
-                    )
-                if _results is None and key == "retain_Q_A_Prob":
-                    _results = (
-                        _logs.get("retain_Q_A_Prob")
-                        or _traj.get("retain_Q_A_Prob")
-                        or _logs.get("trajectory_retain_Q_A_Prob")
-                        or _traj.get("trajectory_retain_Q_A_Prob")
-                    )
-                if _results is None and key == "retain_Q_A_ROUGE":
-                    _results = (
-                        _logs.get("retain_Q_A_ROUGE")
-                        or _traj.get("retain_Q_A_ROUGE")
-                        or _logs.get("trajectory_retain_Q_A_ROUGE")
-                        or _traj.get("trajectory_retain_Q_A_ROUGE")
-                    )
-                # Do not overwrite an existing value with None (e.g. mia_min_k -> retain then forget_truth_ratio -> retain; second key missing would otherwise clear retain)
-                if _results is not None or access_name not in reference_logs[reference_log_name]:
-                    reference_logs[reference_log_name][access_name] = _results
-                if _results is not None:
-                    found_include.append(key)
-                else:
-                    missing_include.append(key)
-                    logger.error(
-                        "reference_logs path was provided but key %r not found in %s. No fallback.",
-                        key,
-                        path,
-                    )
-            # If any requested key was missing, do not use this ref at all (no fallback to partial).
-            if missing_include:
-                logger.error(
-                    "reference_logs path was provided but not all requested keys found in %s: missing %s. Not using reference_logs for %s.",
-                    path,
-                    missing_include,
-                    reference_log_name,
-                )
-                reference_logs.pop(reference_log_name, None)
-                reference_logs["_required_but_missing"] = True  # So trajectory/metrics do not fall back to ref_value
-                continue
-            # All requested keys found; inject by-step and aggregate retain when present in file
-            _mia = _logs.get("mia_min_k_by_step") or _traj.get("mia_min_k_by_step")
-            _tr = _logs.get("forget_truth_ratio_by_step") or _traj.get("forget_truth_ratio_by_step")
-            if _mia is not None:
-                reference_logs[reference_log_name]["retain_mia_by_step"] = _mia
-            if _tr is not None:
-                reference_logs[reference_log_name]["retain_forget_tr_by_step"] = _tr
-                # If "retain" (for forget_truth_ratio) was never set, use first step as aggregate so ks_test has a retain ref
-                if reference_logs[reference_log_name].get("retain") is None and _tr:
-                    first_step = next(iter(_tr.values()))
-                    if isinstance(first_step, dict) and first_step.get("value_by_index"):
-                        reference_logs[reference_log_name]["retain"] = first_step
-            # Normalize retain so privleak/rel_diff receive a scalar agg_value (no dict → TypeError).
-            ref = reference_logs[reference_log_name]
-            if ref.get("retain") is not None:
-                scalar = _extract_retain_agg_scalar(ref["retain"])
-                if scalar is not None:
-                    ref["retain"] = {"agg_value": scalar}
-                else:
-                    logger.error(
-                        "reference_logs path was provided but retain value could not be normalized to a scalar (nested or invalid). "
-                        "Not using reference for privleak/rel_diff. No fallback.",
-                    )
-                    ref["retain"] = None
-                    reference_logs["_required_but_missing"] = True
-            # Summary logging: "no usable keys" (ERROR) vs "loaded" (INFO)
-            ref = reference_logs[reference_log_name]
-            has_retain = ref.get("retain") is not None
-            has_mia_by_step = ref.get("retain_mia_by_step") is not None
-            has_tr_by_step = ref.get("retain_forget_tr_by_step") is not None
-            has_any_useful = has_retain or has_mia_by_step or has_tr_by_step or len(found_include) > 0
-            if not has_any_useful:
-                logger.error(
-                    "reference_logs path was provided but no usable reference data found in %s (key=%s). "
-                    "Expected at least one of: retain, retain_mia_by_step, retain_forget_tr_by_step, or requested include keys. "
-                    "privleak and forget_quality cannot use retain reference.",
-                    path,
-                    reference_log_name,
-                )
-            elif not missing_include:
-                found_list = list(found_include)
-                if has_mia_by_step:
-                    found_list.append("retain_mia_by_step")
-                if has_tr_by_step:
-                    found_list.append("retain_forget_tr_by_step")
-                if has_retain:
-                    found_list.append("retain")
-                logger.info(
-                    "reference_logs: loaded %s from %s: found [%s].",
-                    reference_log_name,
-                    path,
-                    ", ".join(sorted(set(found_list))),
-                )
+        else:
+            reference_logs = reference_logs_cfgs
         if reference_logs:
             kwargs.update({"reference_logs": reference_logs})
 

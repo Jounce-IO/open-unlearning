@@ -1362,8 +1362,7 @@ def _call_metric_at_step(
             if pre_compute_step:
                 metric_kwargs["pre_compute"] = pre_compute_step
 
-    # Step-matched retain reference for privleak / ks_test when retain trajectory is loaded.
-    # Look up by step value first (canonical: retain files may key by actual step), then by step_index (position) for backward compat.
+    # Step-matched retain reference: privleak uses retain (from retain_mia_by_step), ks_test uses retain_ftr (from retain_forget_tr_by_step).
     if metric.name in ("privleak", "ks_test"):
         ref_logs = kwargs.get("reference_logs") or {}
         retain_logs = ref_logs.get("retain_model_logs") or {}
@@ -1371,10 +1370,10 @@ def _call_metric_at_step(
         step_val = kwargs.get("step")
         if step_index is None and step_val is not None:
             step_index = step_val
+        step_str_by_val = str(step_val) if step_val is not None else None
+        step_str_by_idx = str(step_index) if step_index is not None else None
         step_retain = None
         if retain_logs:
-            step_str_by_val = str(step_val) if step_val is not None else None
-            step_str_by_idx = str(step_index) if step_index is not None else None
             if metric.name == "privleak" and retain_logs.get("retain_mia_by_step"):
                 by_step = retain_logs["retain_mia_by_step"]
                 step_retain = (by_step.get(step_str_by_val) if step_str_by_val else None) or (by_step.get(step_str_by_idx) if step_str_by_idx else None)
@@ -1385,9 +1384,18 @@ def _call_metric_at_step(
             ref_logs_step = copy.deepcopy(ref_logs)
             if "retain_model_logs" not in ref_logs_step:
                 ref_logs_step["retain_model_logs"] = {}
-            ref_logs_step["retain_model_logs"]["retain"] = step_retain
+            if metric.name == "privleak":
+                ref_logs_step["retain_model_logs"]["retain"] = step_retain
+            else:
+                ref_logs_step["retain_model_logs"]["retain_ftr"] = step_retain
             metric_kwargs["reference_logs"] = ref_logs_step
-        # No fallback to aggregate ref_logs when step_retain is None: missing step match means we do not pass reference_logs; metric will fail/warn as designed.
+        else:
+            if retain_logs or ref_logs.get("_required_but_missing"):
+                from evals.metrics.base import RetainReferenceValidationError
+                slot_name = "retain (retain_mia_by_step)" if metric.name == "privleak" else "retain_ftr (retain_forget_tr_by_step)"
+                raise RetainReferenceValidationError(
+                    f"reference_logs was provided but step-matched {slot_name} not found for step {step_val!r}/{step_index!r}. No fallback."
+                )
 
     # Call the metric's underlying function
     # Note: We call _metric_fn directly, not evaluate(), because:
@@ -1863,26 +1871,25 @@ def trajectory_metrics(model, **kwargs):
             )
         kwargs["retain_agg_by_step"] = retain_agg_by_step
 
-        # Log once when trajectory PrivLeak or FQ (ks_test) will use single retain reference (no step-matched)
+        # Log once when reference_logs was provided but step-matched data is missing (no fallback to aggregate).
         ref_logs = kwargs.get("reference_logs") or {}
         retain_logs = ref_logs.get("retain_model_logs") or {}
         if retain_logs:
             if "privleak" in loaded_metrics and not retain_logs.get("retain_mia_by_step"):
                 if "privleak" not in _trajectory_single_retain_warned:
                     _trajectory_single_retain_warned.add("privleak")
-                    logger.warning(
-                        "trajectory_privleak: step-matched retain (retain_mia_by_step) not in reference_logs; "
-                        "using single retain reference for all steps. For step-matched comparison, run eval on "
-                        "retain model with trajectory and save mia_min_k_by_step, then load as reference."
+                    logger.error(
+                        "reference_logs was provided but step-matched retain (retain_mia_by_step) not found in file. "
+                        "trajectory_privleak will not receive reference_logs. No fallback. "
+                        "Run retain eval with trajectory and save mia_min_k_by_step, then use that file as reference."
                     )
             if "ks_test" in loaded_metrics and not retain_logs.get("retain_forget_tr_by_step"):
                 if "ks_test" not in _trajectory_single_retain_warned:
                     _trajectory_single_retain_warned.add("ks_test")
-                    logger.warning(
-                        "trajectory_forget_quality (ks_test): step-matched retain (forget_truth_ratio_by_step) "
-                        "not in reference_logs; using single retain reference for all steps. For step-matched "
-                        "comparison, run eval on retain model with trajectory and save forget_truth_ratio_by_step, "
-                        "then load as reference."
+                    logger.error(
+                        "reference_logs was provided but step-matched retain (retain_forget_tr_by_step) not found in file. "
+                        "trajectory_forget_quality (ks_test) will not receive reference_logs. No fallback. "
+                        "Run retain eval with trajectory and save forget_truth_ratio_by_step, then use that file as reference."
                     )
 
         # Check if privleak needs dual trajectories (forget + holdout)
@@ -2679,6 +2686,11 @@ def trajectory_metrics(model, **kwargs):
                     retain_logs = ref_logs.get("retain_model_logs") or {}
                     by_step = retain_logs.get("retain_mia_by_step") or {}
                     step_retain = by_step.get(str(step)) or by_step.get(str(run_steps_to_use.index(step) if step in run_steps_to_use else step))
+                    if step_retain is None and retain_logs:
+                        from evals.metrics.base import RetainReferenceValidationError
+                        raise RetainReferenceValidationError(
+                            f"reference_logs was provided but step-matched retain (retain_mia_by_step) not found for step {step!r}. No fallback."
+                        )
                     if step_retain is not None:
                         ref_logs = copy.deepcopy(ref_logs)
                         if "retain_model_logs" not in ref_logs:
@@ -2782,6 +2794,11 @@ def trajectory_metrics(model, **kwargs):
                     retain_logs = ref_logs.get("retain_model_logs") or {}
                     by_step = retain_logs.get("retain_mia_by_step") or {}
                     step_retain = by_step.get(str(step)) or by_step.get(str(steps_to_use_dual.index(step) if step in steps_to_use_dual else step))
+                    if step_retain is None and retain_logs:
+                        from evals.metrics.base import RetainReferenceValidationError
+                        raise RetainReferenceValidationError(
+                            f"reference_logs was provided but step-matched retain (retain_mia_by_step) not found for step {step!r}. No fallback."
+                        )
                     if step_retain is not None:
                         ref_logs = copy.deepcopy(ref_logs)
                         if "retain_model_logs" not in ref_logs:

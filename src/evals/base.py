@@ -181,6 +181,39 @@ class Evaluator:
         logger.info(f"Evaluations will be saved to: {logs_file_path}")
         logger.info(f"Evaluating {len(self.metrics)} metrics: {list(self.metrics.keys())}")
 
+        # Load and validate reference once at start when any metric has reference_logs path (spec: validate before any evaluation).
+        cached_reference_logs = None
+        try:
+            from omegaconf import OmegaConf as _OmegaConf
+        except ImportError:
+            _OmegaConf = None
+        for _mname in self.metrics:
+            _mcfg = self.eval_cfg.metrics.get(_mname) if hasattr(self.eval_cfg.metrics, "get") else None
+            if _mcfg is None:
+                continue
+            try:
+                _ref_cfg = _mcfg.get("reference_logs") if hasattr(_mcfg, "get") else None
+            except Exception:
+                _ref_cfg = None
+            if not _ref_cfg:
+                continue
+            _ref_dict = None
+            if isinstance(_ref_cfg, dict):
+                _ref_dict = _ref_cfg
+            elif _OmegaConf is not None and hasattr(_ref_cfg, "items"):
+                try:
+                    _ref_dict = _OmegaConf.to_container(_ref_cfg, resolve=True)
+                except Exception:
+                    _ref_dict = dict(_ref_cfg)
+            if _ref_dict:
+                for _rn, _rc in _ref_dict.items():
+                    if isinstance(_rc, dict) and _rc.get("path"):
+                        from evals.metrics.base import load_and_validate_reference
+                        cached_reference_logs = load_and_validate_reference(_ref_dict, self.load_logs_from_file)
+                        break
+            if cached_reference_logs is not None:
+                break
+
         # Coalesced trajectory: one call to trajectory_metrics with all metrics (one sampler pass).
         coalesce = self.eval_cfg.get("coalesce_trajectory_metrics", False)
         metrics_cfg = self.eval_cfg.metrics
@@ -263,21 +296,23 @@ class Evaluator:
                 "eval_cfg": self.eval_cfg,
                 **base_kwargs,
             }
-            # Pass first metric's reference_logs so trajectory_metrics can load retain_model_logs
-            # (forget_quality / privleak); otherwise they warn and return None.
-            first_reference_logs = first_cfg.get("reference_logs")
-            if first_reference_logs is not None:
-                try:
-                    from omegaconf import OmegaConf
-                    merged_args["reference_logs"] = OmegaConf.to_container(
-                        first_reference_logs, resolve=True
-                    )
-                except Exception:
-                    merged_args["reference_logs"] = (
-                        dict(first_reference_logs)
-                        if hasattr(first_reference_logs, "items")
-                        else first_reference_logs
-                    )
+            # Pass reference_logs: use pre-loaded validated ref when we loaded at start, else config (path).
+            if cached_reference_logs is not None:
+                merged_args["reference_logs"] = cached_reference_logs
+            else:
+                first_reference_logs = first_cfg.get("reference_logs")
+                if first_reference_logs is not None:
+                    try:
+                        from omegaconf import OmegaConf
+                        merged_args["reference_logs"] = OmegaConf.to_container(
+                            first_reference_logs, resolve=True
+                        )
+                    except Exception:
+                        merged_args["reference_logs"] = (
+                            dict(first_reference_logs)
+                            if hasattr(first_reference_logs, "items")
+                            else first_reference_logs
+                        )
             result = first_metric(
                 model,
                 metric_name=first_name,
@@ -345,7 +380,16 @@ class Evaluator:
             }
             if self.eval_cfg.get("samples") is not None:
                 kwargs["samples"] = self.eval_cfg.samples
-            metrics_args = self.eval_cfg.metrics[metric_name]
+            _mc = self.eval_cfg.metrics[metric_name]
+            try:
+                from omegaconf import OmegaConf
+                metrics_args = OmegaConf.to_container(_mc, resolve=True) if _mc is not None else {}
+            except Exception:
+                metrics_args = dict(_mc) if _mc is not None and hasattr(_mc, "items") else {}
+            if metrics_args is None:
+                metrics_args = {}
+            if cached_reference_logs is not None and metrics_args.get("reference_logs"):
+                metrics_args["reference_logs"] = cached_reference_logs
             result = metric_fn(
                 model,
                 metric_name=metric_name,

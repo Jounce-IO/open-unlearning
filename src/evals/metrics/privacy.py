@@ -1,6 +1,6 @@
 import numpy as np
 from scipy.stats import ks_2samp
-from evals.metrics.base import unlearning_metric, logger
+from evals.metrics.base import unlearning_metric, logger, RetainReferenceValidationError
 
 # Metrics that require retain_model_logs (retain_logs_path)
 RETAIN_LOGS_METRICS = frozenset(
@@ -54,14 +54,27 @@ def ks_test(model, **kwargs):
         return {"agg_value": None}
     reference_logs = kwargs.get("reference_logs", None)
     if reference_logs:
-        reference_logs = reference_logs.get("retain_model_logs") or {}
-        if reference_logs.get("_required_but_missing"):
+        rml = reference_logs.get("retain_model_logs") or {}
+        if rml.get("_required_but_missing"):
             logger.error(
-                "reference_logs was required but data was missing (e.g. step-matched retain not in file). "
-                "Setting forget_quality to None. No fallback."
+                "reference_logs was required but data was missing. ks_test requires retain_ftr. No fallback."
             )
-            return {"agg_value": None}
-        retain_vbi = (reference_logs.get("retain") or {}).get("value_by_index") or {}
+            raise RetainReferenceValidationError(
+                "reference_logs retain_model_logs is marked _required_but_missing; "
+                "ks_test requires retain_ftr slot (forget_truth_ratio)."
+            )
+        # Read retain_ftr only (no fallback to retain).
+        retain_ftr = rml.get("retain_ftr")
+        if retain_ftr is None:
+            logger.error(
+                "reference_logs was provided but retain_ftr slot is missing; "
+                "ks_test reads retain_ftr only. No fallback."
+            )
+            raise RetainReferenceValidationError(
+                "reference_logs retain_model_logs has no retain_ftr slot; "
+                "ks_test requires forget_truth_ratio in retain_ftr."
+            )
+        retain_vbi = (retain_ftr.get("value_by_index") or {}) if isinstance(retain_ftr, dict) else {}
         retain_tr_stats = np.array(
             [
                 evals["score"]
@@ -75,7 +88,7 @@ def ks_test(model, **kwargs):
             pvalue = fq.pvalue
         else:
             logger.warning(
-                "retain_model_logs retain has no valid scores; setting forget_quality to None"
+                "retain_model_logs retain_ftr has no valid value_by_index scores; setting forget_quality to None"
             )
             pvalue = None
     else:
@@ -98,27 +111,38 @@ def privleak(model, **kwargs):
         return {"agg_value": None}
     ref_logs = kwargs.get("reference_logs") or {}
     retain_logs = ref_logs.get("retain_model_logs") or {}
-    if retain_logs.get("_required_but_missing"):
-        logger.error(
-            "reference_logs was required but data was missing (e.g. step-matched retain not in file). "
-            "Not using ref_value. No fallback."
-        )
-        return {"agg_value": None}
-    try:
-        ref = kwargs["reference_logs"]["retain_model_logs"]["retain"]["agg_value"]
-    except Exception as _:
+    if not ref_logs or "retain_model_logs" not in ref_logs:
         logger.warning(
-            "privleak: retain_model_logs evals not provided, using default retain auc of %s. %s",
+            "privleak: retain_model_logs not provided, using default retain auc of %s. %s",
             kwargs.get("ref_value", 0.5),
             RETAIN_LOGS_PATH_NONE_MSG,
         )
-        ref = kwargs["ref_value"]
-    if ref is None or (isinstance(ref, dict) or not isinstance(ref, (int, float))):
+        ref = kwargs.get("ref_value", 0.5)
+    elif retain_logs.get("_required_but_missing"):
         logger.error(
-            "reference_logs was provided but retain agg_value is not a number (got %s). Not using ref_value. No fallback.",
-            type(ref).__name__,
+            "reference_logs was required but data was missing. privleak requires retain slot. No fallback."
         )
-        return {"agg_value": None}
+        raise RetainReferenceValidationError(
+            "reference_logs retain_model_logs is marked _required_but_missing; privleak requires retain slot."
+        )
+    else:
+        retain_slot = retain_logs.get("retain")
+        if retain_slot is None:
+            logger.error(
+                "reference_logs was provided but retain slot is missing; privleak requires retain (mia_min_k)."
+            )
+            raise RetainReferenceValidationError(
+                "reference_logs retain_model_logs has no retain slot; privleak requires mia_min_k in retain."
+            )
+        ref = (retain_slot.get("agg_value") if isinstance(retain_slot, dict) else None)
+        if ref is None or not isinstance(ref, (int, float)) or isinstance(ref, bool):
+            logger.error(
+                "reference_logs was provided but retain agg_value is not a number (got %s). No fallback.",
+                type(ref).__name__,
+            )
+            raise RetainReferenceValidationError(
+                f"reference_logs retain slot agg_value must be a number, got {type(ref).__name__}"
+            )
     score = 1 - score
     ref = 1 - ref
     return {"agg_value": (score - ref) / (ref + 1e-10) * 100}
@@ -130,24 +154,36 @@ def rel_diff(model, **kwargs):
     score = kwargs["pre_compute"]["forget"]["agg_value"]
     ref_logs = kwargs.get("reference_logs") or {}
     retain_logs = ref_logs.get("retain_model_logs") or {}
-    if retain_logs.get("_required_but_missing"):
-        logger.error(
-            "reference_logs was required but data was missing. Not using ref_value. No fallback."
-        )
-        return {"agg_value": None}
-    try:
-        ref = kwargs["reference_logs"]["retain_model_logs"]["retain"]["agg_value"]
-    except Exception as _:
+    if not ref_logs or "retain_model_logs" not in ref_logs:
         logger.warning(
-            "rel_diff: retain_model_logs evals not provided, using default retain auc of %s. %s",
+            "rel_diff: retain_model_logs not provided, using default retain auc of %s. %s",
             kwargs.get("ref_value", 0.5),
             RETAIN_LOGS_PATH_NONE_MSG,
         )
-        ref = kwargs["ref_value"]
-    if ref is None or (isinstance(ref, dict) or not isinstance(ref, (int, float))):
+        ref = kwargs.get("ref_value", 0.5)
+    elif retain_logs.get("_required_but_missing"):
         logger.error(
-            "reference_logs was provided but retain agg_value is not a number (got %s). Not using ref_value. No fallback.",
-            type(ref).__name__,
+            "reference_logs was required but data was missing. rel_diff requires retain slot. No fallback."
         )
-        return {"agg_value": None}
+        raise RetainReferenceValidationError(
+            "reference_logs retain_model_logs is marked _required_but_missing; rel_diff requires retain slot."
+        )
+    else:
+        retain_slot = retain_logs.get("retain")
+        if retain_slot is None:
+            logger.error(
+                "reference_logs was provided but retain slot is missing; rel_diff requires retain."
+            )
+            raise RetainReferenceValidationError(
+                "reference_logs retain_model_logs has no retain slot; rel_diff requires retain."
+            )
+        ref = (retain_slot.get("agg_value") if isinstance(retain_slot, dict) else None)
+        if ref is None or not isinstance(ref, (int, float)) or isinstance(ref, bool):
+            logger.error(
+                "reference_logs was provided but retain agg_value is not a number (got %s). No fallback.",
+                type(ref).__name__,
+            )
+            raise RetainReferenceValidationError(
+                f"reference_logs retain slot agg_value must be a number, got {type(ref).__name__}"
+            )
     return {"agg_value": (score - ref) / (ref + 1e-10) * 100}

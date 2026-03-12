@@ -18,7 +18,7 @@ reference_logs:
       mia_min_k:
         access_key: retain
       forget_truth_ratio:
-        access_key: retain
+        access_key: retain_ftr
 
 pre_compute:
   mia_min_k:

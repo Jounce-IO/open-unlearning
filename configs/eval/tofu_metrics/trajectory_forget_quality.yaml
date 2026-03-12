@@ -10,7 +10,7 @@ reference_logs:
     path: ${eval.tofu_trajectory.retain_logs_path}
     include:
       forget_truth_ratio:
-        access_key: retain
+        access_key: retain_ftr
 
 handler: trajectory_metrics
 batch_size: 1

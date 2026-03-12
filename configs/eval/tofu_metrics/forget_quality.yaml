@@ -5,9 +5,9 @@ defaults:
 reference_logs:
   retain_model_logs:
     path: ${eval.tofu.retain_logs_path}
-    include: 
+    include:
       forget_truth_ratio:
-        access_key: retain
+        access_key: retain_ftr
 
 pre_compute:
   forget_truth_ratio:
