@@ -196,6 +196,7 @@ class FinetuneTrainer(Trainer):
         Both method loss and CE loss are sample-weighted averages (sum of loss*bs / sum of bs).
         Returns EvalLoopOutput to match parent Trainer.evaluate() return type.
         Under multi-GPU, sums and counts are all-reduced so metrics are global; logging on rank 0 only.
+        num_samples is the total eval set size across all four splits.
         """
         eval_metrics: Dict[str, float] = {}
         device = getattr(self.args, "device", torch.device("cpu"))
