@@ -79,6 +79,42 @@ class QADataset(Dataset):
         return item
 
 
+class MMLUUtilityDataset(QADataset):
+    """MMLU one-subject dataset for utility validation (same format as QADataset: input_ids, labels).
+    Loads cais/mmlu (or path/name from hf_args), maps choices[answer] to answer text, first 100 by config.
+    Cap at 100 is applied in get_data via _cap_dataset_at_100.
+    """
+    def __init__(self, hf_args, template_args, tokenizer, question_key="question", answer_key="answer", max_length=512, **kwargs):
+        self.tokenizer = tokenizer
+        self.max_length = max_length
+        self.template_args = template_args
+        self.question_key = question_key
+        self.answer_key = answer_key
+        self.predict_with_generate = kwargs.get("predict_with_generate", False)
+        raw = load_hf_dataset(**hf_args)
+        if hasattr(raw, "train") and "train" in raw:
+            raw = raw["train"]
+        elif hasattr(raw, "test") and "test" in raw:
+            raw = raw["test"]
+        elif hasattr(raw, "validation") and "validation" in raw:
+            raw = raw["validation"]
+        else:
+            raw = raw[list(raw.keys())[0]]
+        self.data = []
+        choices_key = "choices"
+        answer_key_raw = "answer"
+        for i, row in enumerate(raw):
+            q = row[question_key]
+            choices = row.get(choices_key, [])
+            ans_idx = row.get(answer_key_raw, 0)
+            if isinstance(ans_idx, str):
+                ans_idx = ord(ans_idx.strip().upper()) - ord("A")
+            ans_idx = min(max(0, int(ans_idx)), len(choices) - 1) if choices else ""
+            answer = choices[ans_idx] if isinstance(ans_idx, int) else str(ans_idx)
+            self.data.append({"question": q, "answer": answer, "index": i})
+        self.fs_data = None
+
+
 class QAwithIdkDataset(QADataset):
     def __init__(self, idk_path, return_original=True, *args, **kwargs):
         self.idk_path = idk_path

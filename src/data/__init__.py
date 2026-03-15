@@ -1,9 +1,11 @@
 import re
 from typing import Dict, Any, Union
 from omegaconf import DictConfig
+from torch.utils.data import Dataset, Subset
 
 from data.qa import (
     QADataset,
+    MMLUUtilityDataset,
     QAwithIdkDataset,
     QAwithAlternateDataset,
     QAwithDualAnswersDataset,
@@ -67,20 +69,46 @@ def get_datasets(dataset_cfgs: Union[Dict, DictConfig], **kwargs):
     return dataset
 
 
+# Four-way validation: fixed cap so the same 100 samples are used across runs (first 100 by order).
+VALIDATION_MAX_SAMPLES = 100
+
+
+def _cap_dataset_at_100(dataset: Union[Dataset, Any]) -> Union[Dataset, Any]:
+    """Return a dataset capped at VALIDATION_MAX_SAMPLES (first N by order) for deterministic validation."""
+    try:
+        n = len(dataset)
+    except TypeError:
+        return dataset
+    if n <= VALIDATION_MAX_SAMPLES:
+        return dataset
+    return Subset(dataset, range(VALIDATION_MAX_SAMPLES))
+
+
 def get_data(data_cfg: DictConfig, mode="train", **kwargs):
     data = {}
     data_cfg = dict(data_cfg)
     anchor = data_cfg.pop("anchor", "forget")
+    validation_splits_cfg = data_cfg.pop("validation_splits", None)
     for split, dataset_cfgs in data_cfg.items():
         data[split] = get_datasets(dataset_cfgs, **kwargs)
-    if mode == "train":
-        return data
-    elif mode == "unlearn":
-        unlearn_splits = {k: v for k, v in data.items() if k not in ("eval", "test")}
+    if mode == "train" and validation_splits_cfg is not None:
+        eval_dict = {}
+        for name, dataset_cfgs in validation_splits_cfg.items():
+            ds = get_datasets(dataset_cfgs, **kwargs)
+            eval_dict[name] = _cap_dataset_at_100(ds)
+        data["eval_dataset"] = eval_dict
+    if mode == "unlearn":
+        unlearn_splits = {k: v for k, v in data.items() if k not in ("eval", "test", "eval_dataset")}
         unlearn_dataset = ForgetRetainDataset(**unlearn_splits, anchor=anchor)
         data["train"] = unlearn_dataset
-        for split in unlearn_splits:
-            data.pop(split)
+        for split in list(unlearn_splits.keys()):
+            data.pop(split, None)
+        if validation_splits_cfg is not None:
+            eval_dict = {}
+            for name, dataset_cfgs in validation_splits_cfg.items():
+                ds = get_datasets(dataset_cfgs, **kwargs)
+                eval_dict[name] = _cap_dataset_at_100(ds)
+            data["eval_dataset"] = eval_dict
     return data
 
 
@@ -113,6 +141,7 @@ def get_collators(collator_cfgs, **kwargs):
 
 # Register datasets
 _register_data(QADataset)
+_register_data(MMLUUtilityDataset)
 _register_data(QAwithIdkDataset)
 _register_data(PretrainingDataset)
 _register_data(CompletionDataset)
