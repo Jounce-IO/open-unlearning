@@ -10,7 +10,7 @@ Tests cover:
 
 import pytest
 import torch
-from unittest.mock import Mock, MagicMock, patch
+from unittest.mock import Mock, patch
 from omegaconf import OmegaConf, DictConfig
 
 import sys
@@ -24,7 +24,6 @@ from evals.metrics.trajectory_metrics import (
     _call_metric_at_step,
     _handle_text_based_metric,
 )
-from evals.metrics.trajectory_adapters import LogitModelWrapper
 from evals.metrics import METRICS_REGISTRY
 
 
@@ -96,7 +95,7 @@ class TestTextBasedMetricHandler:
             mock_eval.return_value = [{"rougeL_f1": 0.5}]
             
             # This should not raise ValueError about OmegaConf
-            result = _handle_text_based_metric(
+            _ = _handle_text_based_metric(
                 logits=logits,
                 tokenizer=tokenizer,
                 sample_labels=sample_labels,

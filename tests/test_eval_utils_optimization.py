@@ -8,9 +8,8 @@ Locks current behavior and asserts optimized behavior for:
 - eval_text_similarity: keys and value shapes, batch_decode usage
 """
 
-import pytest
 import torch
-from unittest.mock import Mock, patch
+from unittest.mock import Mock
 
 import sys
 from pathlib import Path

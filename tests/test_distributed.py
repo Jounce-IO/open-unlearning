@@ -11,7 +11,6 @@ from pathlib import Path
 from unittest.mock import patch
 
 import pytest
-import torch
 from torch.utils.data import Dataset
 from torch.utils.data.distributed import DistributedSampler
 

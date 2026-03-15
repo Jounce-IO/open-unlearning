@@ -149,7 +149,7 @@ class TestTrajectoryMetricsConfig:
                         "probability": {
                             "access_key": "correct",
                         },
-                        "probability": {
+                        "probability": {  # noqa: F601  # second entry overwrites; test documents shape
                             "access_key": "wrong",
                         },
                     },
@@ -372,7 +372,7 @@ class TestConfigValidation:
             },
         })
         
-        return_logits = invalid_config.trajectory_config.get("return_logits", False)
+        _ = invalid_config.trajectory_config.get("return_logits", False)  # return_logits, reserved
         # This should be caught by code that requires return_logits=True
 
 

@@ -10,7 +10,6 @@ import sys
 from pathlib import Path
 from unittest.mock import Mock, patch
 
-import pytest
 import torch
 
 repo_root = Path(__file__).resolve().parent.parent
@@ -405,3 +404,58 @@ class TestCoalescedVsPerMetricResultShape:
             )
         assert "trajectory_forget_quality" in result
         assert "agg_value" in result["trajectory_forget_quality"]
+
+
+class TestTrajectoryStepCountFormula:
+    """Step count S in reports: formula S_traj = ceil(max_new_tokens / trajectory_sample_interval)."""
+
+    def test_step_count_matches_sampler_logits_length(self):
+        """S in result equals len(logits_history) from sampler (e.g. ceil(max_new_tokens/interval))."""
+        import math
+        max_new_tokens = 32
+        trajectory_sample_interval = 8
+        expected_S = math.ceil(max_new_tokens / trajectory_sample_interval)  # 4
+        model, _, data, collator, tokenizer = _minimal_model_sampler_data(
+            steps=expected_S, max_new_tokens=max_new_tokens, T=trajectory_sample_interval * 2
+        )
+        trajectory_metrics_fn = METRICS_REGISTRY["trajectory_metrics"]._metric_fn
+        with patch(
+            "evals.metrics.trajectory_metrics._call_metric_at_step",
+            return_value={"agg_value": 0.5},
+        ):
+            result = trajectory_metrics_fn(
+                model=model,
+                metrics=["probability"],
+                data=data,
+                collators=collator,
+                tokenizer=tokenizer,
+                batch_size=1,
+                trajectory_config={
+                    "return_logits": True,
+                    "return_fixation_steps": True,
+                    "sampler_kwargs": {
+                        "steps": 50,
+                        "max_new_tokens": max_new_tokens,
+                        "trajectory_sample_interval": trajectory_sample_interval,
+                    },
+                },
+            )
+        payload = _trajectory_result_payload(result)
+        assert payload
+        agg = payload.get("agg_value", payload)
+        if isinstance(agg, dict) and "full" in agg and "steps" in agg["full"]:
+            steps_arr = agg["full"]["steps"].get("probability", [])
+            assert len(steps_arr) == expected_S, (
+                f"agg_value.steps should have S={expected_S} (ceil({max_new_tokens}/{trajectory_sample_interval}))"
+            )
+
+    def test_inferred_max_new_tokens_range_for_S(self):
+        """With interval=8, S=22 => (168,176], S=24 => (184,192] (documentation check)."""
+        import math
+        interval = 8
+        for S, (lo, hi) in [(22, (168, 176)), (24, (184, 192))]:
+            inferred_lo = (S - 1) * interval + 1
+            inferred_hi = S * interval
+            assert inferred_lo == lo + 1, f"S={S}: expected lo+1={lo+1}, got {inferred_lo}"
+            assert inferred_hi == hi, f"S={S}: expected hi={hi}, got {inferred_hi}"
+            assert S == math.ceil(inferred_hi / interval)

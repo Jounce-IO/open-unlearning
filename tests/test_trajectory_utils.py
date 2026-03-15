@@ -11,7 +11,6 @@ Tests cover:
 
 import pytest
 import torch
-from typing import List
 
 import sys
 from pathlib import Path
@@ -1404,7 +1403,7 @@ class TestEffectiveLengthsFromEos:
 
     def test_eos_at_position_zero(self):
         """EOS at first generated position -> L_eff = 1."""
-        B, L, pl = 1, 8, 2
+        _B, L, pl = 1, 8, 2
         sequences = torch.zeros(1, pl + L, dtype=torch.long)
         sequences[0, pl] = 1  # EOS at first gen position
         prompt_lens = [pl]
@@ -1413,7 +1412,7 @@ class TestEffectiveLengthsFromEos:
 
     def test_eos_at_position_one(self):
         """EOS at second generated position -> L_eff = 2."""
-        B, L, pl = 1, 8, 2
+        _B, L, pl = 1, 8, 2
         sequences = torch.zeros(1, pl + L, dtype=torch.long)
         sequences[0, pl + 1] = 2
         prompt_lens = [pl]
@@ -1422,7 +1421,7 @@ class TestEffectiveLengthsFromEos:
 
     def test_eos_at_last_position(self):
         """EOS at last generated position -> L_eff = L."""
-        B, L, pl = 1, 8, 2
+        _B, L, pl = 1, 8, 2
         sequences = torch.zeros(1, pl + L, dtype=torch.long)
         sequences[0, pl + L - 1] = 3
         prompt_lens = [pl]
@@ -1444,15 +1443,15 @@ class TestEffectiveLengthsFromEos:
 
     def test_eos_token_id_none_returns_full_length(self):
         """When eos_token_id is None, return [L]*B."""
-        B, L, pl = 3, 6, 1
-        sequences = torch.randint(0, 100, (B, pl + L))
-        prompt_lens = [pl] * B
+        _B, L, pl = 3, 6, 1
+        sequences = torch.randint(0, 100, (_B, pl + L))
+        prompt_lens = [pl] * _B
         out = effective_lengths_from_eos(sequences, prompt_lens, L, None)
         assert out == [L, L, L]
 
     def test_prompt_lens_tensor_accepted(self):
         """prompt_lens can be a tensor."""
-        B, L, pl = 1, 5, 4
+        _B, L, pl = 1, 5, 4
         sequences = torch.zeros(1, pl + L, dtype=torch.long)
         sequences[0, pl + 2] = 7
         prompt_lens = torch.tensor([pl])
@@ -1842,7 +1841,7 @@ class TestDecodeLogitsToText:
         texts = decode_logits_to_text(logits, tokenizer, input_ids, prompt_len)
         
         # Decode the token_ids directly to verify
-        decoded_direct = tokenizer.decode(token_ids, skip_special_tokens=True)
+        _ = tokenizer.decode(token_ids, skip_special_tokens=True)  # decoded_direct, reserved
         # The decoded text should match (or be similar, depending on tokenizer behavior)
         assert isinstance(texts[0], str)
         assert len(texts[0]) >= 0  # May be empty if tokens are special

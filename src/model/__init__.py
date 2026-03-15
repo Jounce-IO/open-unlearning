@@ -152,7 +152,7 @@ def get_model(model_cfg: DictConfig, resume_from_checkpoint: str | None = None):
                 if cache_path.exists():
                     logger.info(f"Model cache directory exists: {cache_path}")
                 else:
-                    logger.info(f"Model cache directory does not exist, will download")
+                    logger.info("Model cache directory does not exist, will download")
             model = model_cls.from_pretrained(
                 pretrained_model_name_or_path=model_path,
                 dtype=torch_dtype,

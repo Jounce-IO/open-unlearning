@@ -69,7 +69,7 @@ def transform_prompts(
     if not guard:
         return prompts, prompt_lens
 
-    benchmark = (guard.get("benchmark") or "").lower()
+    _ = (guard.get("benchmark") or "").lower()  # benchmark, reserved
     out: List[List[int]] = []
     out_lens: List[int] = []
 

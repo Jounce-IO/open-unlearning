@@ -146,7 +146,7 @@ def build_fixation_logits_from_R_F(
         R = R.unsqueeze(0)
         F = F.unsqueeze(0)
     B, V, L, S = R.shape
-    device = R.device
+    _ = R.device  # device, reserved
     F_clamped = F.clamp(0, S - 1)
     index = F_clamped.view(B, 1, L, 1).expand(B, V, L, 1).long()
     gathered = torch.gather(R, dim=3, index=index).squeeze(3)

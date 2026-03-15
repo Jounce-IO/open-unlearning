@@ -9,7 +9,6 @@ Tests cover:
 
 import pytest
 import torch
-from typing import Dict, List
 
 import sys
 from pathlib import Path
@@ -168,7 +167,7 @@ class TestDualLogitModelWrapper:
 
     def test_returns_different_logits_for_forget_vs_holdout(self):
         """DualLogitModelWrapper returns different logits for forget vs holdout batch."""
-        B, L, V = 1, 10, 100
+        _B, L, V = 1, 10, 100
         logits_forget = torch.randn(V, L)
         logits_holdout = torch.randn(V, L)
         logits_by_key = {

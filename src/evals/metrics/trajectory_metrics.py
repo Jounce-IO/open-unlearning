@@ -44,18 +44,13 @@ from evals.metrics.step_wise_score import (
 from evals.metrics.trajectory_utils import (
     trajectories_from_logits,
     effective_lengths_from_eos,
-    compute_trajectories,
     compute_fixation_start_trajectory,
     compute_fixation_end_trajectory,
     compute_fixation_ratio_trajectory,
-    extract_logits_at_step,
-    decode_logits_to_text,
 )
 from evals.metrics.trajectory_adapters import (
     LogitModelWrapper,
     DualLogitModelWrapper,
-    compute_logit_metric_at_step,
-    compute_text_metric_at_step,
 )
 from evals.metrics.mia.utils import get_attacker, MIAStreamingAccumulator
 from evals.gpu_phase_logger import set_phase as gpu_set_phase
@@ -69,9 +64,6 @@ logger = logging.getLogger("evaluator")
 
 # One-time warnings for trajectory fallback to single retain reference (see docs/evaluation-notes.md)
 _trajectory_single_retain_warned: set = set()
-
-# IGNORE_INDEX from data.utils
-IGNORE_INDEX = -100
 
 # Trajectory evals use interval mode only; every-step mode is not used.
 DEFAULT_TRAJECTORY_SAMPLE_INTERVAL = 8
@@ -584,7 +576,7 @@ def _compute_retain_mu_by_step(
         return retain_agg_by_step
 
     _sampler_kw = _trajectory_sampler_kwargs(trajectory_config)
-    rouge_type = trajectory_config.get("rouge_type") or kwargs.get("rouge_type", "rougeL_recall")
+    _ = trajectory_config.get("rouge_type") or kwargs.get("rouge_type", "rougeL_recall")  # rouge_type, reserved
     rouge_scorer_instance = rouge_scorer.RougeScorer(["rouge1", "rougeL"], use_stemmer=True)
     per_step_lists = defaultdict(lambda: {"prob": [], "rouge": [], "tr": []})
     _retain_batches = len(retain_dataloader)
@@ -597,8 +589,8 @@ def _compute_retain_mu_by_step(
             logger.info("Retain MU batch %s/%s", batch_idx + 1, _retain_batches)
         input_ids = batch["input_ids"]
         labels = batch.get("labels")
-        attention_mask = batch.get("attention_mask")
-        indices = batch.get("index", torch.arange(batch_idx * batch_size, (batch_idx + 1) * batch_size))
+        _ = batch.get("attention_mask")  # reserved
+        _ = batch.get("index", torch.arange(batch_idx * batch_size, (batch_idx + 1) * batch_size))  # indices, reserved
         B = input_ids.shape[0]
         prompts, prompt_lens = _build_prompts_for_sampler(input_ids, labels, tokenizer, IGNORE_INDEX)
         evaluation_mode = _sampler_kw.get("evaluation_mode", "unguided")
@@ -856,7 +848,7 @@ def _compute_pre_compute_metrics_at_step(
                     wrong_results = []
                     for opt_i, lab_t in enumerate(lab):
                         lab_flat = lab_t.squeeze(0) if lab_t.dim() > 1 else lab_t
-                        num_non_ignore = (lab_flat != IGNORE_INDEX).sum().item()
+                        _ = (lab_flat != IGNORE_INDEX).sum().item()  # num_non_ignore, reserved
                         batch_prov = {"labels": lab_flat.unsqueeze(0)}
                         model_or_logits = {
                             "R": R.unsqueeze(0),
@@ -883,7 +875,7 @@ def _compute_pre_compute_metrics_at_step(
                     pre_compute_results[access_key] = wrong_results
                 elif lab is not None:
                     lab = lab.squeeze(0) if lab.dim() > 1 else lab
-                    num_non_ignore = (lab != IGNORE_INDEX).sum().item()
+                    _ = (lab != IGNORE_INDEX).sum().item()  # num_non_ignore, reserved
                     batch_prov = {"labels": lab.unsqueeze(0)}
                     model_or_logits = {
                         "R": R.unsqueeze(0),
@@ -1655,13 +1647,13 @@ def trajectory_metrics(model, **kwargs):
             if metric_worker_pool_size > 0
             else None
         )
-        logits_source = trajectory_config.get("logits_source", "sampler")
+        _ = trajectory_config.get("logits_source", "sampler")  # logits_source, reserved
         data = kwargs.get("data")
         collator = kwargs.get("collators")
         batch_size = kwargs.get("batch_size", 1)
         sort_by_length = kwargs.get("sort_by_length", False)
         tokenizer = kwargs.get("tokenizer")
-        generation_args = kwargs.get("generation_args", {})
+        _ = kwargs.get("generation_args", {})  # generation_args, reserved
         rank = kwargs.get("rank", 0)
         world_size = kwargs.get("world_size", 1)
         use_distributed_sampler = world_size > 1
@@ -2039,7 +2031,7 @@ def trajectory_metrics(model, **kwargs):
                     )
                 input_ids = batch["input_ids"]
                 labels = batch.get("labels")
-                attention_mask = batch.get("attention_mask")
+                _ = batch.get("attention_mask")  # reserved
                 indices = batch.get("index", torch.arange(batch_idx * batch_size, 
                                                           (batch_idx + 1) * batch_size))
                 B = input_ids.shape[0]
@@ -2262,7 +2254,10 @@ def trajectory_metrics(model, **kwargs):
                             seq[pl : pl + L].tolist(), skip_special_tokens=False
                         )
                         _max_prompt, _max_resp = 400, 600
-                        _trunc = lambda s, n: s[:n] + ("..." if len(s) > n else "")
+
+                        def _trunc(s, n):
+                            return s[:n] + ("..." if len(s) > n else "")
+
                         gen_ids = seq[pl : pl + L].tolist()
                         eos_slice_ids = gen_ids[:L_eff_b]
                         # Show first/last token IDs of EOS slice so we can verify EOS and no truncation
@@ -2618,13 +2613,13 @@ def trajectory_metrics(model, **kwargs):
                     gpu_set_phase("privleak_dual_holdout_batch", batch_idx=h_batch_idx)
                     h_input_ids = h_batch["input_ids"]
                     h_labels = h_batch.get("labels")
-                    h_indices = h_batch.get(
+                    _ = h_batch.get(
                         "index",
                         torch.arange(
                             h_batch_idx * h_input_ids.shape[0],
                             (h_batch_idx + 1) * h_input_ids.shape[0],
                         ),
-                    )
+                    )  # h_indices, reserved
                     h_prompts, h_prompt_lens = _build_prompts_for_sampler(
                         h_input_ids, h_labels, tokenizer, IGNORE_INDEX
                     )

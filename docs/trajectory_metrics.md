@@ -560,6 +560,24 @@ The `trajectory_metrics` function returns a dictionary following the standard me
 
 **`retain_mu_components_by_step`** (optional): Present when the evaluation uses the **retain** dataset and the metric list includes **hm_aggregate** (trajectory_model_utility). It maps each step index to the three retain-set values that are combined into the harmonic mean: `retain_Q_A_Prob`, `retain_Q_A_ROUGE`, and `retain_Truth_Ratio`. If any of these is 0 at a step, the harmonic mean (and thus trajectory_model_utility) is 0 at that step. Use this field to diagnose zero utility in reports.
 
+### Step count (S) and reference compatibility
+
+The number of trajectory steps **S** in a run is the length of `logits_history` returned by the sampler for the **first batch**. All step-keyed structures in that run use the same S:
+
+- `mia_min_k_by_step`, `forget_truth_ratio_by_step` (canonical reference keys)
+- `agg_value[*].steps[*]` (per-metric arrays)
+- `step_distribution`, `retain_mu_components_by_step` (when present)
+
+**How S is determined (MDLM sampler with `trajectory_sample_interval`):**
+
+- The sampler captures logits at token positions that are multiples of `trajectory_sample_interval` (e.g. 8). The **maximum** number of captures is `S_traj = ceil(max_new_tokens / trajectory_sample_interval)` (e.g. 200/8 → 25).
+- The **actual** S can be **less** than S_traj if the diffusion transfer schedule does not cross every multiple before the loop completes (e.g. different block/step schedule or data-dependent unmasking order). So with the same config you may see S = 22, 24, or 25 depending on the first batch.
+- Inferred ranges (with `trajectory_sample_interval=8`): **S=22** ⇒ effective generation length in (168, 176] tokens; **S=24** ⇒ (184, 192]; **S=25** ⇒ (192, 200].
+
+**Reference compatibility:** Step-matched metrics (e.g. `trajectory_privleak`, `trajectory_forget_quality`) look up the reference by step index. If the consuming run has more steps than the reference (e.g. 24 vs 22), the loader raises `RetainReferenceValidationError` for the missing steps. Use the same `trajectory_config.sampler_kwargs` (especially `max_new_tokens` and `trajectory_sample_interval`) when producing and consuming reference logs so that S matches.
+
+**Note on `retain_mu_components_by_step`:** This field is built from a separate pass over the **retain** dataloader. The retain pass can yield a different S than the forget pass (e.g. 24 vs 22) if the first batch of each has different effective lengths or capture schedules. The canonical reference step count for compatibility is the one from `mia_min_k_by_step` / `forget_truth_ratio_by_step` (forget pass).
+
 ## Best Practices
 
 ### Memory Management

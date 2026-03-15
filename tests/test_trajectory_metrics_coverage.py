@@ -7,8 +7,7 @@ These tests focus on covering the missing lines identified by coverage reports.
 import pytest
 import torch
 import numpy as np
-from unittest.mock import Mock, patch, MagicMock
-from omegaconf import ListConfig, DictConfig
+from unittest.mock import Mock, patch
 
 import sys
 from pathlib import Path
@@ -117,7 +116,7 @@ class TestHandleTextBasedMetricCoverage:
         with patch("evals.metrics.utils.eval_text_similarity") as mock_eval:
             mock_eval.return_value = [{"rougeL_f1": 0.6}]
             
-            result = _handle_text_based_metric(
+            _ = _handle_text_based_metric(
                 logits=logits,
                 tokenizer=tokenizer,
                 sample_labels=sample_labels,

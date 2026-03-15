@@ -107,15 +107,12 @@ def test_ks_test_gets_score_from_truth_ratio_output():
 # ---- List-of-lists conversion (trajectory 3D labels path) ----
 def test_trajectory_list_of_lists_conversion_produces_same_indices_as_correct():
     """Simulate trajectory: pre_result = list of N lists (from probability with 3D labels). Conversion must use idx_key so indices match correct."""
-    from evals.metrics.trajectory_metrics import _compute_pre_compute_metrics_at_step
 
     # Minimal mock: we only need the conversion branch, so supply batch_template with labels_wrong as 3D
     # and mock _call_metric_at_step to return list of N lists.
-    import torch
-    from unittest.mock import MagicMock, patch
 
     idx_key = "0"
-    sample_idx = 0  # int; we normalize to idx_key str in real code
+    _ = 0  # sample_idx (int); we normalize to idx_key str in real code
     # Simulate pre_result from evaluate_probability when batch["labels"] is [1, N, L]
     pre_result_list_of_lists = [
         [{"prob": 0.2, "avg_loss": -np.log(0.2)}],  # option 0

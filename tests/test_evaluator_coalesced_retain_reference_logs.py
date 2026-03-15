@@ -20,7 +20,6 @@ sys.path.insert(0, str(repo_root / "src"))
 
 def test_coalesced_trajectory_passes_reference_logs_to_metric():
     """With coalesce_trajectory_metrics=True and retain_logs_path set, metric must receive reference_logs with retain_model_logs."""
-    from evals.base import Evaluator
     from evals import get_evaluators
 
     with __retain_fixture_file__() as retain_path:
@@ -98,7 +97,6 @@ def test_coalesced_trajectory_passes_reference_logs_to_metric():
 
 def test_coalesced_trajectory_first_metric_without_reference_logs_completes():
     """Coalesced path when first metric has no reference_logs: evaluate completes and metric is called (reference_logs may be absent)."""
-    from evals.base import Evaluator
     from evals import get_evaluators
 
     eval_cfg = OmegaConf.create({
@@ -150,7 +148,6 @@ def test_coalesced_trajectory_first_metric_without_reference_logs_completes():
 
 def test_coalesced_trajectory_empty_reference_logs_passed_as_empty_dict():
     """Coalesced path when first metric has reference_logs: {} — metric receives reference_logs as empty dict."""
-    from evals.base import Evaluator
     from evals import get_evaluators
 
     eval_cfg = OmegaConf.create({
@@ -203,7 +200,6 @@ def test_coalesced_trajectory_empty_reference_logs_passed_as_empty_dict():
 
 def test_per_metric_path_passes_reference_logs():
     """Per-metric path (no coalescing): single metric still receives reference_logs from its config."""
-    from evals.base import Evaluator
     from evals import get_evaluators
 
     with __retain_fixture_file__() as retain_path:
@@ -248,7 +244,6 @@ def test_per_metric_path_passes_reference_logs():
 
 def test_coalesced_trajectory_three_metrics_still_passes_first_reference_logs():
     """Coalesced path with three metrics: first metric's reference_logs is still passed."""
-    from evals.base import Evaluator
     from evals import get_evaluators
 
     with __retain_fixture_file__() as retain_path:
@@ -316,7 +311,6 @@ def test_coalesced_trajectory_three_metrics_still_passes_first_reference_logs():
 
 def test_coalesced_reference_logs_path_resolved_from_omegaconf():
     """When first metric's reference_logs uses OmegaConf interpolation, path is resolved in merged_args."""
-    from evals.base import Evaluator
     from evals import get_evaluators
 
     with __retain_fixture_file__() as retain_path:
@@ -379,7 +373,6 @@ def test_coalesced_reference_logs_path_resolved_from_omegaconf():
 def test_coalesced_reference_logs_fallback_when_to_container_raises():
     """When OmegaConf.to_container raises in the reference_logs block, fallback to dict() so metric still receives reference_logs."""
     from omegaconf import OmegaConf as OC
-    from evals.base import Evaluator
     from evals import get_evaluators
 
     with __retain_fixture_file__() as retain_path:

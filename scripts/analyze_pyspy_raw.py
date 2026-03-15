@@ -150,7 +150,7 @@ def main() -> None:
     ]:
         pct = (100.0 * val / total_samples) if total_samples else 0
         print(f"  {name}: {val} ({pct:.1f}%)")
-    combined = hotspot_avg_losses + hotspot_tokenizer + hotspot_rouge
+    _ = hotspot_avg_losses + hotspot_tokenizer + hotspot_rouge  # combined, reserved
     # Lines can match multiple hotspots; combined may overcount
     print()
     print("(Note: a stack line can match multiple hotspots; percentages are independent.)")

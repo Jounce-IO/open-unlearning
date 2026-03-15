@@ -6,8 +6,6 @@ Tests verify exact tensor values, shapes, devices, dtypes for all tensor operati
 
 import pytest
 import torch
-import numpy as np
-from unittest.mock import Mock, patch
 
 import sys
 from pathlib import Path
@@ -233,7 +231,7 @@ class TestTensorMemoryEfficiency:
         logits = extract_logits_at_step(trajectory, 5)
         
         # Modify extracted logits
-        original_value = trajectory[0, 0, 5].item()
+        _ = trajectory[0, 0, 5].item()  # original_value, reserved
         logits[0, 0] = 999.0
         
         # If it's a view, trajectory should be modified

@@ -51,7 +51,6 @@ def test_truth_ratio_passes_when_both_correct_and_wrong_use_string_indices():
 # ---- 3. ks_test needs 'score' in each value_by_index entry ----
 def test_ks_test_keyerror_when_value_by_index_entry_missing_score():
     """Reproduce: forget_truth_ratio returns value_by_index with entry without 'score' -> ks_test KeyError."""
-    from evals.metrics.privacy import ks_test
     # Simulate broken output (e.g. from wrong structure)
     pre_compute_forget = {"value_by_index": {"0": {"prob": 0.8}}}
     with pytest.raises(KeyError, match="score"):

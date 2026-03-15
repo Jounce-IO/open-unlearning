@@ -11,8 +11,8 @@ Tests cover:
 import pytest
 import torch
 import numpy as np
-from unittest.mock import Mock, MagicMock, patch
-from omegaconf import ListConfig, DictConfig, OmegaConf
+from unittest.mock import Mock, patch
+from omegaconf import ListConfig, DictConfig
 
 import sys
 from pathlib import Path
@@ -22,14 +22,11 @@ repo_root = Path(__file__).parent.parent
 sys.path.insert(0, str(repo_root / "src"))
 
 from evals.metrics.trajectory_metrics import (
-    _get_sampler_from_model,
-    _get_metric_from_registry,
     _call_metric_at_step,
     _compute_pre_compute_metrics_at_step,
     _handle_text_based_metric,
     trajectory_metrics,
 )
-from evals.metrics.trajectory_utils import stack_logits_history
 from evals.metrics import METRICS_REGISTRY
 
 
@@ -1686,10 +1683,10 @@ class TestHandleTextBasedMetric:
         sample_input_ids = torch.randint(0, V, (5,))
         sample_prompt_len = 5
         
-        with patch("evals.metrics.utils.eval_text_similarity") as mock_eval:
+        with patch("evals.metrics.utils.eval_text_similarity") as _mock_eval:
             # Should handle decode error gracefully or propagate
             try:
-                result = _handle_text_based_metric(
+                _ = _handle_text_based_metric(
                     logits=logits,
                     tokenizer=tokenizer,
                     sample_labels=sample_labels,
@@ -2182,7 +2179,7 @@ class TestCallMetricAtStepComprehensive:
             return_value={"correct": {"agg_value": 0.8}},
         ) as mock_pre_compute:
             if "probability" in METRICS_REGISTRY:
-                prob_metric = METRICS_REGISTRY["probability"]
+                _ = METRICS_REGISTRY["probability"]  # prob_metric, reserved
                 mock_metric = Mock()
                 mock_metric.name = "test"
                 mock_metric._metric_fn = Mock(return_value={"agg_value": 0.5})
@@ -2215,7 +2212,7 @@ class TestCallMetricAtStepComprehensive:
             "evals.metrics.trajectory_metrics._compute_pre_compute_metrics_at_step",
         ) as mock_pre_compute:
             if "probability" in METRICS_REGISTRY:
-                prob_metric = METRICS_REGISTRY["probability"]
+                _ = METRICS_REGISTRY["probability"]  # prob_metric, reserved
                 mock_metric = Mock()
                 mock_metric.name = "test"
                 mock_metric._metric_fn = Mock(return_value={"agg_value": 0.5})
@@ -2348,7 +2345,7 @@ class TestCallMetricAtStepComprehensive:
                 mock_metric_fn = Mock(return_value={"agg_value": 0.5})
                 prob_metric._metric_fn = mock_metric_fn
                 
-                result = _call_metric_at_step(
+                _ = _call_metric_at_step(
                     metric=prob_metric,
                     logits=logits,
                     batch_template=batch_template,
@@ -2413,7 +2410,7 @@ class TestCallMetricAtStepComprehensive:
             "evals.metrics.trajectory_metrics._handle_text_based_metric",
             return_value=[{"score": 0.6}],
         ) as mock_text_handler:
-            result = _call_metric_at_step(
+            _ = _call_metric_at_step(
                 metric=mock_metric,
                 logits=logits,
                 batch_template=batch_template,
@@ -2444,7 +2441,7 @@ class TestCallMetricAtStepComprehensive:
             "evals.metrics.trajectory_metrics._handle_text_based_metric",
             return_value=[{"score": 0.6}],
         ) as mock_text_handler:
-            result = _call_metric_at_step(
+            _ = _call_metric_at_step(
                 metric=mock_metric,
                 logits=logits,
                 batch_template=batch_template,
@@ -2619,7 +2616,6 @@ class TestTrajectoryMetricsConfigParsing:
             "batch_size": 1,
         }
         
-        from evals.metrics.trajectory_metrics import trajectory_metrics
         raw_fn = trajectory_metrics._metric_fn if hasattr(trajectory_metrics, '_metric_fn') else trajectory_metrics
         
         # Should parse list correctly
@@ -2663,7 +2659,6 @@ class TestTrajectoryMetricsConfigParsing:
             "batch_size": 1,
         }
         
-        from evals.metrics.trajectory_metrics import trajectory_metrics
         raw_fn = trajectory_metrics._metric_fn if hasattr(trajectory_metrics, '_metric_fn') else trajectory_metrics
         
         try:
@@ -2674,7 +2669,6 @@ class TestTrajectoryMetricsConfigParsing:
     
     def test_metrics_as_omegaconf_listconfig(self):
         """Test metrics as OmegaConf ListConfig."""
-        from omegaconf import ListConfig
         
         model = Mock()
         model.sampler = Mock()
@@ -2720,7 +2714,6 @@ class TestTrajectoryMetricsConfigParsing:
     
     def test_metrics_as_omegaconf_dictconfig(self):
         """Test metrics as OmegaConf DictConfig."""
-        from omegaconf import DictConfig
         
         model = Mock()
         model.sampler = Mock()
@@ -2776,7 +2769,6 @@ class TestTrajectoryMetricsConfigParsing:
             "tokenizer": Mock(),
         }
         
-        from evals.metrics.trajectory_metrics import trajectory_metrics
         raw_fn = trajectory_metrics._metric_fn if hasattr(trajectory_metrics, '_metric_fn') else trajectory_metrics
         
         with pytest.raises(ValueError, match="metrics must be a list or dict"):
@@ -2794,7 +2786,6 @@ class TestTrajectoryMetricsConfigParsing:
             "tokenizer": Mock(),
         }
         
-        from evals.metrics.trajectory_metrics import trajectory_metrics
         raw_fn = trajectory_metrics._metric_fn if hasattr(trajectory_metrics, '_metric_fn') else trajectory_metrics
         
         with pytest.raises(ValueError, match="No metrics specified"):
@@ -2812,7 +2803,6 @@ class TestTrajectoryMetricsConfigParsing:
             "tokenizer": Mock(),
         }
         
-        from evals.metrics.trajectory_metrics import trajectory_metrics
         raw_fn = trajectory_metrics._metric_fn if hasattr(trajectory_metrics, '_metric_fn') else trajectory_metrics
         
         with pytest.raises(ValueError, match="No metrics specified"):
@@ -2830,7 +2820,6 @@ class TestTrajectoryMetricsConfigParsing:
             "tokenizer": Mock(),
         }
         
-        from evals.metrics.trajectory_metrics import trajectory_metrics
         raw_fn = trajectory_metrics._metric_fn if hasattr(trajectory_metrics, '_metric_fn') else trajectory_metrics
         
         with pytest.raises(ValueError, match="not found in registry"):
@@ -2976,7 +2965,7 @@ class TestTrajectoryMetricsResultAggregation:
         """Test that agg_value has correct structure with four trajectory types."""
         # This test would need to call trajectory_metrics with actual model/data
         # For now, just verify the expected structure
-        expected_trajectories = ["steps", "fixation_start", "fixation_end", "fixation_ratio"]
+        _ = ["steps", "fixation_start", "fixation_end", "fixation_ratio"]  # expected_trajectories, reserved
         # Actual testing should be done via integration tests that call trajectory_metrics
         pass
 

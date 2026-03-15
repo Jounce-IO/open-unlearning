@@ -17,14 +17,13 @@ def main():
     from data.qa import QAwithDualAnswersDataset
     from data.collators import DataCollatorForSupervisedDataset
     from omegaconf import OmegaConf
-    from omegaconf import OmegaConf
     from evals.metrics.trajectory_metrics import _compute_pre_compute_metrics_at_step
     from evals.metrics import METRICS_REGISTRY
     import torch
     from torch.utils.data import DataLoader
 
     # Real TOFU data (same as job)
-    raw = load_dataset("locuslab/TOFU", "forget01_perturbed", split="train")
+    _ = load_dataset("locuslab/TOFU", "forget01_perturbed", split="train")  # raw, reserved
     tokenizer = AutoTokenizer.from_pretrained("gpt2")
     if tokenizer.pad_token is None:
         tokenizer.pad_token = tokenizer.eos_token
