@@ -36,7 +36,6 @@ class TestSequenceProbabilityFromScores:
         assert abs(sequence_probability_from_scores([0.5]) - 0.5) < 1e-9
 
     def test_geometric_mean(self):
-        import math
         scores = [0.25, 0.5, 0.5]
         expected = (0.25 * 0.5 * 0.5) ** (1 / 3)
         assert abs(sequence_probability_from_scores(scores) - expected) < 1e-9

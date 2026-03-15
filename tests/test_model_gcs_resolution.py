@@ -8,13 +8,12 @@ import sys
 from pathlib import Path
 from unittest.mock import patch, MagicMock
 
-import pytest
 from omegaconf import OmegaConf
 
 repo_root = Path(__file__).parent.parent
 sys.path.insert(0, str(repo_root / "src"))
 
-from model import _resolve_gcs_model_path, get_model, get_tokenizer
+from model import _resolve_gcs_model_path, get_model
 
 
 def test_resolve_gcs_model_path_non_gcs_returns_unchanged():

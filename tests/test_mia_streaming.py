@@ -7,7 +7,6 @@ import sys
 from pathlib import Path
 
 import numpy as np
-import pytest
 import torch
 from sklearn.metrics import roc_auc_score
 
@@ -17,7 +16,6 @@ sys.path.insert(0, str(repo_root / "src"))
 from data.utils import IGNORE_INDEX
 from evals.metrics.utils import tokenwise_logprobs_from_logits
 from evals.metrics.trajectory_adapters import DualLogitModelWrapper, LogitModelWrapper
-from evals.metrics.mia.all_attacks import Attack
 from evals.metrics.mia.min_k import MinKProbAttack
 from evals.metrics.mia.utils import (
     batch_to_cpu,

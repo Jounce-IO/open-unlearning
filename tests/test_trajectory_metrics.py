@@ -11,7 +11,7 @@ Tests cover:
 
 import pytest
 import torch
-from unittest.mock import Mock, MagicMock, patch
+from unittest.mock import Mock, patch
 
 import sys
 from pathlib import Path
@@ -39,6 +39,20 @@ from evals.metrics.trajectory_metrics import (
 )
 from evals.metrics.trajectory_utils import stack_logits_history
 from evals.metrics import METRICS_REGISTRY
+
+
+def _trajectory_result_effective(result):
+    """Return the dict to use for agg_value/step_distribution (coalesced or legacy)."""
+    if result is None:
+        return result
+    if isinstance(result, dict) and "trajectory_all" in result:
+        return result["trajectory_all"]
+    # Multi-display-name path: result is {display_name: {"agg_value": ..., "step_distribution": ...}}; use first.
+    if isinstance(result, dict) and result:
+        first = next(iter(result.values()), None)
+        if isinstance(first, dict) and "agg_value" in first:
+            return first
+    return result
 
 
 class TestShouldRunGc:
@@ -1301,7 +1315,9 @@ class TestTrajectoryMetricsIntegration:
             },
         )
         assert isinstance(result, dict)
-        agg = result.get("agg_value")
+        r = _trajectory_result_effective(result)
+        assert r is not None
+        agg = r.get("agg_value")
         assert agg is not None
         for view_name, view_data in agg.items():
             if not isinstance(view_data, dict):
@@ -1507,14 +1523,15 @@ class TestTrajectoryMetricsIntegration:
                 "sampler_kwargs": {"steps": S, "max_new_tokens": L_gen},
             },
         )
-        assert result_single is not None and "agg_value" in result_single
-        assert "step_distribution" in result_single
+        r_single = _trajectory_result_effective(result_single)
+        assert r_single is not None and "agg_value" in r_single
+        assert "step_distribution" in r_single
         # Result is nested by view (full, eos)
-        for view in result_single["agg_value"]:
-            for traj_name in result_single["agg_value"][view]:
-                for metric_name in result_single["agg_value"][view][traj_name]:
-                    dist = result_single["step_distribution"][view][traj_name][metric_name]
-                    agg = np.asarray(result_single["agg_value"][view][traj_name][metric_name])
+        for view in r_single["agg_value"]:
+            for traj_name in r_single["agg_value"][view]:
+                for metric_name in r_single["agg_value"][view][traj_name]:
+                    dist = r_single["step_distribution"][view][traj_name][metric_name]
+                    agg = np.asarray(r_single["agg_value"][view][traj_name][metric_name])
                     assert set(dist.keys()) == {"mean", "std", "median", "p25", "p75", "min", "max", "ci_low", "ci_high"}
                     assert len(dist["mean"]) == len(agg)
                     np.testing.assert_allclose(dist["mean"], agg, rtol=1e-5, atol=1e-8)
@@ -1565,13 +1582,14 @@ class TestTrajectoryMetricsIntegration:
                 "sampler_kwargs": {"steps": S, "max_new_tokens": L_gen},
             },
         )
-        assert result_b2 is not None and "agg_value" in result_b2
-        assert "step_distribution" in result_b2
+        r_b2 = _trajectory_result_effective(result_b2)
+        assert r_b2 is not None and "agg_value" in r_b2
+        assert "step_distribution" in r_b2
 
         # If only the first sample were used in B=2, agg would match B=1. Different logits => different values.
         view = "full"
-        agg1 = result_single["agg_value"][view]
-        agg2 = result_b2["agg_value"][view]
+        agg1 = r_single["agg_value"][view]
+        agg2 = r_b2["agg_value"][view]
         for traj_name in agg1:
             if traj_name not in agg2:
                 continue
@@ -1652,11 +1670,13 @@ class TestTrajectoryMetricsIntegration:
                 "sampler_kwargs": {"steps": S, "max_new_tokens": L_gen},
             },
         )
-        assert "step_distribution" in result
-        for view in result["step_distribution"]:
-            for traj_name in result["step_distribution"][view]:
-                for metric_name in result["step_distribution"][view][traj_name]:
-                    d = result["step_distribution"][view][traj_name][metric_name]
+        r = _trajectory_result_effective(result)
+        assert r is not None
+        assert "step_distribution" in r
+        for view in r["step_distribution"]:
+            for traj_name in r["step_distribution"][view]:
+                for metric_name in r["step_distribution"][view][traj_name]:
+                    d = r["step_distribution"][view][traj_name][metric_name]
                     mean_arr = np.asarray(d["mean"])
                     std_arr = np.asarray(d["std"])
                     ci_low_arr = np.asarray(d["ci_low"])
@@ -1733,8 +1753,9 @@ class TestTrajectoryMetricsIntegration:
         }
         try:
             result = trajectory_metrics(model, **kwargs)
-            assert result is not None
-            assert "agg_value" in result
+            r = _trajectory_result_effective(result)
+            assert r is not None
+            assert "agg_value" in r
         except Exception as e:
             assert "shape" not in str(e).lower() or "mismatch" not in str(e).lower()
 
@@ -1815,10 +1836,11 @@ class TestTrajectoryMetricsIntegration:
                 },
             },
         )
-        assert result is not None
-        assert "agg_value" in result
-        for view in result["agg_value"]:
-            agg = result["agg_value"][view]
+        r = _trajectory_result_effective(result)
+        assert r is not None
+        assert "agg_value" in r
+        for view in r["agg_value"]:
+            agg = r["agg_value"][view]
             assert isinstance(agg, dict)
             for traj_name, metrics_dict in agg.items():
                 assert isinstance(metrics_dict, dict)
@@ -1905,8 +1927,9 @@ class TestTrajectoryMetricsIntegration:
                     },
                 },
             )
-            assert result is not None
-            assert "agg_value" in result
+            r = _trajectory_result_effective(result)
+            assert r is not None
+            assert "agg_value" in r
             # With 2 views we run probability twice per (sample, traj_name). Cleanup runs after first view each time.
             assert mock_sync.call_count >= 1, "cuda.synchronize should be called when two views and CUDA available"
             assert mock_empty.call_count >= 1, "cuda.empty_cache should be called when two views and CUDA available"
@@ -1989,13 +2012,14 @@ class TestTrajectoryMetricsIntegration:
             },
         )
 
-        assert result is not None
-        assert "agg_value" in result
+        r = _trajectory_result_effective(result)
+        assert r is not None
+        assert "agg_value" in r
         for view in ("full", "eos"):
-            assert view in result["agg_value"]
-            for traj_name, metrics_dict in result["agg_value"][view].items():
+            assert view in r["agg_value"]
+            for traj_name, metrics_dict in r["agg_value"][view].items():
                 assert "probability" in metrics_dict
-                arr = np.asarray(result["agg_value"][view][traj_name]["probability"])
+                arr = np.asarray(r["agg_value"][view][traj_name]["probability"])
                 assert arr.size == S, f"view={view} traj={traj_name} expected S={S} steps"
         assert sampler.sample.call_count == num_samples
 
@@ -2092,15 +2116,17 @@ class TestTrajectoryMetricsIntegration:
         result_no_sort = trajectory_metrics(model, **base_kwargs, sort_by_length=False)
         result_sort = trajectory_metrics(model, **base_kwargs, sort_by_length=True)
 
-        assert result_no_sort is not None and "agg_value" in result_no_sort
-        assert result_sort is not None and "agg_value" in result_sort
+        r_no_sort = _trajectory_result_effective(result_no_sort)
+        r_sort = _trajectory_result_effective(result_sort)
+        assert r_no_sort is not None and "agg_value" in r_no_sort
+        assert r_sort is not None and "agg_value" in r_sort
         view = "full"
-        for traj_name in result_no_sort["agg_value"][view]:
-            assert traj_name in result_sort["agg_value"][view]
-            for metric_name in result_no_sort["agg_value"][view][traj_name]:
-                assert metric_name in result_sort["agg_value"][view][traj_name]
-                a = np.asarray(result_no_sort["agg_value"][view][traj_name][metric_name])
-                b = np.asarray(result_sort["agg_value"][view][traj_name][metric_name])
+        for traj_name in r_no_sort["agg_value"][view]:
+            assert traj_name in r_sort["agg_value"][view]
+            for metric_name in r_no_sort["agg_value"][view][traj_name]:
+                assert metric_name in r_sort["agg_value"][view][traj_name]
+                a = np.asarray(r_no_sort["agg_value"][view][traj_name][metric_name])
+                b = np.asarray(r_sort["agg_value"][view][traj_name][metric_name])
                 np.testing.assert_allclose(a, b, rtol=1e-5, atol=1e-8)
 
     def test_batch_size_four_same_aggregate_as_batch_size_one(self):
@@ -2191,15 +2217,17 @@ class TestTrajectoryMetricsIntegration:
         result_b1 = trajectory_metrics(model, **base_kwargs, batch_size=1)
         result_b4 = trajectory_metrics(model, **base_kwargs, batch_size=4)
 
-        assert result_b1 is not None and "agg_value" in result_b1
-        assert result_b4 is not None and "agg_value" in result_b4
+        r_b1 = _trajectory_result_effective(result_b1)
+        r_b4 = _trajectory_result_effective(result_b4)
+        assert r_b1 is not None and "agg_value" in r_b1
+        assert r_b4 is not None and "agg_value" in r_b4
         view = "full"
-        for traj_name in result_b1["agg_value"][view]:
-            assert traj_name in result_b4["agg_value"][view]
-            for metric_name in result_b1["agg_value"][view][traj_name]:
-                assert metric_name in result_b4["agg_value"][view][traj_name]
-                a = np.asarray(result_b1["agg_value"][view][traj_name][metric_name])
-                b = np.asarray(result_b4["agg_value"][view][traj_name][metric_name])
+        for traj_name in r_b1["agg_value"][view]:
+            assert traj_name in r_b4["agg_value"][view]
+            for metric_name in r_b1["agg_value"][view][traj_name]:
+                assert metric_name in r_b4["agg_value"][view][traj_name]
+                a = np.asarray(r_b1["agg_value"][view][traj_name][metric_name])
+                b = np.asarray(r_b4["agg_value"][view][traj_name][metric_name])
                 np.testing.assert_allclose(a, b, rtol=1e-5, atol=1e-8)
 
     def test_include_views_full_only_returns_single_view(self):
@@ -2237,8 +2265,10 @@ class TestTrajectoryMetricsIntegration:
                 "sampler_kwargs": {"steps": S, "max_new_tokens": L_gen},
             },
         )
-        assert set(result["agg_value"].keys()) == {"full"}
-        assert set(result["step_distribution"].keys()) == {"full"}
+        r = _trajectory_result_effective(result)
+        assert r is not None
+        assert set(r["agg_value"].keys()) == {"full"}
+        assert set(r["step_distribution"].keys()) == {"full"}
 
     def test_include_views_eos_only_returns_single_view(self):
         """With include_views=[eos], result contains only 'eos' in agg_value and step_distribution."""
@@ -2275,8 +2305,10 @@ class TestTrajectoryMetricsIntegration:
                 "sampler_kwargs": {"steps": S, "max_new_tokens": L_gen},
             },
         )
-        assert set(result["agg_value"].keys()) == {"eos"}
-        assert set(result["step_distribution"].keys()) == {"eos"}
+        r = _trajectory_result_effective(result)
+        assert r is not None
+        assert set(r["agg_value"].keys()) == {"eos"}
+        assert set(r["step_distribution"].keys()) == {"eos"}
 
     def test_include_views_both_returns_full_and_eos(self):
         """Default include_views (both) returns 'full' and 'eos' in agg_value and step_distribution."""
@@ -2313,14 +2345,16 @@ class TestTrajectoryMetricsIntegration:
                 "sampler_kwargs": {"steps": S, "max_new_tokens": L_gen},
             },
         )
-        assert set(result["agg_value"].keys()) == {"full", "eos"}
-        assert set(result["step_distribution"].keys()) == {"full", "eos"}
+        r = _trajectory_result_effective(result)
+        assert r is not None
+        assert set(r["agg_value"].keys()) == {"full", "eos"}
+        assert set(r["step_distribution"].keys()) == {"full", "eos"}
         import numpy as np
         view = "full"
-        for traj_name in result["agg_value"][view]:
-            for metric_name in result["agg_value"][view][traj_name]:
-                a_full = np.asarray(result["agg_value"]["full"][traj_name][metric_name])
-                a_eos = np.asarray(result["agg_value"]["eos"][traj_name][metric_name])
+        for traj_name in r["agg_value"][view]:
+            for metric_name in r["agg_value"][view][traj_name]:
+                a_full = np.asarray(r["agg_value"]["full"][traj_name][metric_name])
+                a_eos = np.asarray(r["agg_value"]["eos"][traj_name][metric_name])
                 assert a_full.shape == a_eos.shape, "full and eos should have same step count"
 
     def test_eos_view_diffs_from_full_when_eos_in_sequences(self):
@@ -2379,14 +2413,16 @@ class TestTrajectoryMetricsIntegration:
                 "sampler_kwargs": {"steps": S, "max_new_tokens": L_gen},
             },
         )
-        assert "full" in result["agg_value"] and "eos" in result["agg_value"]
+        r = _trajectory_result_effective(result)
+        assert r is not None
+        assert "full" in r["agg_value"] and "eos" in r["agg_value"]
         import numpy as np
         # Both views should have same number of steps; values may differ because eos uses shorter sequence
-        for traj_name in result["agg_value"]["full"]:
-            assert traj_name in result["agg_value"]["eos"]
-            for metric_name in result["agg_value"]["full"][traj_name]:
-                a_full = np.asarray(result["agg_value"]["full"][traj_name][metric_name])
-                a_eos = np.asarray(result["agg_value"]["eos"][traj_name][metric_name])
+        for traj_name in r["agg_value"]["full"]:
+            assert traj_name in r["agg_value"]["eos"]
+            for metric_name in r["agg_value"]["full"][traj_name]:
+                a_full = np.asarray(r["agg_value"]["full"][traj_name][metric_name])
+                a_eos = np.asarray(r["agg_value"]["eos"][traj_name][metric_name])
                 assert a_full.shape == a_eos.shape
                 # With different lengths (4 vs 8), probability aggregates can differ
                 assert a_full.size > 0 and a_eos.size > 0
@@ -2511,7 +2547,7 @@ class TestPreComputeMetrics:
             "probability": {
                 "access_key": "correct",
             },
-            "probability": {  # Can reuse same metric
+            "probability": {  # noqa: F601  # Can reuse same metric (second overwrites in dict)
                 "access_key": "wrong",
             },
         }
@@ -2599,7 +2635,7 @@ class TestMetricConfigWithPreCompute:
                 "probability": {
                     "access_key": "correct",
                 },
-                "probability": {
+                "probability": {  # noqa: F601
                     "access_key": "wrong",
                 },
             },
@@ -2690,7 +2726,7 @@ class TestCallMetricAtStep:
             "evals.metrics.trajectory_metrics._compute_pre_compute_metrics_at_step",
             return_value={"correct": {"agg_value": 0.8, "value_by_index": {"0": {"prob": 0.8}}}},
         ):
-            result = _call_metric_at_step(
+            _ = _call_metric_at_step(
                 metric=mock_metric,
                 logits=logits,
                 batch_template=batch_template,
@@ -2721,13 +2757,13 @@ class TestProbabilityFixationLogitsRegression:
         """L_logits < L_labels, interval=1: labels_sliced = full[:, :L_logits], no crash."""
         if "probability" not in METRICS_REGISTRY:
             pytest.skip("probability not registered")
-        prob_metric = METRICS_REGISTRY["probability"]
+        _ = METRICS_REGISTRY["probability"]  # prob_metric, reserved
         V, L_logits, L_labels = 50, 10, 100
         device = torch.device("cpu")
         logits = torch.randn(1, L_logits, V)
         labels_full = torch.randint(0, V, (1, L_labels))
         labels_full[0, :5] = IGNORE_INDEX
-        batch = {"labels": labels_full}
+        _ = {"labels": labels_full}  # batch, reserved
         result = _compute_prob_from_fixation_logits(
             logits, labels_full[:, :L_logits].contiguous(), device, ignore_index=IGNORE_INDEX
         )

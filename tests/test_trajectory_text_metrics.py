@@ -10,7 +10,7 @@ Tests cover:
 
 import pytest
 import torch
-from unittest.mock import Mock, MagicMock, patch
+from unittest.mock import Mock, patch
 from omegaconf import OmegaConf, DictConfig
 
 import sys
@@ -24,7 +24,6 @@ from evals.metrics.trajectory_metrics import (
     _call_metric_at_step,
     _handle_text_based_metric,
 )
-from evals.metrics.trajectory_adapters import LogitModelWrapper
 from evals.metrics import METRICS_REGISTRY
 
 
@@ -96,7 +95,7 @@ class TestTextBasedMetricHandler:
             mock_eval.return_value = [{"rougeL_f1": 0.5}]
             
             # This should not raise ValueError about OmegaConf
-            result = _handle_text_based_metric(
+            _ = _handle_text_based_metric(
                 logits=logits,
                 tokenizer=tokenizer,
                 sample_labels=sample_labels,
@@ -345,10 +344,11 @@ class TestTrajectoryMetricsWithTwoMetrics:
             # This should run without errors
             result = raw_fn(model, **kwargs)
             
-            # Check result structure (agg_value is keyed by view: full, eos; then traj type)
+            # Check result structure (unified: one display key or legacy top-level agg_value)
             assert isinstance(result, dict)
-            if "agg_value" in result:
-                agg_value_by_view = result["agg_value"]
+            payload = result if "agg_value" in result else (next(iter(result.values())) if len(result) == 1 else {})
+            if payload and "agg_value" in payload:
+                agg_value_by_view = payload["agg_value"]
                 assert isinstance(agg_value_by_view, dict)
                 # At least one view (e.g. "full") present
                 views = [k for k in agg_value_by_view if k in ("full", "eos")]

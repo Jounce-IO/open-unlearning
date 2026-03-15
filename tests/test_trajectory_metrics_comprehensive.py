@@ -11,8 +11,8 @@ Tests cover:
 import pytest
 import torch
 import numpy as np
-from unittest.mock import Mock, MagicMock, patch
-from omegaconf import ListConfig, DictConfig, OmegaConf
+from unittest.mock import Mock, patch
+from omegaconf import ListConfig, DictConfig
 
 import sys
 from pathlib import Path
@@ -22,14 +22,11 @@ repo_root = Path(__file__).parent.parent
 sys.path.insert(0, str(repo_root / "src"))
 
 from evals.metrics.trajectory_metrics import (
-    _get_sampler_from_model,
-    _get_metric_from_registry,
     _call_metric_at_step,
     _compute_pre_compute_metrics_at_step,
     _handle_text_based_metric,
     trajectory_metrics,
 )
-from evals.metrics.trajectory_utils import stack_logits_history
 from evals.metrics import METRICS_REGISTRY
 
 
@@ -41,12 +38,12 @@ class TestPreComputeMetricsResultFormats:
         V, L = 50, 5
         logits = torch.randn(V, L)
         batch_template = {
-            "input_ids": torch.zeros(1, L),
-            "labels": torch.zeros(1, L),
+            "input_ids": torch.zeros(1, L, dtype=torch.long),
+            "labels": torch.zeros(1, L, dtype=torch.long),
         }
         tokenizer = Mock()
-        sample_labels = torch.zeros(L)
-        sample_input_ids = torch.zeros(L)
+        sample_labels = torch.zeros(L, dtype=torch.long)
+        sample_input_ids = torch.zeros(L, dtype=torch.long)
         sample_prompt_len = 0
         sample_idx = "0"
         
@@ -84,12 +81,12 @@ class TestPreComputeMetricsResultFormats:
         V, L = 50, 5
         logits = torch.randn(V, L)
         batch_template = {
-            "input_ids": torch.zeros(1, L),
-            "labels": torch.zeros(1, L),
+            "input_ids": torch.zeros(1, L, dtype=torch.long),
+            "labels": torch.zeros(1, L, dtype=torch.long),
         }
         tokenizer = Mock()
-        sample_labels = torch.zeros(L)
-        sample_input_ids = torch.zeros(L)
+        sample_labels = torch.zeros(L, dtype=torch.long)
+        sample_input_ids = torch.zeros(L, dtype=torch.long)
         sample_prompt_len = 0
         sample_idx = "0"
         
@@ -126,12 +123,12 @@ class TestPreComputeMetricsResultFormats:
         V, L = 50, 5
         logits = torch.randn(V, L)
         batch_template = {
-            "input_ids": torch.zeros(1, L),
-            "labels": torch.zeros(1, L),
+            "input_ids": torch.zeros(1, L, dtype=torch.long),
+            "labels": torch.zeros(1, L, dtype=torch.long),
         }
         tokenizer = Mock()
-        sample_labels = torch.zeros(L)
-        sample_input_ids = torch.zeros(L)
+        sample_labels = torch.zeros(L, dtype=torch.long)
+        sample_input_ids = torch.zeros(L, dtype=torch.long)
         sample_prompt_len = 0
         sample_idx = "0"
         
@@ -164,12 +161,12 @@ class TestPreComputeMetricsResultFormats:
         V, L = 50, 5
         logits = torch.randn(V, L)
         batch_template = {
-            "input_ids": torch.zeros(1, L),
-            "labels": torch.zeros(1, L),
+            "input_ids": torch.zeros(1, L, dtype=torch.long),
+            "labels": torch.zeros(1, L, dtype=torch.long),
         }
         tokenizer = Mock()
-        sample_labels = torch.zeros(L)
-        sample_input_ids = torch.zeros(L)
+        sample_labels = torch.zeros(L, dtype=torch.long)
+        sample_input_ids = torch.zeros(L, dtype=torch.long)
         sample_prompt_len = 0
         sample_idx = "0"
         
@@ -202,12 +199,12 @@ class TestPreComputeMetricsResultFormats:
         V, L = 50, 5
         logits = torch.randn(V, L)
         batch_template = {
-            "input_ids": torch.zeros(1, L),
-            "labels": torch.zeros(1, L),
+            "input_ids": torch.zeros(1, L, dtype=torch.long),
+            "labels": torch.zeros(1, L, dtype=torch.long),
         }
         tokenizer = Mock()
-        sample_labels = torch.zeros(L)
-        sample_input_ids = torch.zeros(L)
+        sample_labels = torch.zeros(L, dtype=torch.long)
+        sample_input_ids = torch.zeros(L, dtype=torch.long)
         sample_prompt_len = 0
         sample_idx = "0"
         
@@ -239,12 +236,12 @@ class TestPreComputeMetricsResultFormats:
         V, L = 50, 5
         logits = torch.randn(V, L)
         batch_template = {
-            "input_ids": torch.zeros(1, L),
-            "labels": torch.zeros(1, L),
+            "input_ids": torch.zeros(1, L, dtype=torch.long),
+            "labels": torch.zeros(1, L, dtype=torch.long),
         }
         tokenizer = Mock()
-        sample_labels = torch.zeros(L)
-        sample_input_ids = torch.zeros(L)
+        sample_labels = torch.zeros(L, dtype=torch.long)
+        sample_input_ids = torch.zeros(L, dtype=torch.long)
         sample_prompt_len = 0
         sample_idx = "0"
         
@@ -276,12 +273,12 @@ class TestPreComputeMetricsResultFormats:
         V, L = 50, 5
         logits = torch.randn(V, L)
         batch_template = {
-            "input_ids": torch.zeros(1, L),
-            "labels": torch.zeros(1, L),
+            "input_ids": torch.zeros(1, L, dtype=torch.long),
+            "labels": torch.zeros(1, L, dtype=torch.long),
         }
         tokenizer = Mock()
-        sample_labels = torch.zeros(L)
-        sample_input_ids = torch.zeros(L)
+        sample_labels = torch.zeros(L, dtype=torch.long)
+        sample_input_ids = torch.zeros(L, dtype=torch.long)
         sample_prompt_len = 0
         sample_idx = "0"
         
@@ -313,12 +310,12 @@ class TestPreComputeMetricsResultFormats:
         V, L = 50, 5
         logits = torch.randn(V, L)
         batch_template = {
-            "input_ids": torch.zeros(1, L),
-            "labels": torch.zeros(1, L),
+            "input_ids": torch.zeros(1, L, dtype=torch.long),
+            "labels": torch.zeros(1, L, dtype=torch.long),
         }
         tokenizer = Mock()
-        sample_labels = torch.zeros(L)
-        sample_input_ids = torch.zeros(L)
+        sample_labels = torch.zeros(L, dtype=torch.long)
+        sample_input_ids = torch.zeros(L, dtype=torch.long)
         sample_prompt_len = 0
         sample_idx = "0"
         
@@ -350,12 +347,12 @@ class TestPreComputeMetricsResultFormats:
         V, L = 50, 5
         logits = torch.randn(V, L)
         batch_template = {
-            "input_ids": torch.zeros(1, L),
-            "labels": torch.zeros(1, L),
+            "input_ids": torch.zeros(1, L, dtype=torch.long),
+            "labels": torch.zeros(1, L, dtype=torch.long),
         }
         tokenizer = Mock()
-        sample_labels = torch.zeros(L)
-        sample_input_ids = torch.zeros(L)
+        sample_labels = torch.zeros(L, dtype=torch.long)
+        sample_input_ids = torch.zeros(L, dtype=torch.long)
         sample_prompt_len = 0
         sample_idx = "0"
         
@@ -388,12 +385,12 @@ class TestPreComputeMetricsResultFormats:
         V, L = 50, 5
         logits = torch.randn(V, L)
         batch_template = {
-            "input_ids": torch.zeros(1, L),
-            "labels": torch.zeros(1, L),
+            "input_ids": torch.zeros(1, L, dtype=torch.long),
+            "labels": torch.zeros(1, L, dtype=torch.long),
         }
         tokenizer = Mock()
-        sample_labels = torch.zeros(L)
-        sample_input_ids = torch.zeros(L)
+        sample_labels = torch.zeros(L, dtype=torch.long)
+        sample_input_ids = torch.zeros(L, dtype=torch.long)
         sample_prompt_len = 0
         sample_idx = "0"
         
@@ -426,12 +423,12 @@ class TestPreComputeMetricsResultFormats:
         V, L = 50, 5
         logits = torch.randn(V, L)
         batch_template = {
-            "input_ids": torch.zeros(1, L),
-            "labels": torch.zeros(1, L),
+            "input_ids": torch.zeros(1, L, dtype=torch.long),
+            "labels": torch.zeros(1, L, dtype=torch.long),
         }
         tokenizer = Mock()
-        sample_labels = torch.zeros(L)
-        sample_input_ids = torch.zeros(L)
+        sample_labels = torch.zeros(L, dtype=torch.long)
+        sample_input_ids = torch.zeros(L, dtype=torch.long)
         sample_prompt_len = 0
         sample_idx = "0"
         
@@ -464,12 +461,12 @@ class TestPreComputeMetricsResultFormats:
         V, L = 50, 5
         logits = torch.randn(V, L)
         batch_template = {
-            "input_ids": torch.zeros(1, L),
-            "labels": torch.zeros(1, L),
+            "input_ids": torch.zeros(1, L, dtype=torch.long),
+            "labels": torch.zeros(1, L, dtype=torch.long),
         }
         tokenizer = Mock()
-        sample_labels = torch.zeros(L)
-        sample_input_ids = torch.zeros(L)
+        sample_labels = torch.zeros(L, dtype=torch.long)
+        sample_input_ids = torch.zeros(L, dtype=torch.long)
         sample_prompt_len = 0
         sample_idx = "0"
         
@@ -501,12 +498,12 @@ class TestPreComputeMetricsResultFormats:
         V, L = 50, 5
         logits = torch.randn(V, L)
         batch_template = {
-            "input_ids": torch.zeros(1, L),
-            "labels": torch.zeros(1, L),
+            "input_ids": torch.zeros(1, L, dtype=torch.long),
+            "labels": torch.zeros(1, L, dtype=torch.long),
         }
         tokenizer = Mock()
-        sample_labels = torch.zeros(L)
-        sample_input_ids = torch.zeros(L)
+        sample_labels = torch.zeros(L, dtype=torch.long)
+        sample_input_ids = torch.zeros(L, dtype=torch.long)
         sample_prompt_len = 0
         sample_idx = "0"
         
@@ -538,12 +535,12 @@ class TestPreComputeMetricsResultFormats:
         V, L = 50, 5
         logits = torch.randn(V, L)
         batch_template = {
-            "input_ids": torch.zeros(1, L),
-            "labels": torch.zeros(1, L),
+            "input_ids": torch.zeros(1, L, dtype=torch.long),
+            "labels": torch.zeros(1, L, dtype=torch.long),
         }
         tokenizer = Mock()
-        sample_labels = torch.zeros(L)
-        sample_input_ids = torch.zeros(L)
+        sample_labels = torch.zeros(L, dtype=torch.long)
+        sample_input_ids = torch.zeros(L, dtype=torch.long)
         sample_prompt_len = 0
         sample_idx = "0"
         
@@ -575,12 +572,12 @@ class TestPreComputeMetricsResultFormats:
         V, L = 50, 5
         logits = torch.randn(V, L)
         batch_template = {
-            "input_ids": torch.zeros(1, L),
-            "labels": torch.zeros(1, L),
+            "input_ids": torch.zeros(1, L, dtype=torch.long),
+            "labels": torch.zeros(1, L, dtype=torch.long),
         }
         tokenizer = Mock()
-        sample_labels = torch.zeros(L)
-        sample_input_ids = torch.zeros(L)
+        sample_labels = torch.zeros(L, dtype=torch.long)
+        sample_input_ids = torch.zeros(L, dtype=torch.long)
         sample_prompt_len = 0
         sample_idx = "0"
         
@@ -612,12 +609,12 @@ class TestPreComputeMetricsResultFormats:
         V, L = 50, 5
         logits = torch.randn(V, L)
         batch_template = {
-            "input_ids": torch.zeros(1, L),
-            "labels": torch.zeros(1, L),
+            "input_ids": torch.zeros(1, L, dtype=torch.long),
+            "labels": torch.zeros(1, L, dtype=torch.long),
         }
         tokenizer = Mock()
-        sample_labels = torch.zeros(L)
-        sample_input_ids = torch.zeros(L)
+        sample_labels = torch.zeros(L, dtype=torch.long)
+        sample_input_ids = torch.zeros(L, dtype=torch.long)
         sample_prompt_len = 0
         sample_idx = "0"
         
@@ -649,12 +646,12 @@ class TestPreComputeMetricsResultFormats:
         V, L = 50, 5
         logits = torch.randn(V, L)
         batch_template = {
-            "input_ids": torch.zeros(1, L),
-            "labels": torch.zeros(1, L),
+            "input_ids": torch.zeros(1, L, dtype=torch.long),
+            "labels": torch.zeros(1, L, dtype=torch.long),
         }
         tokenizer = Mock()
-        sample_labels = torch.zeros(L)
-        sample_input_ids = torch.zeros(L)
+        sample_labels = torch.zeros(L, dtype=torch.long)
+        sample_input_ids = torch.zeros(L, dtype=torch.long)
         sample_prompt_len = 0
         sample_idx = "0"
         
@@ -686,12 +683,12 @@ class TestPreComputeMetricsResultFormats:
         V, L = 50, 5
         logits = torch.randn(V, L)
         batch_template = {
-            "input_ids": torch.zeros(1, L),
-            "labels": torch.zeros(1, L),
+            "input_ids": torch.zeros(1, L, dtype=torch.long),
+            "labels": torch.zeros(1, L, dtype=torch.long),
         }
         tokenizer = Mock()
-        sample_labels = torch.zeros(L)
-        sample_input_ids = torch.zeros(L)
+        sample_labels = torch.zeros(L, dtype=torch.long)
+        sample_input_ids = torch.zeros(L, dtype=torch.long)
         sample_prompt_len = 0
         sample_idx = "0"
         
@@ -727,12 +724,12 @@ class TestPreComputeMetricsMetricLoading:
         V, L = 50, 5
         logits = torch.randn(V, L)
         batch_template = {
-            "input_ids": torch.zeros(1, L),
-            "labels": torch.zeros(1, L),
+            "input_ids": torch.zeros(1, L, dtype=torch.long),
+            "labels": torch.zeros(1, L, dtype=torch.long),
         }
         tokenizer = Mock()
-        sample_labels = torch.zeros(L)
-        sample_input_ids = torch.zeros(L)
+        sample_labels = torch.zeros(L, dtype=torch.long)
+        sample_input_ids = torch.zeros(L, dtype=torch.long)
         sample_prompt_len = 0
         sample_idx = "0"
         
@@ -763,12 +760,12 @@ class TestPreComputeMetricsMetricLoading:
         V, L = 50, 5
         logits = torch.randn(V, L)
         batch_template = {
-            "input_ids": torch.zeros(1, L),
-            "labels": torch.zeros(1, L),
+            "input_ids": torch.zeros(1, L, dtype=torch.long),
+            "labels": torch.zeros(1, L, dtype=torch.long),
         }
         tokenizer = Mock()
-        sample_labels = torch.zeros(L)
-        sample_input_ids = torch.zeros(L)
+        sample_labels = torch.zeros(L, dtype=torch.long)
+        sample_input_ids = torch.zeros(L, dtype=torch.long)
         sample_prompt_len = 0
         sample_idx = "0"
         
@@ -802,12 +799,12 @@ class TestPreComputeMetricsMetricLoading:
         V, L = 50, 5
         logits = torch.randn(V, L)
         batch_template = {
-            "input_ids": torch.zeros(1, L),
-            "labels": torch.zeros(1, L),
+            "input_ids": torch.zeros(1, L, dtype=torch.long),
+            "labels": torch.zeros(1, L, dtype=torch.long),
         }
         tokenizer = Mock()
-        sample_labels = torch.zeros(L)
-        sample_input_ids = torch.zeros(L)
+        sample_labels = torch.zeros(L, dtype=torch.long)
+        sample_input_ids = torch.zeros(L, dtype=torch.long)
         sample_prompt_len = 0
         sample_idx = "0"
         
@@ -835,12 +832,12 @@ class TestPreComputeMetricsMetricLoading:
         V, L = 50, 5
         logits = torch.randn(V, L)
         batch_template = {
-            "input_ids": torch.zeros(1, L),
-            "labels": torch.zeros(1, L),
+            "input_ids": torch.zeros(1, L, dtype=torch.long),
+            "labels": torch.zeros(1, L, dtype=torch.long),
         }
         tokenizer = Mock()
-        sample_labels = torch.zeros(L)
-        sample_input_ids = torch.zeros(L)
+        sample_labels = torch.zeros(L, dtype=torch.long)
+        sample_input_ids = torch.zeros(L, dtype=torch.long)
         sample_prompt_len = 0
         sample_idx = "0"
         
@@ -872,12 +869,12 @@ class TestPreComputeMetricsMetricLoading:
         V, L = 50, 5
         logits = torch.randn(V, L)
         batch_template = {
-            "input_ids": torch.zeros(1, L),
-            "labels": torch.zeros(1, L),
+            "input_ids": torch.zeros(1, L, dtype=torch.long),
+            "labels": torch.zeros(1, L, dtype=torch.long),
         }
         tokenizer = Mock()
-        sample_labels = torch.zeros(L)
-        sample_input_ids = torch.zeros(L)
+        sample_labels = torch.zeros(L, dtype=torch.long)
+        sample_input_ids = torch.zeros(L, dtype=torch.long)
         sample_prompt_len = 0
         sample_idx = "0"
         
@@ -910,12 +907,12 @@ class TestPreComputeMetricsMetricLoading:
         V, L = 50, 5
         logits = torch.randn(V, L)
         batch_template = {
-            "input_ids": torch.zeros(1, L),
-            "labels": torch.zeros(1, L),
+            "input_ids": torch.zeros(1, L, dtype=torch.long),
+            "labels": torch.zeros(1, L, dtype=torch.long),
         }
         tokenizer = Mock()
-        sample_labels = torch.zeros(L)
-        sample_input_ids = torch.zeros(L)
+        sample_labels = torch.zeros(L, dtype=torch.long)
+        sample_input_ids = torch.zeros(L, dtype=torch.long)
         sample_prompt_len = 0
         sample_idx = "0"
         
@@ -959,12 +956,12 @@ class TestPreComputeMetricsErrorHandling:
         V, L = 50, 5
         logits = torch.randn(V, L)
         batch_template = {
-            "input_ids": torch.zeros(1, L),
-            "labels": torch.zeros(1, L),
+            "input_ids": torch.zeros(1, L, dtype=torch.long),
+            "labels": torch.zeros(1, L, dtype=torch.long),
         }
         tokenizer = Mock()
-        sample_labels = torch.zeros(L)
-        sample_input_ids = torch.zeros(L)
+        sample_labels = torch.zeros(L, dtype=torch.long)
+        sample_input_ids = torch.zeros(L, dtype=torch.long)
         sample_prompt_len = 0
         sample_idx = "0"
         
@@ -998,12 +995,12 @@ class TestPreComputeMetricsErrorHandling:
         V, L = 50, 5
         logits = torch.randn(V, L)
         batch_template = {
-            "input_ids": torch.zeros(1, L),
-            "labels": torch.zeros(1, L),
+            "input_ids": torch.zeros(1, L, dtype=torch.long),
+            "labels": torch.zeros(1, L, dtype=torch.long),
         }
         tokenizer = Mock()
-        sample_labels = torch.zeros(L)
-        sample_input_ids = torch.zeros(L)
+        sample_labels = torch.zeros(L, dtype=torch.long)
+        sample_input_ids = torch.zeros(L, dtype=torch.long)
         sample_prompt_len = 0
         sample_idx = "0"
         
@@ -1036,12 +1033,12 @@ class TestPreComputeMetricsErrorHandling:
         V, L = 50, 5
         logits = torch.randn(V, L)
         batch_template = {
-            "input_ids": torch.zeros(1, L),
-            "labels": torch.zeros(1, L),
+            "input_ids": torch.zeros(1, L, dtype=torch.long),
+            "labels": torch.zeros(1, L, dtype=torch.long),
         }
         tokenizer = Mock()
-        sample_labels = torch.zeros(L)
-        sample_input_ids = torch.zeros(L)
+        sample_labels = torch.zeros(L, dtype=torch.long)
+        sample_input_ids = torch.zeros(L, dtype=torch.long)
         sample_prompt_len = 0
         sample_idx = "0"
         
@@ -1069,12 +1066,12 @@ class TestPreComputeMetricsTensorHandling:
         """Test logits with different shapes [V, L] or [1, L, V]."""
         logits = torch.randn(*logits_shape)
         batch_template = {
-            "input_ids": torch.zeros(1, 10),
-            "labels": torch.zeros(1, 10),
+            "input_ids": torch.zeros(1, 10, dtype=torch.long),
+            "labels": torch.zeros(1, 10, dtype=torch.long),
         }
         tokenizer = Mock()
-        sample_labels = torch.zeros(10)
-        sample_input_ids = torch.zeros(10)
+        sample_labels = torch.zeros(10, dtype=torch.long)
+        sample_input_ids = torch.zeros(10, dtype=torch.long)
         sample_prompt_len = 0
         sample_idx = "0"
         
@@ -1105,12 +1102,12 @@ class TestPreComputeMetricsTensorHandling:
         V, L = 50, 5
         logits = torch.randn(V, L)
         batch_template = {
-            "input_ids": torch.zeros(1, L),
+            "input_ids": torch.zeros(1, L, dtype=torch.long),
             # Missing labels, attention_mask
         }
         tokenizer = Mock()
-        sample_labels = torch.zeros(L)
-        sample_input_ids = torch.zeros(L)
+        sample_labels = torch.zeros(L, dtype=torch.long)
+        sample_input_ids = torch.zeros(L, dtype=torch.long)
         sample_prompt_len = 0
         sample_idx = "0"
         
@@ -1145,13 +1142,13 @@ class TestPreComputeMetricsTensorHandling:
         V, L = 50, 5
         logits = torch.randn(V, L)
         batch_template = {
-            "input_ids": torch.zeros(1, L),
+            "input_ids": torch.zeros(1, L, dtype=torch.long),
             "labels": None,  # None value
             "attention_mask": None,
         }
         tokenizer = Mock()
-        sample_labels = torch.zeros(L)
-        sample_input_ids = torch.zeros(L)
+        sample_labels = torch.zeros(L, dtype=torch.long)
+        sample_input_ids = torch.zeros(L, dtype=torch.long)
         sample_prompt_len = 0
         sample_idx = "0"
         
@@ -1186,12 +1183,12 @@ class TestPreComputeMetricsTensorHandling:
         V, L = 50, 5
         logits = torch.randn(V, L)
         batch_template = {
-            "input_ids": torch.zeros(1, L),
+            "input_ids": torch.zeros(1, L, dtype=torch.long),
             "labels": torch.full((1, L), -100, dtype=torch.long),  # All IGNORE_INDEX
         }
         tokenizer = Mock()
         sample_labels = torch.full((L,), -100, dtype=torch.long)
-        sample_input_ids = torch.zeros(L)
+        sample_input_ids = torch.zeros(L, dtype=torch.long)
         sample_prompt_len = 0
         sample_idx = "0"
         
@@ -1222,12 +1219,12 @@ class TestPreComputeMetricsTensorHandling:
         V, L = 50, 5
         logits = torch.randn(V, L)
         batch_template = {
-            "input_ids": torch.zeros(1, L),
+            "input_ids": torch.zeros(1, L, dtype=torch.long),
             "labels": None,
         }
         tokenizer = Mock()
         sample_labels = None
-        sample_input_ids = torch.zeros(L)
+        sample_input_ids = torch.zeros(L, dtype=torch.long)
         sample_prompt_len = 0
         sample_idx = "0"
         
@@ -1258,14 +1255,14 @@ class TestPreComputeMetricsTensorHandling:
         V, L = 50, 5
         logits = torch.randn(V, L)
         batch_template = {
-            "input_ids": torch.zeros(1, L),
-            "labels": torch.zeros(1, L),
+            "input_ids": torch.zeros(1, L, dtype=torch.long),
+            "labels": torch.zeros(1, L, dtype=torch.long),
         }
         tokenizer = Mock()
-        sample_labels = torch.zeros(L)
+        sample_labels = torch.zeros(L, dtype=torch.long)
         
         for shape in [(L,), (1, L), (L, 1)]:
-            sample_input_ids = torch.zeros(*shape)
+            sample_input_ids = torch.zeros(*shape, dtype=torch.long)
             sample_prompt_len = 0
             sample_idx = "0"
             
@@ -1299,12 +1296,12 @@ class TestPreComputeMetricsTensorHandling:
         V, L = 50, 5
         logits = torch.randn(V, L)
         batch_template = {
-            "input_ids": torch.zeros(1, L),
-            "labels": torch.zeros(1, L),
+            "input_ids": torch.zeros(1, L, dtype=torch.long),
+            "labels": torch.zeros(1, L, dtype=torch.long),
         }
         tokenizer = Mock()
-        sample_labels = torch.zeros(L)
-        sample_input_ids = torch.zeros(L)
+        sample_labels = torch.zeros(L, dtype=torch.long)
+        sample_input_ids = torch.zeros(L, dtype=torch.long)
         sample_prompt_len = 0
         
         pre_compute_config = {
@@ -1686,10 +1683,10 @@ class TestHandleTextBasedMetric:
         sample_input_ids = torch.randint(0, V, (5,))
         sample_prompt_len = 5
         
-        with patch("evals.metrics.utils.eval_text_similarity") as mock_eval:
+        with patch("evals.metrics.utils.eval_text_similarity") as _mock_eval:
             # Should handle decode error gracefully or propagate
             try:
-                result = _handle_text_based_metric(
+                _ = _handle_text_based_metric(
                     logits=logits,
                     tokenizer=tokenizer,
                     sample_labels=sample_labels,
@@ -1793,74 +1790,70 @@ class TestCallMetricAtStepComprehensive:
         V, L = 50, 5
         logits = torch.randn(V, L)
         batch_template = {
-            "input_ids": torch.zeros(1, L),
-            "labels": torch.zeros(1, L),
+            "input_ids": torch.zeros(1, L, dtype=torch.long),
+            "labels": torch.zeros(1, L, dtype=torch.long),
         }
-        
         received_shape = None
-        
+
         def mock_metric_fn(model, batch, **kwargs):
             nonlocal received_shape
             received_shape = model.logits.shape
             return [{"test": 1.0}]
-        
-        if "probability" in METRICS_REGISTRY:
-            prob_metric = METRICS_REGISTRY["probability"]
-            with patch.object(prob_metric, "_metric_fn", side_effect=mock_metric_fn):
-                _call_metric_at_step(
-                    metric=prob_metric,
-                    logits=logits,
-                    batch_template=batch_template,
-                    tokenizer=Mock(),
-                    sample_labels=torch.zeros(L),
-                    sample_input_ids=torch.zeros(L),
-                    sample_prompt_len=0,
-                    metric_config={},
-                    sample_idx="0",
-                )
-                
-                assert received_shape == (1, L, V)
+
+        mock_metric = Mock()
+        mock_metric.name = "custom_metric"
+        mock_metric._metric_fn = mock_metric_fn
+        _call_metric_at_step(
+            metric=mock_metric,
+            logits=logits,
+            batch_template=batch_template,
+            tokenizer=Mock(),
+            sample_labels=torch.zeros(L, dtype=torch.long),
+            sample_input_ids=torch.zeros(L, dtype=torch.long),
+            sample_prompt_len=0,
+            metric_config={},
+            sample_idx="0",
+        )
+        assert received_shape == (1, L, V)
     
     def test_logits_1_l_v_preserved(self):
         """Test logits [1, L, V] → preserved."""
         V, L = 50, 5
         logits = torch.randn(1, L, V)
         batch_template = {
-            "input_ids": torch.zeros(1, L),
-            "labels": torch.zeros(1, L),
+            "input_ids": torch.zeros(1, L, dtype=torch.long),
+            "labels": torch.zeros(1, L, dtype=torch.long),
         }
-        
         received_shape = None
-        
+
         def mock_metric_fn(model, batch, **kwargs):
             nonlocal received_shape
             received_shape = model.logits.shape
             return [{"test": 1.0}]
-        
-        if "probability" in METRICS_REGISTRY:
-            prob_metric = METRICS_REGISTRY["probability"]
-            with patch.object(prob_metric, "_metric_fn", side_effect=mock_metric_fn):
-                _call_metric_at_step(
-                    metric=prob_metric,
-                    logits=logits,
-                    batch_template=batch_template,
-                    tokenizer=Mock(),
-                    sample_labels=torch.zeros(L),
-                    sample_input_ids=torch.zeros(L),
-                    sample_prompt_len=0,
-                    metric_config={},
-                    sample_idx="0",
-                )
-                
-                assert received_shape == (1, L, V)
+
+        mock_metric = Mock()
+        mock_metric.name = "custom_metric"
+        mock_metric._metric_fn = mock_metric_fn
+        _call_metric_at_step(
+            metric=mock_metric,
+            logits=logits,
+            batch_template=batch_template,
+            tokenizer=Mock(),
+            sample_labels=torch.zeros(L, dtype=torch.long),
+            sample_input_ids=torch.zeros(L, dtype=torch.long),
+            sample_prompt_len=0,
+            metric_config={},
+            sample_idx="0",
+        )
+        assert received_shape == (1, L, V)
     
     def test_logits_2_l_v_raises_error(self):
         """Test logits [2, L, V] → raises ValueError."""
         V, L = 50, 5
         logits = torch.randn(2, L, V)  # Batch size 2
         batch_template = {
-            "input_ids": torch.zeros(1, L),
-            "labels": torch.zeros(1, L),
+            "input_ids": torch.zeros(1, L, dtype=torch.long),
+            "labels": torch.zeros(1, L, dtype=torch.long),
         }
         
         if "probability" in METRICS_REGISTRY:
@@ -1871,8 +1864,8 @@ class TestCallMetricAtStepComprehensive:
                     logits=logits,
                     batch_template=batch_template,
                     tokenizer=Mock(),
-                    sample_labels=torch.zeros(L),
-                    sample_input_ids=torch.zeros(L),
+                    sample_labels=torch.zeros(L, dtype=torch.long),
+                    sample_input_ids=torch.zeros(L, dtype=torch.long),
                     sample_prompt_len=0,
                     metric_config={},
                     sample_idx="0",
@@ -1883,8 +1876,8 @@ class TestCallMetricAtStepComprehensive:
         V, L = 50, 5
         logits = torch.randn(1, 1, L, V)  # 4D
         batch_template = {
-            "input_ids": torch.zeros(1, L),
-            "labels": torch.zeros(1, L),
+            "input_ids": torch.zeros(1, L, dtype=torch.long),
+            "labels": torch.zeros(1, L, dtype=torch.long),
         }
         
         if "probability" in METRICS_REGISTRY:
@@ -1895,8 +1888,8 @@ class TestCallMetricAtStepComprehensive:
                     logits=logits,
                     batch_template=batch_template,
                     tokenizer=Mock(),
-                    sample_labels=torch.zeros(L),
-                    sample_input_ids=torch.zeros(L),
+                    sample_labels=torch.zeros(L, dtype=torch.long),
+                    sample_input_ids=torch.zeros(L, dtype=torch.long),
                     sample_prompt_len=0,
                     metric_config={},
                     sample_idx="0",
@@ -1907,148 +1900,136 @@ class TestCallMetricAtStepComprehensive:
         V, L = 50, 5
         logits = torch.randn(V, L)
         batch_template = {
-            "input_ids": torch.zeros(1, L),
-            "labels": torch.zeros(1, L),
+            "input_ids": torch.zeros(1, L, dtype=torch.long),
+            "labels": torch.zeros(1, L, dtype=torch.long),
         }
         tokenizer = Mock()
-        
         received_tokenizer = None
-        
+
         def mock_metric_fn(model, batch, tokenizer, **kwargs):
             nonlocal received_tokenizer
             received_tokenizer = tokenizer
             return [{"test": 1.0}]
-        
-        if "probability" in METRICS_REGISTRY:
-            prob_metric = METRICS_REGISTRY["probability"]
-            with patch.object(prob_metric, "_metric_fn", side_effect=mock_metric_fn):
-                _call_metric_at_step(
-                    metric=prob_metric,
-                    logits=logits,
-                    batch_template=batch_template,
-                    tokenizer=tokenizer,
-                    sample_labels=torch.zeros(L),
-                    sample_input_ids=torch.zeros(L),
-                    sample_prompt_len=0,
-                    metric_config={},
-                    sample_idx="0",
-                )
-                
-                assert received_tokenizer is tokenizer
+
+        mock_metric = Mock()
+        mock_metric.name = "custom_metric"
+        mock_metric._metric_fn = mock_metric_fn
+        _call_metric_at_step(
+            metric=mock_metric,
+            logits=logits,
+            batch_template=batch_template,
+            tokenizer=tokenizer,
+            sample_labels=torch.zeros(L, dtype=torch.long),
+            sample_input_ids=torch.zeros(L, dtype=torch.long),
+            sample_prompt_len=0,
+            metric_config={},
+            sample_idx="0",
+        )
+        assert received_tokenizer is tokenizer
     
     def test_tokenizer_in_kwargs_only(self):
         """Test tokenizer in kwargs only."""
         V, L = 50, 5
         logits = torch.randn(V, L)
         batch_template = {
-            "input_ids": torch.zeros(1, L),
-            "labels": torch.zeros(1, L),
+            "input_ids": torch.zeros(1, L, dtype=torch.long),
+            "labels": torch.zeros(1, L, dtype=torch.long),
         }
         tokenizer = Mock()
-        
         received_tokenizer = None
-        
+
         def mock_metric_fn(model, batch, tokenizer, **kwargs):
             nonlocal received_tokenizer
             received_tokenizer = tokenizer
             return [{"test": 1.0}]
-        
-        if "probability" in METRICS_REGISTRY:
-            prob_metric = METRICS_REGISTRY["probability"]
-            with patch.object(prob_metric, "_metric_fn", side_effect=mock_metric_fn):
-                _call_metric_at_step(
-                    metric=prob_metric,
-                    logits=logits,
-                    batch_template=batch_template,
-                    sample_labels=torch.zeros(L),
-                    sample_input_ids=torch.zeros(L),
-                    sample_prompt_len=0,
-                    metric_config={},
-                    sample_idx="0",
-                    tokenizer=tokenizer,  # In kwargs only
-                )
-                
-                assert received_tokenizer is tokenizer
+
+        mock_metric = Mock()
+        mock_metric.name = "custom_metric"
+        mock_metric._metric_fn = mock_metric_fn
+        _call_metric_at_step(
+            metric=mock_metric,
+            logits=logits,
+            batch_template=batch_template,
+            sample_labels=torch.zeros(L, dtype=torch.long),
+            sample_input_ids=torch.zeros(L, dtype=torch.long),
+            sample_prompt_len=0,
+            metric_config={},
+            sample_idx="0",
+            tokenizer=tokenizer,  # In kwargs only
+        )
+        assert received_tokenizer is tokenizer
     
     def test_tokenizer_in_both_explicit_and_kwargs(self):
         """Test tokenizer in both explicit and kwargs (should remove from kwargs)."""
         V, L = 50, 5
         logits = torch.randn(V, L)
         batch_template = {
-            "input_ids": torch.zeros(1, L),
-            "labels": torch.zeros(1, L),
+            "input_ids": torch.zeros(1, L, dtype=torch.long),
+            "labels": torch.zeros(1, L, dtype=torch.long),
         }
         tokenizer_explicit = Mock()
-        tokenizer_kwargs = Mock()
-        
         received_tokenizer = None
-        
+
         def mock_metric_fn(model, batch, tokenizer, **kwargs):
             nonlocal received_tokenizer
             received_tokenizer = tokenizer
             assert "tokenizer" not in kwargs  # Should be removed
             return [{"test": 1.0}]
-        
-        if "probability" in METRICS_REGISTRY:
-            prob_metric = METRICS_REGISTRY["probability"]
-            with patch.object(prob_metric, "_metric_fn", side_effect=mock_metric_fn):
-                _call_metric_at_step(
-                    metric=prob_metric,
-                    logits=logits,
-                    batch_template=batch_template,
-                    tokenizer=tokenizer_explicit,  # Explicit (takes precedence)
-                    sample_labels=torch.zeros(L),
-                    sample_input_ids=torch.zeros(L),
-                    sample_prompt_len=0,
-                    metric_config={},
-                    sample_idx="0",
-                    # tokenizer_kwargs would be in kwargs, but explicit tokenizer takes precedence
-                )
-                
-                # Should use explicit tokenizer
-                assert received_tokenizer is tokenizer_explicit
+
+        mock_metric = Mock()
+        mock_metric.name = "custom_metric"
+        mock_metric._metric_fn = mock_metric_fn
+        _call_metric_at_step(
+            metric=mock_metric,
+            logits=logits,
+            batch_template=batch_template,
+            tokenizer=tokenizer_explicit,  # Explicit (takes precedence)
+            sample_labels=torch.zeros(L, dtype=torch.long),
+            sample_input_ids=torch.zeros(L, dtype=torch.long),
+            sample_prompt_len=0,
+            metric_config={},
+            sample_idx="0",
+        )
+        assert received_tokenizer is tokenizer_explicit
     
     def test_metric_config_none_defaults_to_empty_dict(self):
         """Test metric_config None → defaults to {}."""
         V, L = 50, 5
         logits = torch.randn(V, L)
         batch_template = {
-            "input_ids": torch.zeros(1, L),
-            "labels": torch.zeros(1, L),
+            "input_ids": torch.zeros(1, L, dtype=torch.long),
+            "labels": torch.zeros(1, L, dtype=torch.long),
         }
-        
         received_config = None
-        
+
         def mock_metric_fn(model, batch, **kwargs):
             nonlocal received_config
             received_config = kwargs.get("pre_compute", "NOT_FOUND")
             return [{"test": 1.0}]
-        
-        if "probability" in METRICS_REGISTRY:
-            prob_metric = METRICS_REGISTRY["probability"]
-            with patch.object(prob_metric, "_metric_fn", side_effect=mock_metric_fn):
-                _call_metric_at_step(
-                    metric=prob_metric,
-                    logits=logits,
-                    batch_template=batch_template,
-                    tokenizer=Mock(),
-                    sample_labels=torch.zeros(L),
-                    sample_input_ids=torch.zeros(L),
-                    sample_prompt_len=0,
-                    metric_config=None,  # None
-                    sample_idx="0",
-                )
-                
-                # Should not have pre_compute (config was None/empty)
-                assert received_config == "NOT_FOUND"
+
+        mock_metric = Mock()
+        mock_metric.name = "custom_metric"
+        mock_metric._metric_fn = mock_metric_fn
+        _call_metric_at_step(
+            metric=mock_metric,
+            logits=logits,
+            batch_template=batch_template,
+            tokenizer=Mock(),
+            sample_labels=torch.zeros(L, dtype=torch.long),
+            sample_input_ids=torch.zeros(L, dtype=torch.long),
+            sample_prompt_len=0,
+            metric_config=None,  # None
+            sample_idx="0",
+        )
+        assert received_config == "NOT_FOUND"
     
     def test_sample_input_ids_none_defaults_to_zeros(self):
         """Test sample_input_ids None → defaults to zeros(1)."""
         V, L = 50, 5
         logits = torch.randn(V, L)
         batch_template = {
-            "input_ids": torch.zeros(1, L),
-            "labels": torch.zeros(1, L),
+            "input_ids": torch.zeros(1, L, dtype=torch.long),
+            "labels": torch.zeros(1, L, dtype=torch.long),
         }
         
         # Should not raise error with None input_ids
@@ -2060,7 +2041,7 @@ class TestCallMetricAtStepComprehensive:
                     logits=logits,
                     batch_template=batch_template,
                     tokenizer=Mock(),
-                    sample_labels=torch.zeros(L),
+                    sample_labels=torch.zeros(L, dtype=torch.long),
                     sample_input_ids=None,  # None
                     sample_prompt_len=0,
                     metric_config={},
@@ -2076,8 +2057,8 @@ class TestCallMetricAtStepComprehensive:
         V, L = 50, 5
         logits = torch.randn(V, L)
         batch_template = {
-            "input_ids": torch.zeros(1, L),
-            "labels": torch.zeros(1, L),
+            "input_ids": torch.zeros(1, L, dtype=torch.long),
+            "labels": torch.zeros(1, L, dtype=torch.long),
         }
         
         pre_compute_config = {
@@ -2097,8 +2078,8 @@ class TestCallMetricAtStepComprehensive:
                         logits=logits,
                         batch_template=batch_template,
                         tokenizer=Mock(),
-                        sample_labels=torch.zeros(L),
-                        sample_input_ids=torch.zeros(L),
+                        sample_labels=torch.zeros(L, dtype=torch.long),
+                        sample_input_ids=torch.zeros(L, dtype=torch.long),
                         sample_prompt_len=0,
                         metric_config={"pre_compute": pre_compute_config},
                         sample_idx=None,  # None
@@ -2111,89 +2092,82 @@ class TestCallMetricAtStepComprehensive:
         """Test that all tensors in batch template are moved to logits device."""
         V, L = 50, 5
         logits = torch.randn(V, L)
-        
         if torch.cuda.is_available():
             logits = logits.cuda()
             device = "cuda"
         else:
             device = "cpu"
-        
         batch_template = {
-            "input_ids": torch.zeros(1, L),  # On CPU
-            "labels": torch.zeros(1, L),  # On CPU
-            "attention_mask": torch.ones(1, L),  # On CPU
+            "input_ids": torch.zeros(1, L, dtype=torch.long),
+            "labels": torch.zeros(1, L, dtype=torch.long),
+            "attention_mask": torch.ones(1, L, dtype=torch.long),
         }
-        
         received_batch = None
-        
+
         def mock_metric_fn(model, batch, **kwargs):
             nonlocal received_batch
             received_batch = batch
             return [{"test": 1.0}]
-        
-        if "probability" in METRICS_REGISTRY:
-            prob_metric = METRICS_REGISTRY["probability"]
-            with patch.object(prob_metric, "_metric_fn", side_effect=mock_metric_fn):
-                _call_metric_at_step(
-                    metric=prob_metric,
-                    logits=logits,
-                    batch_template=batch_template,
-                    tokenizer=Mock(),
-                    sample_labels=torch.zeros(L),
-                    sample_input_ids=torch.zeros(L),
-                    sample_prompt_len=0,
-                    metric_config={},
-                    sample_idx="0",
-                )
-                
-                # All tensors should be on same device as logits
-                assert received_batch["input_ids"].device.type == device
-                assert received_batch["labels"].device.type == device
-                assert received_batch["attention_mask"].device.type == device
+
+        mock_metric = Mock()
+        mock_metric.name = "custom_metric"
+        mock_metric._metric_fn = mock_metric_fn
+        _call_metric_at_step(
+            metric=mock_metric,
+            logits=logits,
+            batch_template=batch_template,
+            tokenizer=Mock(),
+            sample_labels=torch.zeros(L, dtype=torch.long),
+            sample_input_ids=torch.zeros(L, dtype=torch.long),
+            sample_prompt_len=0,
+            metric_config={},
+            sample_idx="0",
+        )
+        assert received_batch["input_ids"].device.type == device
+        assert received_batch["labels"].device.type == device
+        assert received_batch["attention_mask"].device.type == device
     
     def test_batch_template_non_tensor_values_preserved(self):
         """Test that non-tensor values in batch template are preserved."""
         V, L = 50, 5
         logits = torch.randn(V, L)
         batch_template = {
-            "input_ids": torch.zeros(1, L),
-            "labels": torch.zeros(1, L),
+            "input_ids": torch.zeros(1, L, dtype=torch.long),
+            "labels": torch.zeros(1, L, dtype=torch.long),
             "index": [0],  # Non-tensor
             "text": "sample",  # Non-tensor
         }
-        
         received_batch = None
-        
+
         def mock_metric_fn(model, batch, **kwargs):
             nonlocal received_batch
             received_batch = batch
             return [{"test": 1.0}]
-        
-        if "probability" in METRICS_REGISTRY:
-            prob_metric = METRICS_REGISTRY["probability"]
-            with patch.object(prob_metric, "_metric_fn", side_effect=mock_metric_fn):
-                _call_metric_at_step(
-                    metric=prob_metric,
-                    logits=logits,
-                    batch_template=batch_template,
-                    tokenizer=Mock(),
-                    sample_labels=torch.zeros(L),
-                    sample_input_ids=torch.zeros(L),
-                    sample_prompt_len=0,
-                    metric_config={},
-                    sample_idx="0",
-                )
-                
-                assert received_batch["index"] == [0]
-                assert received_batch["text"] == "sample"
+
+        mock_metric = Mock()
+        mock_metric.name = "custom_metric"
+        mock_metric._metric_fn = mock_metric_fn
+        _call_metric_at_step(
+            metric=mock_metric,
+            logits=logits,
+            batch_template=batch_template,
+            tokenizer=Mock(),
+            sample_labels=torch.zeros(L, dtype=torch.long),
+            sample_input_ids=torch.zeros(L, dtype=torch.long),
+            sample_prompt_len=0,
+            metric_config={},
+            sample_idx="0",
+        )
+        assert received_batch["index"] == [0]
+        assert received_batch["text"] == "sample"
     
     def test_pre_compute_config_present_calls_function(self):
         """Test pre-compute config present → calls _compute_pre_compute_metrics_at_step."""
         V, L = 50, 5
         logits = torch.randn(V, L)
         batch_template = {
-            "input_ids": torch.zeros(1, L),
-            "labels": torch.zeros(1, L),
+            "input_ids": torch.zeros(1, L, dtype=torch.long),
+            "labels": torch.zeros(1, L, dtype=torch.long),
         }
         
         pre_compute_config = {
@@ -2205,7 +2179,7 @@ class TestCallMetricAtStepComprehensive:
             return_value={"correct": {"agg_value": 0.8}},
         ) as mock_pre_compute:
             if "probability" in METRICS_REGISTRY:
-                prob_metric = METRICS_REGISTRY["probability"]
+                _ = METRICS_REGISTRY["probability"]  # prob_metric, reserved
                 mock_metric = Mock()
                 mock_metric.name = "test"
                 mock_metric._metric_fn = Mock(return_value={"agg_value": 0.5})
@@ -2215,8 +2189,8 @@ class TestCallMetricAtStepComprehensive:
                     logits=logits,
                     batch_template=batch_template,
                     tokenizer=Mock(),
-                    sample_labels=torch.zeros(L),
-                    sample_input_ids=torch.zeros(L),
+                    sample_labels=torch.zeros(L, dtype=torch.long),
+                    sample_input_ids=torch.zeros(L, dtype=torch.long),
                     sample_prompt_len=0,
                     metric_config={"pre_compute": pre_compute_config},
                     sample_idx="0",
@@ -2230,15 +2204,15 @@ class TestCallMetricAtStepComprehensive:
         V, L = 50, 5
         logits = torch.randn(V, L)
         batch_template = {
-            "input_ids": torch.zeros(1, L),
-            "labels": torch.zeros(1, L),
+            "input_ids": torch.zeros(1, L, dtype=torch.long),
+            "labels": torch.zeros(1, L, dtype=torch.long),
         }
         
         with patch(
             "evals.metrics.trajectory_metrics._compute_pre_compute_metrics_at_step",
         ) as mock_pre_compute:
             if "probability" in METRICS_REGISTRY:
-                prob_metric = METRICS_REGISTRY["probability"]
+                _ = METRICS_REGISTRY["probability"]  # prob_metric, reserved
                 mock_metric = Mock()
                 mock_metric.name = "test"
                 mock_metric._metric_fn = Mock(return_value={"agg_value": 0.5})
@@ -2248,8 +2222,8 @@ class TestCallMetricAtStepComprehensive:
                     logits=logits,
                     batch_template=batch_template,
                     tokenizer=Mock(),
-                    sample_labels=torch.zeros(L),
-                    sample_input_ids=torch.zeros(L),
+                    sample_labels=torch.zeros(L, dtype=torch.long),
+                    sample_input_ids=torch.zeros(L, dtype=torch.long),
                     sample_prompt_len=0,
                     metric_config={"pre_compute": {}},  # Empty
                     sample_idx="0",
@@ -2259,12 +2233,12 @@ class TestCallMetricAtStepComprehensive:
                 assert not mock_pre_compute.called
     
     def test_metric_probability_uses_evaluate_probability(self):
-        """Test metric 'probability' → uses evaluate_probability."""
+        """Test metric 'probability' → uses evaluate_probability (batch function path)."""
         V, L = 50, 5
         logits = torch.randn(V, L)
+        # No labels: early _compute_prob path skipped so evaluate_probability is called
         batch_template = {
-            "input_ids": torch.zeros(1, L),
-            "labels": torch.randint(0, V, (1, L)),
+            "input_ids": torch.zeros(1, L, dtype=torch.long),
         }
         
         if "probability" in METRICS_REGISTRY:
@@ -2278,8 +2252,8 @@ class TestCallMetricAtStepComprehensive:
                     logits=logits,
                     batch_template=batch_template,
                     tokenizer=Mock(),
-                    sample_labels=torch.zeros(L),
-                    sample_input_ids=torch.zeros(L),
+                    sample_labels=torch.zeros(L, dtype=torch.long),
+                    sample_input_ids=torch.zeros(L, dtype=torch.long),
                     sample_prompt_len=0,
                     metric_config={},
                     sample_idx="0",
@@ -2294,7 +2268,7 @@ class TestCallMetricAtStepComprehensive:
         V, L = 50, 5
         logits = torch.randn(V, L)
         batch_template = {
-            "input_ids": torch.zeros(1, L),
+            "input_ids": torch.zeros(1, L, dtype=torch.long),
             "labels": torch.randint(0, V, (1, L)),
         }
         
@@ -2310,8 +2284,8 @@ class TestCallMetricAtStepComprehensive:
                     logits=logits,
                     batch_template=batch_template,
                     tokenizer=Mock(),
-                    sample_labels=torch.zeros(L),
-                    sample_input_ids=torch.zeros(L),
+                    sample_labels=torch.zeros(L, dtype=torch.long),
+                    sample_input_ids=torch.zeros(L, dtype=torch.long),
                     sample_prompt_len=0,
                     metric_config={},
                     sample_idx="0",
@@ -2327,8 +2301,8 @@ class TestCallMetricAtStepComprehensive:
         V, L = 50, 5
         logits = torch.randn(V, L)
         batch_template = {
-            "input_ids": torch.zeros(1, L),
-            "labels": torch.zeros(1, L),
+            "input_ids": torch.zeros(1, L, dtype=torch.long),
+            "labels": torch.zeros(1, L, dtype=torch.long),
         }
         
         mock_metric = Mock()
@@ -2340,8 +2314,8 @@ class TestCallMetricAtStepComprehensive:
             logits=logits,
             batch_template=batch_template,
             tokenizer=Mock(),
-            sample_labels=torch.zeros(L),
-            sample_input_ids=torch.zeros(L),
+            sample_labels=torch.zeros(L, dtype=torch.long),
+            sample_input_ids=torch.zeros(L, dtype=torch.long),
             sample_prompt_len=0,
             metric_config={},
             sample_idx="0",
@@ -2355,9 +2329,9 @@ class TestCallMetricAtStepComprehensive:
         """Test batch function raises exception → falls back to _metric_fn."""
         V, L = 50, 5
         logits = torch.randn(V, L)
+        # No labels: early _compute_prob path skipped, evaluate_probability is called then raises
         batch_template = {
-            "input_ids": torch.zeros(1, L),
-            "labels": torch.randint(0, V, (1, L)),
+            "input_ids": torch.zeros(1, L, dtype=torch.long),
         }
         
         if "probability" in METRICS_REGISTRY:
@@ -2371,13 +2345,13 @@ class TestCallMetricAtStepComprehensive:
                 mock_metric_fn = Mock(return_value={"agg_value": 0.5})
                 prob_metric._metric_fn = mock_metric_fn
                 
-                result = _call_metric_at_step(
+                _ = _call_metric_at_step(
                     metric=prob_metric,
                     logits=logits,
                     batch_template=batch_template,
                     tokenizer=Mock(),
-                    sample_labels=torch.zeros(L),
-                    sample_input_ids=torch.zeros(L),
+                    sample_labels=torch.zeros(L, dtype=torch.long),
+                    sample_input_ids=torch.zeros(L, dtype=torch.long),
                     sample_prompt_len=0,
                     metric_config={},
                     sample_idx="0",
@@ -2391,8 +2365,8 @@ class TestCallMetricAtStepComprehensive:
         V, L = 50, 5
         logits = torch.randn(V, L)
         batch_template = {
-            "input_ids": torch.zeros(1, L),
-            "labels": torch.zeros(1, L),
+            "input_ids": torch.zeros(1, L, dtype=torch.long),
+            "labels": torch.zeros(1, L, dtype=torch.long),
         }
         
         mock_metric = Mock()
@@ -2408,8 +2382,8 @@ class TestCallMetricAtStepComprehensive:
                 logits=logits,
                 batch_template=batch_template,
                 tokenizer=Mock(),
-                sample_labels=torch.zeros(L),
-                sample_input_ids=torch.zeros(L),
+                sample_labels=torch.zeros(L, dtype=torch.long),
+                sample_input_ids=torch.zeros(L, dtype=torch.long),
                 sample_prompt_len=0,
                 metric_config={},
                 sample_idx="0",
@@ -2424,8 +2398,8 @@ class TestCallMetricAtStepComprehensive:
         V, L = 50, 5
         logits = torch.randn(V, L)
         batch_template = {
-            "input_ids": torch.zeros(1, L),
-            "labels": torch.zeros(1, L),
+            "input_ids": torch.zeros(1, L, dtype=torch.long),
+            "labels": torch.zeros(1, L, dtype=torch.long),
         }
         
         mock_metric = Mock()
@@ -2436,13 +2410,13 @@ class TestCallMetricAtStepComprehensive:
             "evals.metrics.trajectory_metrics._handle_text_based_metric",
             return_value=[{"score": 0.6}],
         ) as mock_text_handler:
-            result = _call_metric_at_step(
+            _ = _call_metric_at_step(
                 metric=mock_metric,
                 logits=logits,
                 batch_template=batch_template,
                 tokenizer=Mock(),
-                sample_labels=torch.zeros(L),
-                sample_input_ids=torch.zeros(L),
+                sample_labels=torch.zeros(L, dtype=torch.long),
+                sample_input_ids=torch.zeros(L, dtype=torch.long),
                 sample_prompt_len=0,
                 metric_config={},
                 sample_idx="0",
@@ -2455,8 +2429,8 @@ class TestCallMetricAtStepComprehensive:
         V, L = 50, 5
         logits = torch.randn(V, L)
         batch_template = {
-            "input_ids": torch.zeros(1, L),
-            "labels": torch.zeros(1, L),
+            "input_ids": torch.zeros(1, L, dtype=torch.long),
+            "labels": torch.zeros(1, L, dtype=torch.long),
         }
         
         mock_metric = Mock()
@@ -2467,13 +2441,13 @@ class TestCallMetricAtStepComprehensive:
             "evals.metrics.trajectory_metrics._handle_text_based_metric",
             return_value=[{"score": 0.6}],
         ) as mock_text_handler:
-            result = _call_metric_at_step(
+            _ = _call_metric_at_step(
                 metric=mock_metric,
                 logits=logits,
                 batch_template=batch_template,
                 tokenizer=Mock(),
-                sample_labels=torch.zeros(L),
-                sample_input_ids=torch.zeros(L),
+                sample_labels=torch.zeros(L, dtype=torch.long),
+                sample_input_ids=torch.zeros(L, dtype=torch.long),
                 sample_prompt_len=0,
                 metric_config={},
                 sample_idx="0",
@@ -2486,8 +2460,8 @@ class TestCallMetricAtStepComprehensive:
         V, L = 50, 5
         logits = torch.randn(V, L)
         batch_template = {
-            "input_ids": torch.zeros(1, L),
-            "labels": torch.zeros(1, L),
+            "input_ids": torch.zeros(1, L, dtype=torch.long),
+            "labels": torch.zeros(1, L, dtype=torch.long),
         }
         
         mock_metric = Mock()
@@ -2500,8 +2474,8 @@ class TestCallMetricAtStepComprehensive:
                 logits=logits,
                 batch_template=batch_template,
                 tokenizer=Mock(),
-                sample_labels=torch.zeros(L),
-                sample_input_ids=torch.zeros(L),
+                sample_labels=torch.zeros(L, dtype=torch.long),
+                sample_input_ids=torch.zeros(L, dtype=torch.long),
                 sample_prompt_len=0,
                 metric_config={},
                 sample_idx="0",
@@ -2512,8 +2486,8 @@ class TestCallMetricAtStepComprehensive:
         V, L = 50, 5
         logits = torch.randn(V, L)
         batch_template = {
-            "input_ids": torch.zeros(1, L),
-            "labels": torch.zeros(1, L),
+            "input_ids": torch.zeros(1, L, dtype=torch.long),
+            "labels": torch.zeros(1, L, dtype=torch.long),
         }
         
         mock_metric = Mock()
@@ -2529,8 +2503,8 @@ class TestCallMetricAtStepComprehensive:
                 logits=logits,
                 batch_template=batch_template,
                 tokenizer=Mock(),
-                sample_labels=torch.zeros(L),
-                sample_input_ids=torch.zeros(L),
+                sample_labels=torch.zeros(L, dtype=torch.long),
+                sample_input_ids=torch.zeros(L, dtype=torch.long),
                 sample_prompt_len=0,
                 metric_config={},
                 sample_idx="0",
@@ -2543,8 +2517,8 @@ class TestCallMetricAtStepComprehensive:
         V, L = 50, 5
         logits = torch.randn(V, L)
         batch_template = {
-            "input_ids": torch.zeros(1, L),
-            "labels": torch.zeros(1, L),
+            "input_ids": torch.zeros(1, L, dtype=torch.long),
+            "labels": torch.zeros(1, L, dtype=torch.long),
         }
         
         mock_metric = Mock()
@@ -2563,8 +2537,8 @@ class TestCallMetricAtStepComprehensive:
                 logits=logits,
                 batch_template=batch_template,
                 tokenizer=Mock(),
-                sample_labels=torch.zeros(L),
-                sample_input_ids=torch.zeros(L),
+                sample_labels=torch.zeros(L, dtype=torch.long),
+                sample_input_ids=torch.zeros(L, dtype=torch.long),
                 sample_prompt_len=0,
                 metric_config={},
                 sample_idx="0",
@@ -2577,8 +2551,8 @@ class TestCallMetricAtStepComprehensive:
         V, L = 50, 5
         logits = torch.randn(V, L)
         batch_template = {
-            "input_ids": torch.zeros(1, L),
-            "labels": torch.zeros(1, L),
+            "input_ids": torch.zeros(1, L, dtype=torch.long),
+            "labels": torch.zeros(1, L, dtype=torch.long),
         }
         
         mock_metric = Mock()
@@ -2594,8 +2568,8 @@ class TestCallMetricAtStepComprehensive:
                 logits=logits,
                 batch_template=batch_template,
                 tokenizer=Mock(),
-                sample_labels=torch.zeros(L),
-                sample_input_ids=torch.zeros(L),
+                sample_labels=torch.zeros(L, dtype=torch.long),
+                sample_input_ids=torch.zeros(L, dtype=torch.long),
                 sample_prompt_len=0,
                 metric_config={},
                 sample_idx="0",
@@ -2642,7 +2616,6 @@ class TestTrajectoryMetricsConfigParsing:
             "batch_size": 1,
         }
         
-        from evals.metrics.trajectory_metrics import trajectory_metrics
         raw_fn = trajectory_metrics._metric_fn if hasattr(trajectory_metrics, '_metric_fn') else trajectory_metrics
         
         # Should parse list correctly
@@ -2686,7 +2659,6 @@ class TestTrajectoryMetricsConfigParsing:
             "batch_size": 1,
         }
         
-        from evals.metrics.trajectory_metrics import trajectory_metrics
         raw_fn = trajectory_metrics._metric_fn if hasattr(trajectory_metrics, '_metric_fn') else trajectory_metrics
         
         try:
@@ -2697,7 +2669,6 @@ class TestTrajectoryMetricsConfigParsing:
     
     def test_metrics_as_omegaconf_listconfig(self):
         """Test metrics as OmegaConf ListConfig."""
-        from omegaconf import ListConfig
         
         model = Mock()
         model.sampler = Mock()
@@ -2743,7 +2714,6 @@ class TestTrajectoryMetricsConfigParsing:
     
     def test_metrics_as_omegaconf_dictconfig(self):
         """Test metrics as OmegaConf DictConfig."""
-        from omegaconf import DictConfig
         
         model = Mock()
         model.sampler = Mock()
@@ -2799,7 +2769,6 @@ class TestTrajectoryMetricsConfigParsing:
             "tokenizer": Mock(),
         }
         
-        from evals.metrics.trajectory_metrics import trajectory_metrics
         raw_fn = trajectory_metrics._metric_fn if hasattr(trajectory_metrics, '_metric_fn') else trajectory_metrics
         
         with pytest.raises(ValueError, match="metrics must be a list or dict"):
@@ -2817,7 +2786,6 @@ class TestTrajectoryMetricsConfigParsing:
             "tokenizer": Mock(),
         }
         
-        from evals.metrics.trajectory_metrics import trajectory_metrics
         raw_fn = trajectory_metrics._metric_fn if hasattr(trajectory_metrics, '_metric_fn') else trajectory_metrics
         
         with pytest.raises(ValueError, match="No metrics specified"):
@@ -2835,7 +2803,6 @@ class TestTrajectoryMetricsConfigParsing:
             "tokenizer": Mock(),
         }
         
-        from evals.metrics.trajectory_metrics import trajectory_metrics
         raw_fn = trajectory_metrics._metric_fn if hasattr(trajectory_metrics, '_metric_fn') else trajectory_metrics
         
         with pytest.raises(ValueError, match="No metrics specified"):
@@ -2853,7 +2820,6 @@ class TestTrajectoryMetricsConfigParsing:
             "tokenizer": Mock(),
         }
         
-        from evals.metrics.trajectory_metrics import trajectory_metrics
         raw_fn = trajectory_metrics._metric_fn if hasattr(trajectory_metrics, '_metric_fn') else trajectory_metrics
         
         with pytest.raises(ValueError, match="not found in registry"):
@@ -2999,7 +2965,7 @@ class TestTrajectoryMetricsResultAggregation:
         """Test that agg_value has correct structure with four trajectory types."""
         # This test would need to call trajectory_metrics with actual model/data
         # For now, just verify the expected structure
-        expected_trajectories = ["steps", "fixation_start", "fixation_end", "fixation_ratio"]
+        _ = ["steps", "fixation_start", "fixation_end", "fixation_ratio"]  # expected_trajectories, reserved
         # Actual testing should be done via integration tests that call trajectory_metrics
         pass
 

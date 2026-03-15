@@ -5,12 +5,16 @@ from typing import Dict, List, Optional, Union
 import os
 import numpy as np
 import logging
+import torch
 from transformers import Trainer
 from torch.utils.data import Dataset
-from transformers.trainer_utils import PREFIX_CHECKPOINT_DIR
+from transformers.trainer_utils import EvalLoopOutput, PREFIX_CHECKPOINT_DIR
 from typing import Any
 
 logger = logging.getLogger(__name__)
+
+# Four-way validation: max samples per validation set (fixed slice for determinism).
+FOUR_WAY_VALIDATION_CAP = 100
 
 # Keys that are never sent to W&B (metadata / retain-reference only).
 _WANDB_SKIP_KEYS = frozenset({
@@ -171,5 +175,101 @@ class FinetuneTrainer(Trainer):
 
         if eval_dataset is None:
             return {}
-        # Run the default HF Trainer evaluate method when eval dataset is provided
+        # Four-way validation: eval_dataset is a dict of named datasets (forget, retain, holdout, utility).
+        # Compute both method loss and constant CE loss per set, then merge and log.
+        if isinstance(eval_dataset, dict):
+            return self._evaluate_four_way(
+                eval_dataset, ignore_keys, metric_key_prefix, trial
+            )
+        # Single dataset: default HF Trainer evaluate
         return super().evaluate(eval_dataset, ignore_keys, metric_key_prefix)
+
+    def _evaluate_four_way(
+        self,
+        eval_dataset: Dict[str, Dataset],
+        ignore_keys: Optional[List[str]] = None,
+        metric_key_prefix: str = "eval",
+        trial: Dict[str, Any] = None,
+    ):
+        """Evaluate on each named dataset; report method loss and constant CE loss per set.
+
+        Both method loss and CE loss are sample-weighted averages (sum of loss*bs / sum of bs).
+        Returns EvalLoopOutput to match parent Trainer.evaluate() return type.
+        Under multi-GPU, sums and counts are all-reduced so metrics are global; logging on rank 0 only.
+        num_samples is the total eval set size across all four splits.
+        """
+        eval_metrics: Dict[str, float] = {}
+        device = getattr(self.args, "device", torch.device("cpu"))
+        num_samples = 0
+        ce_available = False
+        try:
+            from dllm.core.schedulers import LinearAlphaScheduler
+            from dllm.core.trainers.mdlm import compute_masked_ce_eval_loss
+            adapter = getattr(self.model, "adapter_config", None)
+            tokenizer = getattr(self.model, "tokenizer", None)
+            if adapter is not None and tokenizer is not None:
+                ce_available = True
+        except Exception:
+            pass
+
+        for name, dataset in eval_dataset.items():
+            if dataset is None or len(dataset) == 0:
+                continue
+            # get_eval_dataloader may shard per rank; all-reduce below makes metrics global.
+            dataloader = self.get_eval_dataloader(dataset)
+            method_loss_sum = 0.0
+            method_n = 0
+            ce_loss_sum = 0.0
+            ce_n = 0
+            self.model.eval()
+            for batch in dataloader:
+                batch = self._prepare_inputs(batch)
+                with torch.no_grad():
+                    loss, _, _ = self.prediction_step(
+                        self.model, batch, prediction_loss_only=False, ignore_keys=ignore_keys or []
+                    )
+                    if loss is not None:
+                        method_loss_sum += loss.item() * batch["input_ids"].size(0)
+                        method_n += batch["input_ids"].size(0)
+                    if ce_available:
+                        try:
+                            inner = getattr(self.model, "model", self.model)
+                            sched = getattr(
+                                getattr(self.model, "adapter_config", None),
+                                "scheduler",
+                                None,
+                            ) or LinearAlphaScheduler()
+                            proc = getattr(self.model, "tokenizer", None)
+                            if inner is not None and proc is not None and getattr(proc, "mask_token_id", None) is not None:
+                                ce = compute_masked_ce_eval_loss(
+                                    inner, batch, proc, sched, fixed_t=0.5
+                                )
+                                ce_loss_sum += ce.item() * batch["input_ids"].size(0)
+                                ce_n += batch["input_ids"].size(0)
+                        except Exception:
+                            pass
+            # All-reduce so multi-GPU runs get correct global averages and a single log.
+            stats = torch.tensor(
+                [method_loss_sum, float(method_n), ce_loss_sum, float(ce_n)],
+                device=device,
+                dtype=torch.float64,
+            )
+            if torch.distributed.is_available() and torch.distributed.is_initialized():
+                torch.distributed.all_reduce(stats, op=torch.distributed.ReduceOp.SUM)
+            method_loss_sum = stats[0].item()
+            method_n = int(round(stats[1].item()))
+            ce_loss_sum = stats[2].item()
+            ce_n = int(round(stats[3].item()))
+            if method_n > 0:
+                eval_metrics[f"{metric_key_prefix}_{name}_loss"] = method_loss_sum / method_n
+            if ce_n > 0:
+                eval_metrics[f"{metric_key_prefix}_{name}_loss_ce"] = ce_loss_sum / ce_n
+            num_samples += len(dataset)
+        if eval_metrics and self.is_world_process_zero():
+            self.log(_scalar_metrics_for_wandb(eval_metrics))
+        return EvalLoopOutput(
+            predictions=None,
+            label_ids=None,
+            metrics=eval_metrics,
+            num_samples=num_samples if num_samples > 0 else None,
+        )

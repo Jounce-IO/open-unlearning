@@ -62,7 +62,6 @@ def test_eval_loop_handles_lmeval_without_attribute_error():
 
 def test_evaluator_passes_eval_cfg_to_metric_fn_in_per_metric_loop():
     """Evaluator must pass eval_cfg (and thus retain_reference_mode) to metric_fn so trajectory_metrics can write by_step keys."""
-    from evals.base import Evaluator
     from evals import get_evaluators
 
     eval_cfg = OmegaConf.create({

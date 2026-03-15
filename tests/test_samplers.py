@@ -5,7 +5,6 @@ Unit tests for evals.metrics.samplers (LengthSortedSampler).
 import sys
 from pathlib import Path
 
-import pytest
 import torch
 
 repo_root = Path(__file__).parent.parent

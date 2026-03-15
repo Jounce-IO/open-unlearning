@@ -21,7 +21,7 @@ def main():
     import torch
     from torch.utils.data import DataLoader
 
-    raw = load_dataset("locuslab/TOFU", "forget01_perturbed", split="train")
+    _ = load_dataset("locuslab/TOFU", "forget01_perturbed", split="train")  # raw, reserved
     tokenizer = AutoTokenizer.from_pretrained("gpt2")
     if tokenizer.pad_token is None:
         tokenizer.pad_token = tokenizer.eos_token

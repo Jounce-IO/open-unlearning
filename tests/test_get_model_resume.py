@@ -3,7 +3,6 @@ Test that get_model(model_cfg, resume_from_checkpoint=path) loads model and toke
 from the checkpoint path (no HuggingFace download).
 """
 
-import pytest
 from pathlib import Path
 from unittest.mock import patch, MagicMock
 from omegaconf import OmegaConf

@@ -67,3 +67,24 @@ class TestPrivleakReferenceLogsSingleArg:
                 ref_value=kwargs["ref_value"],
                 **{k: v for k, v in kwargs.items() if k not in ("model", "tokenizer", "pre_compute")},
             )
+
+    def test_privleak_reject_non_scalar_retain_agg_value_returns_none(self, caplog):
+        """When reference_logs was provided but retain['agg_value'] is non-canonical (e.g. dict), must raise; no ref_value (T008)."""
+        import pytest
+        from evals.metrics.base import RetainReferenceValidationError
+
+        metric = METRICS_REGISTRY.get("privleak")
+        assert metric is not None
+        ref_logs = {
+            "retain_model_logs": {
+                "retain": {"agg_value": {"nested": "not a number"}},
+            }
+        }
+        with pytest.raises((RetainReferenceValidationError, ValueError, TypeError)):
+            metric._metric_fn(
+                model=None,
+                pre_compute={"forget": {"agg_value": 0.3}},
+                reference_logs=ref_logs,
+                ref_value=999.0,
+            )
+        assert "not a number" in caplog.text or "agg_value" in caplog.text.lower()

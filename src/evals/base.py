@@ -181,6 +181,39 @@ class Evaluator:
         logger.info(f"Evaluations will be saved to: {logs_file_path}")
         logger.info(f"Evaluating {len(self.metrics)} metrics: {list(self.metrics.keys())}")
 
+        # Load and validate reference once at start when any metric has reference_logs path (spec: validate before any evaluation).
+        cached_reference_logs = None
+        try:
+            from omegaconf import OmegaConf as _OmegaConf
+        except ImportError:
+            _OmegaConf = None
+        for _mname in self.metrics:
+            _mcfg = self.eval_cfg.metrics.get(_mname) if hasattr(self.eval_cfg.metrics, "get") else None
+            if _mcfg is None:
+                continue
+            try:
+                _ref_cfg = _mcfg.get("reference_logs") if hasattr(_mcfg, "get") else None
+            except Exception:
+                _ref_cfg = None
+            if not _ref_cfg:
+                continue
+            _ref_dict = None
+            if isinstance(_ref_cfg, dict):
+                _ref_dict = _ref_cfg
+            elif _OmegaConf is not None and hasattr(_ref_cfg, "items"):
+                try:
+                    _ref_dict = _OmegaConf.to_container(_ref_cfg, resolve=True)
+                except Exception:
+                    _ref_dict = dict(_ref_cfg)
+            if _ref_dict:
+                for _rn, _rc in _ref_dict.items():
+                    if isinstance(_rc, dict) and _rc.get("path"):
+                        from evals.metrics.base import load_and_validate_reference
+                        cached_reference_logs = load_and_validate_reference(_ref_dict, self.load_logs_from_file)
+                        break
+            if cached_reference_logs is not None:
+                break
+
         # Coalesced trajectory: one call to trajectory_metrics with all metrics (one sampler pass).
         coalesce = self.eval_cfg.get("coalesce_trajectory_metrics", False)
         metrics_cfg = self.eval_cfg.metrics
@@ -188,10 +221,12 @@ class Evaluator:
         for m in self.metrics:
             cfg = metrics_cfg.get(m)
             handlers.append(cfg.get("handler") if cfg is not None and hasattr(cfg, "get") else None)
+        # Use coalesced path for 2+ metrics when coalesce=True, or for 1 trajectory_metrics metric
+        # (so trajectory_all uses same path and avoids per-metric to_container → dict.args bug).
         all_trajectory = (
-            coalesce
-            and len(self.metrics) >= 2
+            len(self.metrics) >= 1
             and all(h == "trajectory_metrics" for h in handlers if h is not None)
+            and (coalesce or len(self.metrics) == 1)
         )
         if all_trajectory:
             already = [m for m in self.metrics if not overwrite and m in logs and logs[m]]
@@ -263,6 +298,34 @@ class Evaluator:
                 "eval_cfg": self.eval_cfg,
                 **base_kwargs,
             }
+            # Pass reference_logs: use pre-loaded validated ref when we loaded at start, else config (path).
+            if cached_reference_logs is not None:
+                merged_args["reference_logs"] = cached_reference_logs
+            else:
+                first_reference_logs = first_cfg.get("reference_logs")
+                if first_reference_logs is not None:
+                    try:
+                        from omegaconf import OmegaConf
+                        ref_container = OmegaConf.to_container(
+                            first_reference_logs, resolve=True
+                        )
+                        # Only pass reference_logs when path is set (non-null). When path is null
+                        # (e.g. retain_reference_mode run producing the reference), do not pass
+                        # so the metric does not require step-matched reference data.
+                        rml = (ref_container or {}).get("retain_model_logs") or {}
+                        path_val = rml.get("path") if hasattr(rml, "get") else None
+                        if path_val and str(path_val).strip().lower() not in ("null", "none", ""):
+                            merged_args["reference_logs"] = ref_container
+                    except Exception:
+                        ref_container = (
+                            dict(first_reference_logs)
+                            if hasattr(first_reference_logs, "items")
+                            else first_reference_logs
+                        )
+                        rml = (ref_container or {}).get("retain_model_logs") or {}
+                        path_val = rml.get("path") if hasattr(rml, "get") else None
+                        if path_val and str(path_val).strip().lower() not in ("null", "none", ""):
+                            merged_args["reference_logs"] = ref_container
             result = first_metric(
                 model,
                 metric_name=first_name,
@@ -330,7 +393,16 @@ class Evaluator:
             }
             if self.eval_cfg.get("samples") is not None:
                 kwargs["samples"] = self.eval_cfg.samples
-            metrics_args = self.eval_cfg.metrics[metric_name]
+            _mc = self.eval_cfg.metrics[metric_name]
+            try:
+                from omegaconf import OmegaConf
+                metrics_args = OmegaConf.to_container(_mc, resolve=True) if _mc is not None else {}
+            except Exception:
+                metrics_args = dict(_mc) if _mc is not None and hasattr(_mc, "items") else {}
+            if metrics_args is None:
+                metrics_args = {}
+            if cached_reference_logs is not None and metrics_args.get("reference_logs"):
+                metrics_args["reference_logs"] = cached_reference_logs
             result = metric_fn(
                 model,
                 metric_name=metric_name,

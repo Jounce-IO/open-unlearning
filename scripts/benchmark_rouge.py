@@ -22,7 +22,7 @@ _src = _repo_root / "src"
 if _src.exists() and str(_src) not in sys.path:
     sys.path.insert(0, str(_src))
 
-from evals.metrics.rouge_impl.rouge_backends import ROUGE_BACKENDS, get_backend
+from evals.metrics.rouge_impl.rouge_backends import ROUGE_BACKENDS
 from evals.metrics.rouge_impl.golden_data import ROUGE_GOLDEN_PAIRS, get_golden_gen_gt_lists
 
 
@@ -48,7 +48,7 @@ def run_benchmark(
     Run each backend repeatedly; return list of (name, mean_time_sec, drop_in, notes).
     """
     gen_list, gt_list = _gen_gt_lists()
-    n_pairs = len(gen_list)
+    _ = len(gen_list)  # n_pairs, reserved
     results = []
     baseline_time = None
 
@@ -85,7 +85,7 @@ def run_benchmark(
         if mean_time < 0:
             out.append((name, mean_time, drop_in, notes))
             continue
-        rel = mean_time / baseline_time if baseline_time else 1.0
+        _ = mean_time / baseline_time if baseline_time else 1.0  # rel, reserved
         if name in BENCHMARK_ONLY_BACKENDS:
             notes = "No; different scores (benchmark only)."
         elif drop_in:

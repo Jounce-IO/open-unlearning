@@ -9,7 +9,6 @@ import sys
 from pathlib import Path
 from unittest.mock import MagicMock
 
-import pytest
 
 repo_root = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(repo_root / "src"))

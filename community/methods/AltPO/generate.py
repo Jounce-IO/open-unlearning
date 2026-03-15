@@ -217,11 +217,11 @@ def main(config):
     dataset = get_dataset(config['dataset_config'])
     # Having prompts defined for the model input 
     prompt = get_prompts(config['prompt_config'])
-    suff = ""
+    _ = ""  # suff, reserved
     if '-+' in prompt:
         prompt_num = prompt.split('-+')[-1][0]
         split_symbol = f'-+{prompt_num}'
-        suff = f'_v{prompt_num}'
+        _ = f'_v{prompt_num}'  # suff, reserved
         prompt = prompt.replace(split_symbol, '')
     # get the outdir
     outdir = config.get("outdir", "outdir")

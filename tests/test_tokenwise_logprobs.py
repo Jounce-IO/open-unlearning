@@ -8,7 +8,6 @@ the function trims to logits length and returns without RuntimeError.
 import sys
 from pathlib import Path
 
-import pytest
 import torch
 
 repo_root = Path(__file__).parent.parent

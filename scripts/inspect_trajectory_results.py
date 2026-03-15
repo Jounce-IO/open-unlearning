@@ -130,7 +130,7 @@ def inspect_results(results_file: str):
         if steps_metrics == fixation_start_metrics == fixation_end_metrics == fixation_ratio_metrics:
             print(f"  ✓ All trajectories have same metrics: {steps_metrics}")
         else:
-            print(f"  ❌ Metric mismatch:")
+            print("  ❌ Metric mismatch:")
             print(f"     Steps: {steps_metrics}")
             print(f"     Fixation start: {fixation_start_metrics}")
             print(f"     Fixation end: {fixation_end_metrics}")
@@ -148,7 +148,7 @@ def inspect_results(results_file: str):
             if S_steps == S_fixation_start == S_fixation_end == S_fixation_ratio:
                 print(f"  ✓ All trajectories have same length: {S_steps} steps")
             else:
-                print(f"  ❌ Length mismatch:")
+                print("  ❌ Length mismatch:")
                 print(f"     Steps: {S_steps}, Fixation start: {S_fixation_start}, Fixation end: {S_fixation_end}, Fixation ratio: {S_fixation_ratio}")
                 all_ok = False
     

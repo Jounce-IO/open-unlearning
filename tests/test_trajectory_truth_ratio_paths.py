@@ -35,7 +35,6 @@ def test_non_generalized_3d_labels_wrong_structure():
     """
     from omegaconf import OmegaConf
     from evals.metrics.trajectory_metrics import _compute_pre_compute_metrics_at_step
-    from evals.metrics import METRICS_REGISTRY
 
     # Simulate collator output: input_ids length 58, labels_wrong [1, 5, 59] (N=5, L_wrong=59)
     L_input, N, L_wrong, V = 58, 5, 59, 100
@@ -162,7 +161,6 @@ def test_generalized_list_of_label_tensors_wrong_returns_n_results():
     When R/F have length L and each label tensor has length L with some non-ignore positions, we get N results with valid prob/avg_loss.
     """
     from evals.metrics.trajectory_metrics import _compute_pre_compute_metrics_at_step
-    from evals.metrics.step_wise_score import build_effective_step_fixation_logits
     from omegaconf import OmegaConf
 
     L, V, S, N = 20, 100, 10, 3

@@ -7,7 +7,6 @@ Run from dllm repo root:
 
 Output is to stdout/stderr. For GPU memory analysis use a real eval run (K8s job or full local eval with GPU).
 """
-import os
 import sys
 import torch
 from unittest.mock import Mock
@@ -70,7 +69,7 @@ def main():
     from torch.utils.data import DataLoader
     from evals.metrics.trajectory_metrics import trajectory_metrics
 
-    dataloader = DataLoader(
+    _ = DataLoader(
         TinyDataset(),
         batch_size=B,
         collate_fn=collate,
