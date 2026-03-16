@@ -48,19 +48,39 @@ data:
       args:
         hf_args:
           name: ${retain_split}
-  # No data.eval (matches data/unlearn.yaml: datasets@eval: null). Per-epoch eval still
-  # runs via custom evaluators (TOFU metrics); see trainer/base.py _DummyEvalDataset.
+  # Four-way validation: forget, retain, holdout (method loss + CE loss per set). No full TOFU evaluators unless retain_logs_path set.
+  validation_splits:
+    forget:
+      TOFU_QA_forget:
+        args:
+          hf_args:
+            name: ${forget_split}
+          question_key: ${question_key}
+    retain:
+      TOFU_QA_retain:
+        args:
+          hf_args:
+            name: ${retain_split}
+          question_key: ${question_key}
+    holdout:
+      TOFU_QA_holdout:
+        args:
+          hf_args:
+            name: ${holdout_split}
+          question_key: ${question_key}
 
 trainer:
   args:
     warmup_epochs: 1.0
     learning_rate: 1e-5
     weight_decay: 0.01
-    num_train_epochs: 10
+    num_train_epochs: 100
+    max_steps: 500
     save_strategy: "steps"
     save_steps: 100
     save_total_limit: 3
-    eval_strategy: "no"  # No eval during training; avoids OOM with 8B on 40GB. Run eval separately if needed.
-    do_eval: false       # Skip post-training evaluate() so we don't require retain reference (retain_ftr) for ks_test.
+    eval_strategy: "steps"
+    eval_steps: 50
+    do_eval: true
 
 task_name: ???

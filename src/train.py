@@ -97,14 +97,16 @@ def main(cfg: DictConfig):
     trainer_cfg = cfg.trainer
     assert trainer_cfg is not None, ValueError("Please set trainer")
 
-    # Get Evaluators (skip when eval is disabled so we never run TOFU metrics that require retain_ftr)
+    # Get Evaluators only when retain reference is set (TOFU metrics need retain_ftr). When retain_logs_path is null,
+    # we still run four-way validation (method/CE loss on forget, retain, holdout) via eval_dataset dict; no full TOFU eval.
     evaluators = None
     eval_cfgs = cfg.get("eval", None)
     trainer_args_cfg = trainer_cfg.get("args", None) if hasattr(trainer_cfg, "get") else getattr(trainer_cfg, "args", None)
     eval_strategy = None
     if trainer_args_cfg is not None:
         eval_strategy = trainer_args_cfg.get("eval_strategy", None) if hasattr(trainer_args_cfg, "get") else getattr(trainer_args_cfg, "eval_strategy", None)
-    if eval_cfgs and eval_strategy != "no":
+    retain_logs_path = cfg.get("retain_logs_path", None)
+    if retain_logs_path and eval_cfgs and eval_strategy != "no":
         evaluators = get_evaluators(
             eval_cfgs=eval_cfgs,
             template_args=template_args,
