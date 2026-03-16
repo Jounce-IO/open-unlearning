@@ -42,11 +42,13 @@ data:
     TOFU_QA_forget:
       args:
         hf_args:
+          path: "locuslab/TOFU"
           name: ${forget_split}
   retain:
     TOFU_QA_retain:
       args:
         hf_args:
+          path: "locuslab/TOFU"
           name: ${retain_split}
   # Four-way validation: forget, retain, holdout (method loss + CE loss per set). No full TOFU evaluators unless retain_logs_path set.
   validation_splits:
@@ -55,6 +57,7 @@ data:
         handler: QADataset
         args:
           hf_args:
+            path: "locuslab/TOFU"
             name: ${forget_split}
           question_key: ${question_key}
     retain:
@@ -62,6 +65,7 @@ data:
         handler: QADataset
         args:
           hf_args:
+            path: "locuslab/TOFU"
             name: ${retain_split}
           question_key: ${question_key}
     holdout:
@@ -69,6 +73,7 @@ data:
         handler: QADataset
         args:
           hf_args:
+            path: "locuslab/TOFU"
             name: ${holdout_split}
           question_key: ${question_key}
 
