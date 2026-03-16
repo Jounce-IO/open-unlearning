@@ -45,6 +45,13 @@ def load_trainer_args(trainer_args: DictConfig, dataset):
     return trainer_args
 
 
+def _get_cfg(cfg, key, default=None):
+    """Get key from cfg whether it is DictConfig or plain dict."""
+    if hasattr(cfg, "get"):
+        return cfg.get(key, default)
+    return getattr(cfg, key, default)
+
+
 def load_trainer(
     trainer_cfg: DictConfig,
     model,
@@ -55,19 +62,21 @@ def load_trainer(
     evaluators=None,
     template_args=None,
 ):
-    trainer_args = trainer_cfg.args
-    method_args = trainer_cfg.get("method_args", {})
+    # Support both DictConfig and plain dict (e.g. from Hydra composition).
+    trainer_args = _get_cfg(trainer_cfg, "args")
+    assert trainer_args is not None, "trainer.args is required"
+    method_args = _get_cfg(trainer_cfg, "method_args") or {}
     # When eval_dataset is None but eval_strategy is not "no", Trainer.__init__ in
     # transformers >= 4.57 raises. We pass a dummy so init succeeds; FinetuneTrainer
     # runs custom evaluators every epoch and never uses the dummy. See _DummyEvalDataset.
     eval_dataset_to_pass = eval_dataset
     if eval_dataset_to_pass is None:
-        args_dict = dict(trainer_cfg.args)
+        args_dict = dict(trainer_args)
         eval_strategy = args_dict.get("eval_strategy", None)
         if eval_strategy not in (None, "no"):
             eval_dataset_to_pass = _DummyEvalDataset()
     trainer_args = load_trainer_args(trainer_args, train_dataset)
-    trainer_handler_name = trainer_cfg.get("handler")
+    trainer_handler_name = _get_cfg(trainer_cfg, "handler")
     assert trainer_handler_name is not None, ValueError(
         f"{trainer_handler_name} handler not set"
     )

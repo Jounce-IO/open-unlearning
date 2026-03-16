@@ -66,7 +66,16 @@ def main(cfg: DictConfig):
     Args:
         cfg (DictConfig): Config to train
     """
-    seed_everything(cfg.trainer.args.seed)
+    # Support both DictConfig and plain dict for trainer (e.g. from Hydra composition).
+    trainer_cfg = cfg.trainer
+    try:
+        trainer_args_cfg = getattr(trainer_cfg, "args", None) or (trainer_cfg.get("args") if isinstance(trainer_cfg, dict) else None)
+    except Exception:
+        trainer_args_cfg = None
+    seed = 42
+    if trainer_args_cfg is not None:
+        seed = getattr(trainer_args_cfg, "seed", None) or (trainer_args_cfg.get("seed") if isinstance(trainer_args_cfg, dict) else None) or seed
+    seed_everything(seed)
     mode = cfg.get("mode", "train")
     model_cfg = cfg.model
     template_args = model_cfg.template_args
