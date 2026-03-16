@@ -97,10 +97,14 @@ def main(cfg: DictConfig):
     trainer_cfg = cfg.trainer
     assert trainer_cfg is not None, ValueError("Please set trainer")
 
-    # Get Evaluators
+    # Get Evaluators (skip when eval is disabled so we never run TOFU metrics that require retain_ftr)
     evaluators = None
     eval_cfgs = cfg.get("eval", None)
-    if eval_cfgs:
+    trainer_args_cfg = trainer_cfg.get("args", None) if hasattr(trainer_cfg, "get") else getattr(trainer_cfg, "args", None)
+    eval_strategy = None
+    if trainer_args_cfg is not None:
+        eval_strategy = trainer_args_cfg.get("eval_strategy", None) if hasattr(trainer_args_cfg, "get") else getattr(trainer_args_cfg, "eval_strategy", None)
+    if eval_cfgs and eval_strategy != "no":
         evaluators = get_evaluators(
             eval_cfgs=eval_cfgs,
             template_args=template_args,
