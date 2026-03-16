@@ -28,8 +28,15 @@ def _register_collator(collator_class):
     COLLATOR_REGISTRY[collator_class.__name__] = collator_class
 
 
+def _get_cfg(cfg, key, default=None):
+    """Get key from cfg whether it is DictConfig or plain dict."""
+    if hasattr(cfg, "get"):
+        return cfg.get(key, default)
+    return getattr(cfg, key, default)
+
+
 def _load_single_dataset(dataset_name, dataset_cfg: DictConfig, **kwargs):
-    dataset_handler_name = dataset_cfg.get("handler")
+    dataset_handler_name = _get_cfg(dataset_cfg, "handler")
     assert dataset_handler_name is not None, ValueError(
         f"{dataset_name} handler not set"
     )
@@ -38,7 +45,8 @@ def _load_single_dataset(dataset_name, dataset_cfg: DictConfig, **kwargs):
         raise NotImplementedError(
             f"{dataset_handler_name} not implemented or not registered"
         )
-    dataset_args = dict(dataset_cfg.args)
+    args_cfg = _get_cfg(dataset_cfg, "args")
+    dataset_args = dict(args_cfg) if args_cfg is not None else {}
     # QADataset expects split in hf_args (for load_hf_dataset); move top-level split if present
     split_val = dataset_args.pop("split", None) or kwargs.pop("split", None)
     # Apply samples limit: slice base split (e.g. train -> train[:2], forget_qa -> forget_qa[:2])
@@ -122,7 +130,8 @@ def _get_single_collator(collator_name: str, collator_cfg: DictConfig, **kwargs)
         raise NotImplementedError(
             f"{collator_handler_name} not implemented or not registered"
         )
-    collator_args = collator_cfg.args
+    collator_args_cfg = _get_cfg(collator_cfg, "args")
+    collator_args = dict(collator_args_cfg) if collator_args_cfg is not None else {}
     return collator_handler(**collator_args, **kwargs)
 
 
