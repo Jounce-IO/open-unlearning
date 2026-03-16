@@ -52,18 +52,21 @@ data:
   validation_splits:
     forget:
       TOFU_QA_forget:
+        handler: QADataset
         args:
           hf_args:
             name: ${forget_split}
           question_key: ${question_key}
     retain:
       TOFU_QA_retain:
+        handler: QADataset
         args:
           hf_args:
             name: ${retain_split}
           question_key: ${question_key}
     holdout:
       TOFU_QA_holdout:
+        handler: QADataset
         args:
           hf_args:
             name: ${holdout_split}
