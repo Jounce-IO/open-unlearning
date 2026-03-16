@@ -61,5 +61,6 @@ trainer:
     save_steps: 100
     save_total_limit: 3
     eval_strategy: "no"  # No eval during training; avoids OOM with 8B on 40GB. Run eval separately if needed.
+    do_eval: false       # Skip post-training evaluate() so we don't require retain reference (retain_ftr) for ks_test.
 
 task_name: ???
