@@ -264,9 +264,15 @@ class FinetuneTrainer(Trainer):
                 eval_metrics[f"{metric_key_prefix}_{name}_loss"] = method_loss_sum / method_n
             if ce_n > 0:
                 eval_metrics[f"{metric_key_prefix}_{name}_loss_ce"] = ce_loss_sum / ce_n
+            elif method_n > 0:
+                logger.warning(
+                    "Four-way eval: CE loss not computed for %s (ce_n=0); only method loss logged for this split.",
+                    name,
+                )
             num_samples += len(dataset)
         if eval_metrics and self.is_world_process_zero():
             self.log(_scalar_metrics_for_wandb(eval_metrics))
+            logger.info("Four-way eval metrics: %s", ", ".join(sorted(eval_metrics.keys())))
         return EvalLoopOutput(
             predictions=None,
             label_ids=None,
