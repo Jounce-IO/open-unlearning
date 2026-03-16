@@ -152,7 +152,8 @@ def main(cfg: DictConfig):
         except Exception:
             pass
 
-    if trainer_args.do_eval:
+    # Skip post-training evaluate when eval is disabled to avoid requiring retain reference (retain_ftr).
+    if trainer_args.do_eval and getattr(trainer_args, "eval_strategy", None) != "no":
         trainer.evaluate(metric_key_prefix="eval")
 
 
