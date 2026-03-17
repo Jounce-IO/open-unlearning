@@ -470,12 +470,12 @@ def _generate_trajectories_for_dataloader(
                 prompt_lens.append(len(prompts[-1]))
 
         # Log when sample 0 has empty or EOS/pad-only prompt (for correlating with sampler empty_response_sample0_detected)
-        if B > 0:
+        if B > 0 and logger.isEnabledFor(logging.DEBUG):
             pl0 = prompt_lens[0]
             idx0 = indices[0].item() if torch.is_tensor(indices[0]) else indices[0]
             p0 = prompts[0]
             if pl0 == 0:
-                logger.info(
+                logger.debug(
                     "[trajectory] batch=%s dataset_index_sample0=%s prompt_len_sample0=0 (empty prompt sent to sampler)",
                     batch_idx, idx0,
                 )
@@ -485,7 +485,7 @@ def _generate_trajectories_for_dataloader(
                 if pad_id is None and eos_id is not None:
                     pad_id = eos_id
                 if pad_id is not None and all(t == pad_id or t == eos_id for t in p0):
-                    logger.info(
+                    logger.debug(
                         "[trajectory] batch=%s dataset_index_sample0=%s prompt_len_sample0=%s prompt_first5=%s (all tokens EOS/pad)",
                         batch_idx, idx0, pl0, p0[:5],
                     )
@@ -2104,8 +2104,8 @@ def trajectory_metrics(model, **kwargs):
                 else len(dataloader.dataset)
             )
             expected_batches = (n_samples + batch_size - 1) // batch_size
-            if _key is not None:
-                logger.info(
+            if _key is not None and logger.isEnabledFor(logging.DEBUG):
+                logger.debug(
                     "Trajectory dataset_key=%s: %s samples, batch_size=%s, expected_batches=%s",
                     _key, n_samples, batch_size, expected_batches,
                 )
@@ -2113,16 +2113,17 @@ def trajectory_metrics(model, **kwargs):
                 f"Trajectory forget dataset: {n_samples} samples, batch_size {batch_size}, "
                 f"expected batches: {expected_batches} (last batch index: {expected_batches - 1})"
             )
-            _sampler_kw_preview = _trajectory_sampler_kwargs(trajectory_config)
-            _max_new = _sampler_kw_preview.get("max_new_tokens")
-            _interval = _sampler_kw_preview.get("trajectory_sample_interval")
-            _pred_gen = getattr(dataloader.dataset, "predict_with_generate", False)
-            logger.info(
-                "Trajectory config: max_new_tokens=%s trajectory_sample_interval=%s predict_with_generate=%s",
-                _max_new, _interval, _pred_gen,
-            )
-            if use_distributed_sampler:
-                logger.info(
+            if logger.isEnabledFor(logging.DEBUG):
+                _sampler_kw_preview = _trajectory_sampler_kwargs(trajectory_config)
+                _max_new = _sampler_kw_preview.get("max_new_tokens")
+                _interval = _sampler_kw_preview.get("trajectory_sample_interval")
+                _pred_gen = getattr(dataloader.dataset, "predict_with_generate", False)
+                logger.debug(
+                    "Trajectory config: max_new_tokens=%s trajectory_sample_interval=%s predict_with_generate=%s",
+                    _max_new, _interval, _pred_gen,
+                )
+            if use_distributed_sampler and logger.isEnabledFor(logging.DEBUG):
+                logger.debug(
                     f"Data parallel: rank {rank}/{world_size} processes {n_samples} samples (no duplication)"
                 )
             all_rouge_futures: list = []
@@ -2187,8 +2188,8 @@ def trajectory_metrics(model, **kwargs):
                 sampler_output = sampler.sample(**sample_kw)
                 _batch_elapsed = time.perf_counter() - _batch_t0
                 gpu_set_phase("trajectory_after_sampler", batch_idx=batch_idx)
-                if batch_idx % _log_interval == 0 or batch_idx == 0 or batch_idx == expected_batches - 1:
-                    logger.info(
+                if (batch_idx % _log_interval == 0 or batch_idx == 0 or batch_idx == expected_batches - 1) and logger.isEnabledFor(logging.DEBUG):
+                    logger.debug(
                         "Batch %s/%s: diffusion sampling done in %.1fs",
                         batch_idx + 1, expected_batches, _batch_elapsed,
                     )
