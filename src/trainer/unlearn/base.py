@@ -158,6 +158,8 @@ class UnlearnTrainer(FinetuneTrainer):
                             for k, v in outputs.items()
                             if k not in ignore_keys + ["loss"]
                         )
+                    elif hasattr(outputs, "logits"):
+                        logits = (outputs.logits,)
                     else:
                         logits = outputs[1:]
                 else:
@@ -168,6 +170,9 @@ class UnlearnTrainer(FinetuneTrainer):
                         logits = tuple(
                             v for k, v in outputs.items() if k not in ignore_keys
                         )
+                    elif hasattr(outputs, "logits"):
+                        # ModelOutput (e.g. from diffusion/causal LMs): use .logits
+                        logits = (outputs.logits,)
                     else:
                         logits = outputs
                     # TODO: this needs to be fixed and made cleaner later.
@@ -178,7 +183,8 @@ class UnlearnTrainer(FinetuneTrainer):
             return (loss, None, None)
 
         logits = nested_detach(logits)
-        if len(logits) == 1:
+        # Unwrap single-element sequence; avoid len() on ModelOutput or single tensor.
+        if isinstance(logits, (tuple, list)) and len(logits) == 1:
             logits = logits[0]
 
         return (loss, logits, labels)
