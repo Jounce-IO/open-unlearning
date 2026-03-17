@@ -52,7 +52,7 @@ data:
           path: "locuslab/TOFU"
           name: ${retain_split}
           split: "train"
-  # Four-way validation: forget, retain, holdout (method loss + CE loss per set). No full TOFU evaluators unless retain_logs_path set.
+  # Four-way validation: forget, retain, holdout, utility (method loss + CE loss per set). No full TOFU evaluators unless retain_logs_path set.
   validation_splits:
     forget:
       TOFU_QA_forget:
@@ -81,6 +81,17 @@ data:
             name: ${holdout_split}
             split: "train"
           question_key: ${question_key}
+    utility:
+      MMLU_utility:
+        handler: MMLUUtilityDataset
+        args:
+          hf_args:
+            path: cais/mmlu
+            name: abstract_algebra
+            split: test
+          question_key: question
+          answer_key: answer
+          max_length: 512
 
 trainer:
   args:
