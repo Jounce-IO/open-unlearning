@@ -2311,6 +2311,16 @@ def trajectory_metrics(model, **kwargs):
                     sample_generation_start = _generation_start(
                         sample_idx, prompt_starts, prompt_lens, _prompt_only_input_ids
                     )
+                    _gs = sample_generation_start
+                    _ps = prompt_starts[sample_idx]
+                    logger.debug(
+                        "trajectory slice: sample_idx=%s generation_start=%s (prompt_starts=%s, prompt_len=%s) L=%s",
+                        sample_idx,
+                        _gs.item() if hasattr(_gs, "item") else _gs,
+                        _ps.item() if hasattr(_ps, "item") else _ps,
+                        sample_prompt_len.item() if hasattr(sample_prompt_len, "item") else sample_prompt_len,
+                        L,
+                    )
 
                     # Extract only the generated portion of labels to match logits shape [V, L]
                 # Logits from trajectory only cover generated tokens (L), not the prompt
