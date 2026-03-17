@@ -42,6 +42,12 @@ def main(cfg: DictConfig):
     Args:
         cfg (DictConfig): Config to train
     """
+    # Hydra replaces the root handler with job_logging (e.g. colorlog); set its level to DEBUG
+    # so evaluator/trajectory DEBUG lines are emitted when LOGLEVEL=DEBUG.
+    if os.environ.get("LOGLEVEL", "").upper() == "DEBUG":
+        logging.root.setLevel(logging.DEBUG)
+        for h in logging.root.handlers:
+            h.setLevel(logging.DEBUG)
     rank = get_rank()
     world_size = get_world_size()
     if world_size > 1:
