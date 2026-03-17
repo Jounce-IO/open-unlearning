@@ -4,6 +4,11 @@ from torch.utils.data import Dataset
 
 from data.utils import load_hf_dataset, preprocess_chat_instance, add_dataset_index
 
+try:
+    from datasets import DatasetDict
+except ImportError:
+    DatasetDict = None
+
 logger = logging.getLogger(__name__)
 
 
@@ -92,14 +97,17 @@ class MMLUUtilityDataset(QADataset):
         self.answer_key = answer_key
         self.predict_with_generate = kwargs.get("predict_with_generate", False)
         raw = load_hf_dataset(**hf_args)
-        if hasattr(raw, "train") and "train" in raw:
-            raw = raw["train"]
-        elif hasattr(raw, "test") and "test" in raw:
-            raw = raw["test"]
-        elif hasattr(raw, "validation") and "validation" in raw:
-            raw = raw["validation"]
-        else:
-            raw = raw[list(raw.keys())[0]]
+        # When split= is in hf_args, load_dataset returns a single Dataset; otherwise DatasetDict.
+        if DatasetDict is not None and isinstance(raw, DatasetDict):
+            if hasattr(raw, "train") and "train" in raw:
+                raw = raw["train"]
+            elif hasattr(raw, "test") and "test" in raw:
+                raw = raw["test"]
+            elif hasattr(raw, "validation") and "validation" in raw:
+                raw = raw["validation"]
+            else:
+                raw = raw[list(raw.keys())[0]]
+        # else: raw is already a single Dataset (e.g. load_dataset(..., split="test"))
         self.data = []
         choices_key = "choices"
         answer_key_raw = "answer"
