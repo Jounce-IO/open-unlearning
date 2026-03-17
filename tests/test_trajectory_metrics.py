@@ -99,12 +99,13 @@ class TestBuildPromptsForSampler:
         input_ids = torch.tensor([[10, 20, 30, 40, 50]])  # prompt-only, no pad
         labels = torch.tensor([[1, 2, 3, 4, 5]])  # real token ids, no IGNORE
         tokenizer = Mock(pad_token_id=0)
-        prompts, prompt_lens = _build_prompts_for_sampler(
-            input_ids, labels, tokenizer, IGNORE_INDEX
+        prompts, prompt_lens, prompt_starts = _build_prompts_for_sampler(
+            input_ids, labels, tokenizer, IGNORE_INDEX, prompt_only_input_ids=False
         )
         assert len(prompts) == 1
         assert prompts[0] == [10, 20, 30, 40, 50]
         assert prompt_lens[0] == K
+        assert prompt_starts[0] == 0  # no IGNORE in labels, so first content at 0
 
     def test_predict_with_generate_style_with_padding(self):
         """Prompt-only input_ids with pad tokens: prompt is non-pad tokens only."""
@@ -112,12 +113,13 @@ class TestBuildPromptsForSampler:
         input_ids = torch.tensor([[10, 20, pad_id, pad_id, pad_id]])  # left-packed style
         labels = torch.tensor([[1, 2, 3, 4, 5]])  # no IGNORE
         tokenizer = Mock(pad_token_id=pad_id)
-        prompts, prompt_lens = _build_prompts_for_sampler(
-            input_ids, labels, tokenizer, IGNORE_INDEX
+        prompts, prompt_lens, prompt_starts = _build_prompts_for_sampler(
+            input_ids, labels, tokenizer, IGNORE_INDEX, prompt_only_input_ids=False
         )
         assert len(prompts) == 1
         assert prompts[0] == [10, 20]
         assert prompt_lens[0] == 2
+        assert prompt_starts[0] == 0
 
     def test_training_style_ignore_in_labels(self):
         """Labels use IGNORE for prompt; prompt = input_ids[:, :P], length P."""
@@ -126,12 +128,13 @@ class TestBuildPromptsForSampler:
         labels = torch.full((1, L), IGNORE_INDEX)
         labels[0, P:] = torch.tensor([1, 2, 3, 4])
         tokenizer = Mock(pad_token_id=0)
-        prompts, prompt_lens = _build_prompts_for_sampler(
-            input_ids, labels, tokenizer, IGNORE_INDEX
+        prompts, prompt_lens, prompt_starts = _build_prompts_for_sampler(
+            input_ids, labels, tokenizer, IGNORE_INDEX, prompt_only_input_ids=False
         )
         assert len(prompts) == 1
         assert prompts[0] == [100, 101, 102]
         assert prompt_lens[0] == P
+        assert prompt_starts[0] == P
 
     def test_edge_prompt_end_zero_all_pad_no_fallback(self):
         """prompt_end==0 and all input_ids are pad: empty prompt (no tokenizer fallback)."""
@@ -139,24 +142,26 @@ class TestBuildPromptsForSampler:
         input_ids = torch.tensor([[pad_id, pad_id, pad_id]])
         labels = torch.tensor([[1, 2, 3]])  # no IGNORE -> prompt_end 0
         tokenizer = Mock(pad_token_id=pad_id)
-        prompts, prompt_lens = _build_prompts_for_sampler(
-            input_ids, labels, tokenizer, IGNORE_INDEX
+        prompts, prompt_lens, prompt_starts = _build_prompts_for_sampler(
+            input_ids, labels, tokenizer, IGNORE_INDEX, prompt_only_input_ids=False
         )
         assert len(prompts) == 1
         assert prompts[0] == []
         assert prompt_lens[0] == 0
+        assert prompt_starts[0] == 0
 
     def test_edge_no_pad_token_id_prompt_end_zero(self):
         """prompt_end==0 and tokenizer has no pad_token_id: use slice, empty prompt."""
         input_ids = torch.tensor([[10, 20, 30]])
         labels = torch.tensor([[1, 2, 3]])  # no IGNORE -> prompt_end 0
         tokenizer = type("NoPad", (), {})()  # no pad_token_id -> getattr returns None
-        prompts, prompt_lens = _build_prompts_for_sampler(
-            input_ids, labels, tokenizer, IGNORE_INDEX
+        prompts, prompt_lens, prompt_starts = _build_prompts_for_sampler(
+            input_ids, labels, tokenizer, IGNORE_INDEX, prompt_only_input_ids=False
         )
         assert len(prompts) == 1
         assert prompts[0] == []
         assert prompt_lens[0] == 0
+        assert prompt_starts[0] == 0
 
     def test_batch_size_two_mixed(self):
         """Batch of 2: one training-style (IGNORE prefix), one predict_with_generate-style."""
@@ -170,14 +175,29 @@ class TestBuildPromptsForSampler:
         labels[0, 2:] = 1
         labels[1, :] = 2  # no IGNORE
         tokenizer = Mock(pad_token_id=0)
-        prompts, prompt_lens = _build_prompts_for_sampler(
-            input_ids, labels, tokenizer, IGNORE_INDEX
+        prompts, prompt_lens, prompt_starts = _build_prompts_for_sampler(
+            input_ids, labels, tokenizer, IGNORE_INDEX, prompt_only_input_ids=False
         )
         assert len(prompts) == 2
         assert prompts[0] == [1, 2]
         assert prompt_lens[0] == 2
+        assert prompt_starts[0] == 2
         assert prompts[1] == [5, 6, 7]
         assert prompt_lens[1] == 3
+        assert prompt_starts[1] == 0  # no IGNORE in labels[1]
+
+    def test_prompt_only_input_ids_true_uses_non_pad(self):
+        """When prompt_only_input_ids=True, prompt is non-pad tokens of input_ids; prompt_starts from labels."""
+        input_ids = torch.tensor([[10, 20, 30, 0, 0]])  # content then pad
+        labels = torch.tensor([[1, 2, 3, 4, 5]])  # no IGNORE -> prompt_starts[0] = 0
+        tokenizer = Mock(pad_token_id=0)
+        prompts, prompt_lens, prompt_starts = _build_prompts_for_sampler(
+            input_ids, labels, tokenizer, IGNORE_INDEX, prompt_only_input_ids=True
+        )
+        assert len(prompts) == 1
+        assert prompts[0] == [10, 20, 30]
+        assert prompt_lens[0] == 3
+        assert prompt_starts[0] == 0
 
 
 class TestSamplerReceivesCorrectPrompt:
