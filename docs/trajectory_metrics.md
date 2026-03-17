@@ -424,9 +424,26 @@ Similarly for fixation steps and labels:
 # Extract fixation steps for generated region
 F = fixation_steps[0][max_prompt_len:max_prompt_len + L]  # [L]
 
-# Extract labels for generated region
-generated_labels = sample_labels[sample_prompt_len:sample_prompt_len + L]  # [L]
+# Extract labels for generated region (use generation_start, not prompt_len)
+# Full-convo: generation_start = prompt_starts[sample_idx] + prompt_lens[sample_idx]
+# IGNORE-for-prompt: generation_start = prompt_starts[sample_idx]
+generation_start = prompt_starts[sample_idx] + prompt_lens[sample_idx]  # full-convo; use prompt_starts only when IGNORE-for-prompt
+generated_labels = sample_labels[generation_start : generation_start + L]  # [L]
+generated_input_ids = sample_input_ids[generation_start : generation_start + L]  # [L]
 ```
+
+With left-padded batches, using `prompt_lens[sample_idx]` alone as the slice start is **wrong** when `prompt_starts[sample_idx] > 0`: that index is in sequence-from-sampler space, not in batch labels space. Always use **generation_start** (content start + prompt length for full-convo, or content start for IGNORE-for-prompt) when slicing `labels` or aligned `input_ids`.
+
+#### Label conventions and generation start
+
+- **`prompt_only_input_ids=True`** (e.g. TOFU, MUSE): `labels` = full conversation (possibly left-padded). Content starts at `prompt_starts[i]`; generation start = `prompt_starts[i] + prompt_lens[i]`.
+- **`prompt_only_input_ids=False`** (IGNORE-for-prompt): `labels` = IGNORE for prompt, then response tokens. Generation start = `prompt_starts[i]` (first non-IGNORE).
+
+The trajectory code uses `_generation_start(sample_idx, prompt_starts, prompt_lens, prompt_only_input_ids)` to compute this index.
+
+#### Collator and position alignment
+
+The data collator pads `input_ids` and `labels` to their **own** max lengths per batch. So `input_ids.shape[1]` and `labels.shape[1]` can differ. Downstream code must not assume position alignment between the two; use `prompt_starts` (and generation start) per tensor when slicing. The trajectory path builds a per-sample `batch_template` with aligned `input_ids` and `labels` (both sliced from the same generation region) for metrics.
 
 ### Shape Alignment
 

@@ -94,6 +94,28 @@ def _trajectory_sampler_kwargs(trajectory_config: Union[Dict, DictConfig]) -> di
     return kwargs
 
 
+def _generation_start(
+    sample_idx: int,
+    prompt_starts: list[int],
+    prompt_lens: list[int],
+    prompt_only_input_ids: bool,
+) -> int:
+    """Index in labels (and aligned input_ids) where the generated region starts.
+
+    Full-convo (prompt_only_input_ids=True, e.g. TOFU): labels = [pad, prompt+response];
+    generation start = content_start + prompt_len = prompt_starts[i] + prompt_lens[i].
+    IGNORE-for-prompt (prompt_only_input_ids=False): labels = [IGNORE]*prompt_len + [response];
+    generation start = first non-IGNORE = prompt_starts[i].
+    """
+    ps = prompt_starts[sample_idx]
+    pl = prompt_lens[sample_idx]
+    if isinstance(ps, torch.Tensor):
+        ps = int(ps.item())
+    if isinstance(pl, torch.Tensor):
+        pl = int(pl.item())
+    return (ps + pl) if prompt_only_input_ids else ps
+
+
 def _build_prompts_for_sampler(
     input_ids: torch.Tensor,
     labels: Optional[torch.Tensor],
@@ -2149,9 +2171,10 @@ def trajectory_metrics(model, **kwargs):
                 B = input_ids.shape[0]
         
                 # Prepare inputs for sampler (list of token sequences)
+                _prompt_only_input_ids = getattr(dataloader.dataset, "predict_with_generate", False)
                 prompts, prompt_lens, prompt_starts = _build_prompts_for_sampler(
                     input_ids, labels, tokenizer, IGNORE_INDEX,
-                    prompt_only_input_ids=getattr(dataloader.dataset, "predict_with_generate", False),
+                    prompt_only_input_ids=_prompt_only_input_ids,
                 )
                 if guardrail_config_with_pools is not None:
                     prompts, prompt_lens = transform_prompts(
@@ -2285,6 +2308,9 @@ def trajectory_metrics(model, **kwargs):
                     sample_labels = labels[sample_idx] if labels is not None else None
                     sample_input_ids = input_ids[sample_idx]
                     sample_prompt_len = prompt_lens[sample_idx]
+                    sample_generation_start = _generation_start(
+                        sample_idx, prompt_starts, prompt_lens, _prompt_only_input_ids
+                    )
 
                     # Extract only the generated portion of labels to match logits shape [V, L]
                 # Logits from trajectory only cover generated tokens (L), not the prompt
@@ -2292,9 +2318,8 @@ def trajectory_metrics(model, **kwargs):
                 # So if logits are [1, L, V], after processing: logits [1, L-1, V], labels [1, L-1]
                     # This means we need labels of length L to get L-1 after shift
                     if sample_labels is not None:
-                        # Extract generated region: from prompt_end to prompt_end + L
-                        # L is now the generated length (not full sequence length)
-                        generated_labels = sample_labels[sample_prompt_len:sample_prompt_len + L]
+                        # Extract generated region at generation start (not prompt_lens; wrong when left-padded)
+                        generated_labels = sample_labels[sample_generation_start:sample_generation_start + L]
                         # Pad with IGNORE_INDEX if needed (shouldn't happen, but safety check)
                         if generated_labels.shape[0] < L:
                             padding = torch.full(
@@ -2315,7 +2340,7 @@ def trajectory_metrics(model, **kwargs):
                     # Create batch template for logit metrics
                     # Use generated token IDs so metrics that use input_ids (e.g. mia_min_k via tokenwise_logprobs)
                     # score log P(actual next token) at each position, not dummy zeros.
-                    generated_input_ids = sample_input_ids[sample_prompt_len : sample_prompt_len + L]
+                    generated_input_ids = sample_input_ids[sample_generation_start : sample_generation_start + L]
                     if generated_input_ids.shape[0] < L:
                         padding = torch.zeros(
                             L - generated_input_ids.shape[0],
