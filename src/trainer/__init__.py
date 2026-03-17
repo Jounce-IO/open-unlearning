@@ -70,11 +70,26 @@ def load_trainer(
     # transformers >= 4.57 raises. We pass a dummy so init succeeds; FinetuneTrainer
     # runs custom evaluators every epoch and never uses the dummy. See _DummyEvalDataset.
     eval_dataset_to_pass = eval_dataset
+    dummy_substituted = False
     if eval_dataset_to_pass is None:
         args_dict = dict(trainer_args)
         eval_strategy = args_dict.get("eval_strategy", None)
         if eval_strategy not in (None, "no"):
             eval_dataset_to_pass = _DummyEvalDataset()
+            dummy_substituted = True
+            logger.info(
+                "[eval] load_trainer: eval_dataset=None eval_strategy=%s -> passing dummy (four-way will not run)",
+                eval_strategy,
+            )
+    if eval_dataset_to_pass is not None and not dummy_substituted:
+        if isinstance(eval_dataset_to_pass, dict):
+            logger.info(
+                "[eval] load_trainer: eval_dataset=dict keys=%s lengths=%s",
+                list(eval_dataset_to_pass.keys()),
+                {k: len(v) for k, v in eval_dataset_to_pass.items()},
+            )
+        else:
+            logger.info("[eval] load_trainer: eval_dataset=single_dataset len=%s", len(eval_dataset_to_pass))
     trainer_args = load_trainer_args(trainer_args, train_dataset)
     trainer_handler_name = _get_cfg(trainer_cfg, "handler")
     assert trainer_handler_name is not None, ValueError(

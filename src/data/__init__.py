@@ -1,7 +1,10 @@
+import logging
 import re
 from typing import Dict, Any, Union
 from omegaconf import DictConfig
 from torch.utils.data import Dataset, Subset
+
+logger = logging.getLogger(__name__)
 
 from data.qa import (
     QADataset,
@@ -97,6 +100,19 @@ def get_data(data_cfg: DictConfig, mode="train", **kwargs):
     data_cfg = dict(data_cfg)
     anchor = data_cfg.pop("anchor", "forget")
     validation_splits_cfg = data_cfg.pop("validation_splits", None)
+    # Log for four-way debugging: presence of validation_splits in config
+    if validation_splits_cfg is not None:
+        validation_keys = list(validation_splits_cfg.keys())
+        logger.info(
+            "[eval] get_data: mode=%s validation_splits=present keys=%s",
+            mode,
+            validation_keys,
+        )
+    else:
+        logger.info(
+            "[eval] get_data: mode=%s validation_splits=missing (four-way will be disabled if mode=unlearn)",
+            mode,
+        )
     for split, dataset_cfgs in data_cfg.items():
         data[split] = get_datasets(dataset_cfgs, **kwargs)
     if mode == "train" and validation_splits_cfg is not None:
@@ -105,6 +121,11 @@ def get_data(data_cfg: DictConfig, mode="train", **kwargs):
             ds = get_datasets(dataset_cfgs, **kwargs)
             eval_dict[name] = _cap_dataset_at_100(ds)
         data["eval_dataset"] = eval_dict
+        logger.info(
+            "[eval] get_data: train mode built eval_dataset keys=%s lengths=%s",
+            list(eval_dict.keys()),
+            {k: len(v) for k, v in eval_dict.items()},
+        )
     if mode == "unlearn":
         unlearn_splits = {k: v for k, v in data.items() if k not in ("eval", "test", "eval_dataset")}
         unlearn_dataset = ForgetRetainDataset(**unlearn_splits, anchor=anchor)
@@ -117,6 +138,15 @@ def get_data(data_cfg: DictConfig, mode="train", **kwargs):
                 ds = get_datasets(dataset_cfgs, **kwargs)
                 eval_dict[name] = _cap_dataset_at_100(ds)
             data["eval_dataset"] = eval_dict
+            logger.info(
+                "[eval] get_data: unlearn mode built four-way eval_dataset keys=%s lengths=%s",
+                list(eval_dict.keys()),
+                {k: len(v) for k, v in eval_dict.items()},
+            )
+        else:
+            logger.info(
+                "[eval] get_data: unlearn mode no validation_splits so eval_dataset not set"
+            )
     return data
 
 

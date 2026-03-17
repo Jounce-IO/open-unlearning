@@ -146,8 +146,24 @@ class FinetuneTrainer(Trainer):
         metric_key_prefix: str = "eval",
         trial: Dict[str, Any] = None,
     ) -> Dict[str, float]:
+        # Diagnostic log for four-way debugging (caller often passes no args; we use self.eval_dataset then)
+        caller_passed = eval_dataset is not None
+        self_eval = getattr(self, "eval_dataset", None)
+        self_eval_type = "None"
+        if self_eval is not None:
+            self_eval_type = "dict_keys=%s" % list(self_eval.keys()) if isinstance(self_eval, dict) else "single_len=%s" % len(self_eval)
+        logger.info(
+            "[eval] evaluate: caller_passed_dataset=%s self_eval_dataset=%s (step=%s)",
+            caller_passed,
+            self_eval_type,
+            self.state.global_step if hasattr(self, "state") and self.state is not None else "?",
+        )
         # Run a custom evaluator and save results
         if self.evaluators:
+            logger.info(
+                "[eval] evaluate: using evaluators path (four-way skipped) step=%s",
+                self.state.global_step if hasattr(self, "state") and self.state is not None else "?",
+            )
             if self.accelerator.is_local_main_process:
                 eval_metrics = {}
                 if self.accelerator.num_processes == 1:
@@ -173,15 +189,24 @@ class FinetuneTrainer(Trainer):
                     )
                 return eval_metrics
 
+        # When the training loop calls evaluate() it does not pass eval_dataset; use the one from __init__.
         if eval_dataset is None:
+            eval_dataset = getattr(self, "eval_dataset", None)
+        if eval_dataset is None:
+            logger.info("[eval] evaluate: no eval_dataset -> returning {} (four-way skipped)")
             return {}
         # Four-way validation: eval_dataset is a dict of named datasets (forget, retain, holdout, utility).
         # Compute both method loss and constant CE loss per set, then merge and log.
         if isinstance(eval_dataset, dict):
+            logger.info(
+                "[eval] evaluate: running four-way validation keys=%s",
+                list(eval_dataset.keys()),
+            )
             return self._evaluate_four_way(
                 eval_dataset, ignore_keys, metric_key_prefix, trial
             )
         # Single dataset: default HF Trainer evaluate
+        logger.info("[eval] evaluate: running single-dataset evaluation")
         return super().evaluate(eval_dataset, ignore_keys, metric_key_prefix)
 
     def _evaluate_four_way(

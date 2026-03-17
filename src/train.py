@@ -1,4 +1,5 @@
 import json
+import logging
 import os
 
 import hydra
@@ -9,6 +10,8 @@ from model import get_model
 from trainer import load_trainer
 from evals import get_evaluators
 from trainer.utils import seed_everything
+
+logger = logging.getLogger(__name__)
 
 
 class _WandbDllmConfigCallback(TrainerCallback):
@@ -113,9 +116,31 @@ def main(cfg: DictConfig):
             model=model,
             tokenizer=tokenizer,
         )
+        logger.info(
+            "[eval] train: evaluators=set names=%s (retain_logs_path set, eval_strategy=%s)",
+            list(evaluators.keys()) if evaluators else [],
+            eval_strategy,
+        )
+    else:
+        logger.info(
+            "[eval] train: evaluators=None (retain_logs_path=%s eval_cfgs=%s eval_strategy=%s)",
+            retain_logs_path,
+            "set" if eval_cfgs else None,
+            eval_strategy,
+        )
 
     # Four-way validation: use eval_dataset dict when present (forget, retain, holdout, utility)
     eval_dataset = data.get("eval_dataset", data.get("eval", None))
+    if eval_dataset is None:
+        logger.info("[eval] train: eval_dataset=None (four-way will not run unless load_trainer substitutes dummy)")
+    elif isinstance(eval_dataset, dict):
+        logger.info(
+            "[eval] train: eval_dataset=dict keys=%s lengths=%s",
+            list(eval_dataset.keys()),
+            {k: len(v) for k, v in eval_dataset.items()},
+        )
+    else:
+        logger.info("[eval] train: eval_dataset=single_dataset len=%s", len(eval_dataset))
     trainer, trainer_args = load_trainer(
         trainer_cfg=trainer_cfg,
         model=model,
