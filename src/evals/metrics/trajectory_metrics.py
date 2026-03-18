@@ -2489,6 +2489,10 @@ def trajectory_metrics(model, **kwargs):
                 logger.info(
                     "Trajectory MU: running full 9-metric (retain, ra, wf)."
                 )
+                logger.info(
+                    "Trajectory MU: 9 components %s",
+                    sorted(EXPECTED_9_MU_KEYS),
+                )
                 retain_res = _compute_mu_for_dataset(
                     model,
                     data["retain"],
@@ -2548,6 +2552,21 @@ def trajectory_metrics(model, **kwargs):
                     "Trajectory MU: merged 9 components for %s steps (full and eos).",
                     len(retain_agg_by_step),
                 )
+                # Log 9 values for one step/view as a sanity check (step 0, full).
+                if retain_agg_by_step:
+                    first_sk = next(iter(retain_agg_by_step.keys()))
+                    first_sv = retain_agg_by_step[first_sk]
+                    if isinstance(first_sv, dict) and "full" in first_sv:
+                        vals = {
+                            k: v.get("agg_value")
+                            for k, v in first_sv["full"].items()
+                            if isinstance(v, dict) and "agg_value" in v
+                        }
+                        logger.info(
+                            "Trajectory MU: 9 values (step %s, full) %s",
+                            first_sk,
+                            vals,
+                        )
             else:
                 retain_agg_by_step = _compute_retain_mu_by_step(
                     model,
