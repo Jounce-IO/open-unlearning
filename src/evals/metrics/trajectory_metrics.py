@@ -1773,12 +1773,27 @@ def _handle_text_based_metric(logits, tokenizer, sample_labels, sample_input_ids
     if use_rouge_only:
         from evals.metrics.utils import eval_rouge_recall_batch
 
+        _step = kwargs.get("step")
+        _sidx = kwargs.get("sample_idx")
         if not (gen_text or "").strip():
             logger.debug(
                 "ROUGE (rouge-only path): empty generated text (gen_len=0 or whitespace-only); "
                 "score will be 0. step=%s sample_idx=%s",
-                kwargs.get("step"),
-                kwargs.get("sample_idx"),
+                _step,
+                _sidx,
+            )
+        # Log actual decoded text for a few samples (step 0, sample 0) for debugging
+        _log_text = _step in (0, "0") and _sidx in (0, "0")
+        if _log_text:
+            _max_len = 100
+            _gen_snippet = (gen_text or "")[: _max_len] + ("..." if len(gen_text or "") > _max_len else "")
+            _gt_snippet = (ground_truth or "")[: _max_len] + ("..." if len(ground_truth or "") > _max_len else "")
+            logger.debug(
+                "ROUGE decoded sample (step=%s sample_idx=%s): gen=%r gt=%r",
+                _step,
+                _sidx,
+                _gen_snippet,
+                _gt_snippet,
             )
         result = eval_rouge_recall_batch(
             [gen_text],
