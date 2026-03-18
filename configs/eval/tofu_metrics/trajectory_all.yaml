@@ -126,19 +126,46 @@ datasets:
       question_key: ${eval.tofu_trajectory.question_key}
       answer_key: answer
       max_length: 512
-  # Retain set: used to compute trajectory_model_utility (hm_aggregate) per step from current model, not reference_logs
+  # Retain set: used to compute trajectory_model_utility (hm_aggregate) per step from current model, not reference_logs.
+  # Dual-answer so Truth Ratio uses correct vs wrong (paraphrased vs perturbed); required for full 9-metric MU.
   TOFU_QA_retain_eval:
     access_key: retain
-    handler: QADataset
+    handler: QAwithDualAnswersDataset
     args:
       hf_args:
         name: retain_perturbed
         split: train
         path: locuslab/TOFU
       question_key: ${eval.tofu_trajectory.question_key}
-      answer_key: answer
+      correct_answer_key: paraphrased_answer
+      wrong_answer_key: perturbed_answer
       max_length: 512
       predict_with_generate: true
+  # Real authors and world facts for full 9-metric trajectory MU (ra/wf × Prob, ROUGE, Truth Ratio).
+  TOFU_QA_ra_eval:
+    access_key: ra
+    handler: QAwithDualAnswersDataset
+    args:
+      hf_args:
+        name: real_authors_perturbed
+        split: train
+        path: locuslab/TOFU
+      question_key: ${eval.tofu_trajectory.question_key}
+      correct_answer_key: answer
+      wrong_answer_key: perturbed_answer
+      max_length: 512
+  TOFU_QA_wf_eval:
+    access_key: wf
+    handler: QAwithDualAnswersDataset
+    args:
+      hf_args:
+        name: world_facts_perturbed
+        split: train
+        path: locuslab/TOFU
+      question_key: ${eval.tofu_trajectory.question_key}
+      correct_answer_key: answer
+      wrong_answer_key: perturbed_answer
+      max_length: 512
 
 collators:
   DataCollatorForSupervisedDataset:

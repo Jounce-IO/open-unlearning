@@ -562,12 +562,18 @@ The `trajectory_metrics` function returns a dictionary following the standard me
     },
     # When hm_aggregate (trajectory_model_utility) is computed and a retain set is used:
     "retain_mu_components_by_step": {
-        # Step index -> retain-set components that feed the harmonic mean (hm_aggregate).
-        # Use this to debug why trajectory_model_utility is 0 (any component 0 => hmean 0).
+        # Per step: either flat (single view) or nested by trajectory view (full / eos).
         "0": {
-            "retain_Q_A_Prob": 0.5,
-            "retain_Q_A_ROUGE": 0.3,
-            "retain_Truth_Ratio": 0.9
+            "full": {
+                "retain_Q_A_Prob": 0.5,
+                "retain_Q_A_ROUGE": 0.3,
+                "retain_Truth_Ratio": 0.9,
+            },
+            "eos": {
+                "retain_Q_A_Prob": 0.48,
+                "retain_Q_A_ROUGE": 0.28,
+                "retain_Truth_Ratio": 0.88,
+            },
         },
         "1": {...},
         ...
@@ -575,7 +581,7 @@ The `trajectory_metrics` function returns a dictionary following the standard me
 }
 ```
 
-**`retain_mu_components_by_step`** (optional): Present when the evaluation uses the **retain** dataset and the metric list includes **hm_aggregate** (trajectory_model_utility). It maps each step index to the three retain-set values that are combined into the harmonic mean: `retain_Q_A_Prob`, `retain_Q_A_ROUGE`, and `retain_Truth_Ratio`. If any of these is 0 at a step, the harmonic mean (and thus trajectory_model_utility) is 0 at that step. Use this field to diagnose zero utility in reports.
+**`retain_mu_components_by_step`** (optional): Present when the evaluation uses the **retain** dataset and the metric list includes **hm_aggregate** (trajectory_model_utility). When **ra** and **wf** datasets are also configured (e.g. in `trajectory_all.yaml` with `access_key: ra` and `access_key: wf`), this field contains **9 components** per step/view: `retain_Q_A_Prob`, `retain_Q_A_ROUGE`, `retain_Truth_Ratio`, `ra_Q_A_Prob_normalised`, `ra_Q_A_ROUGE`, `ra_Truth_Ratio`, `wf_Q_A_Prob_normalised`, `wf_Q_A_ROUGE`, `wf_Truth_Ratio`—and **trajectory_model_utility** is the full TOFU MU (harmonic mean of 9). Otherwise (retain only), each step/view has **3 components** (retain only) and trajectory_model_utility is the harmonic mean of those three (retain-only subset). When `include_views` has both **full** and **eos**, each step maps to **`full`** and **`eos`** sub-objects. With a single view, the step may nest under that view key or match the legacy flat shape. If any component is 0 at a step for a view, the harmonic mean for that view is 0 at that step.
 
 ### Step count (S) and reference compatibility
 
