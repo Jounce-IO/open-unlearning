@@ -914,10 +914,14 @@ def _compute_retain_mu_by_step(
                 valid = generated_labels[generated_labels != IGNORE_INDEX]
                 ground_truth_str = tokenizer.decode(valid.tolist(), skip_special_tokens=True) if len(valid) > 0 else ""
 
+            _rouge_prompt_dbg = tokenizer.decode(
+                prompts[sample_idx], skip_special_tokens=True
+            )
             kwargs_retain = {
                 "ground_truth": ground_truth_str,
                 "rouge_scorer": rouge_scorer_instance,
                 "trajectory_config": trajectory_config,
+                "rouge_debug_prompt_text": _rouge_prompt_dbg,
                 **{k: v for k, v in kwargs.items() if k not in ("tokenizer", "model", "data")},
             }
 
@@ -1281,12 +1285,16 @@ def _compute_mu_for_dataset(
                     if len(valid) > 0
                     else ""
                 )
+            _rouge_prompt_dbg_mu = tokenizer.decode(
+                prompts[sample_idx], skip_special_tokens=True
+            )
             kwargs_mu = {
                 "ground_truth": ground_truth_str,
                 "rouge_scorer": rouge_scorer_instance,
                 "trajectory_config": trajectory_config,
                 "dataset_key": dataset_key,
                 "last_step_index": len(steps_to_use) - 1,
+                "rouge_debug_prompt_text": _rouge_prompt_dbg_mu,
                 **{k: v for k, v in kwargs.items() if k not in ("tokenizer", "model", "data")},
             }
 
@@ -1893,18 +1901,40 @@ def _handle_text_based_metric(logits, tokenizer, sample_labels, sample_input_ids
                 _gen_snippet = (gen_text or "")[:_max_len] + ("..." if len(gen_text or "") > _max_len else "")
                 _gt_snippet = (ground_truth or "")[:_max_len] + ("..." if len(ground_truth or "") > _max_len else "")
                 _prompt_snippet = ""
-                _sid = kwargs.get("sample_input_ids")
-                _spl = kwargs.get("sample_prompt_len")
-                if _sid is not None and _spl is not None:
-                    try:
-                        _pl = int(_spl) if not hasattr(_spl, "item") else int(_spl.item())
-                        _ids = _sid[0] if _sid.dim() > 1 else _sid
-                        if hasattr(_ids, "tolist"):
-                            _ids = _ids.tolist()
-                        _prompt_text = tokenizer.decode(_ids[:_pl], skip_special_tokens=True)
-                        _prompt_snippet = (_prompt_text[:_max_len] + ("..." if len(_prompt_text) > _max_len else "")) if _prompt_text else ""
-                    except Exception:  # noqa: S110
-                        _prompt_snippet = "(decode failed)"
+                _override = kwargs.get("rouge_debug_prompt_text")
+                if isinstance(_override, str) and _override.strip():
+                    _prompt_snippet = _override[:_max_len] + (
+                        "..." if len(_override) > _max_len else ""
+                    )
+                else:
+                    _sid = kwargs.get("sample_input_ids")
+                    _spl = kwargs.get("sample_prompt_len")
+                    if _sid is not None and _spl is not None:
+                        try:
+                            _pl = int(_spl) if not hasattr(_spl, "item") else int(
+                                _spl.item()
+                            )
+                            _ids = _sid[0] if _sid.dim() > 1 else _sid
+                            if hasattr(_ids, "tolist"):
+                                _ids = _ids.tolist()
+                            if _pl > 0:
+                                _prompt_text = tokenizer.decode(
+                                    _ids[:_pl], skip_special_tokens=True
+                                )
+                                _prompt_snippet = (
+                                    (
+                                        _prompt_text[:_max_len]
+                                        + (
+                                            "..."
+                                            if len(_prompt_text) > _max_len
+                                            else ""
+                                        )
+                                    )
+                                    if _prompt_text
+                                    else ""
+                                )
+                        except Exception:  # noqa: S110
+                            _prompt_snippet = "(decode failed)"
                 _ds_key = kwargs.get("dataset_key")
                 _step = kwargs.get("step")
                 logger.debug(
