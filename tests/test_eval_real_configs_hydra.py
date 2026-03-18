@@ -74,6 +74,22 @@ def _canonical_retain_json_path(tmp_path: Path) -> Path:
 class TestTofuRealConfigsHydra:
     """TOFU: real Hydra compose from open-unlearning configs + get_evaluators."""
 
+    def test_tofu_trajectory_hydra_accepts_plus_diffusion_adapter_max_new_tokens(self) -> None:
+        """Compose with +model.diffusion_adapter.max_new_tokens (dllm eval CLI injects this).
+        Base model config has no diffusion_adapter, so override must use + to append."""
+        cfg = _compose_eval([
+            "experiment=eval/tofu/default",
+            "model=LLaDA-8B-Instruct",
+            "task_name=test",
+            "eval=tofu_trajectory",
+            "eval.tofu_trajectory.forget_split=forget10",
+            "eval.tofu_trajectory.holdout_split=holdout10",
+            "eval.tofu_trajectory.samples=2",
+            "+model.diffusion_adapter.max_new_tokens=200",
+        ])
+        assert hasattr(cfg.model, "diffusion_adapter")
+        assert cfg.model.diffusion_adapter.max_new_tokens == 200
+
     def test_tofu_trajectory_all_metrics_no_reference(self) -> None:
         _require_trajectory_metrics()
         cfg = _compose_eval([

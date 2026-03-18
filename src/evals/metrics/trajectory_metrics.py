@@ -94,25 +94,65 @@ def _trajectory_sampler_kwargs(trajectory_config: Union[Dict, DictConfig]) -> di
     return kwargs
 
 
+def _generation_start(
+    sample_idx: int,
+    prompt_starts: list[int],
+    prompt_lens: list[int],
+    prompt_only_input_ids: bool,
+) -> int:
+    """Index in labels (and aligned input_ids) where the generated region starts.
+
+    Full-convo (prompt_only_input_ids=True, e.g. TOFU): labels = [pad, prompt+response];
+    generation start = content_start + prompt_len = prompt_starts[i] + prompt_lens[i].
+    IGNORE-for-prompt (prompt_only_input_ids=False): labels = [IGNORE]*prompt_len + [response];
+    generation start = first non-IGNORE = prompt_starts[i].
+    """
+    ps = prompt_starts[sample_idx]
+    pl = prompt_lens[sample_idx]
+    if isinstance(ps, torch.Tensor):
+        ps = int(ps.item())
+    if isinstance(pl, torch.Tensor):
+        pl = int(pl.item())
+    return (ps + pl) if prompt_only_input_ids else ps
+
+
 def _build_prompts_for_sampler(
     input_ids: torch.Tensor,
     labels: Optional[torch.Tensor],
     tokenizer: Any,
     ignore_index: int = IGNORE_INDEX,
-) -> tuple[list[list[int]], list[int]]:
+    prompt_only_input_ids: bool = False,
+) -> tuple[list[list[int]], list[int], list[int]]:
     """Build prompt token lists and lengths for sampler.sample(inputs=...).
 
-    Supports two data conventions:
-    - Labels use ignore_index for the prompt: prompt = input_ids[:, :prompt_end] with
-      prompt_end = first index where labels != ignore_index.
-    - Prompt-only input_ids (e.g. predict_with_generate): when prompt_end would be 0,
-      use the non-pad tokens of input_ids as the prompt so TOFU/MUSE work correctly.
+    Returns (prompts, prompt_lens, prompt_starts).
+    - prompts: content-only token lists (leading pad stripped when pad_token_id is set).
+    - prompt_lens: prompt_lens[i] = len(prompts[i]) (length of prompt sent to sampler).
+      Use for trajectories_from_logits and effective_lengths_from_eos.
+    - prompt_starts: prompt_starts[i] = first index where labels[i] != ignore_index
+      (start index of generation in labels). Use for _build_target_sequences_for_sampler
+      and any labels/input_ids slicing.
+
+    Two data conventions (controlled by prompt_only_input_ids, typically from
+    getattr(dataset, "predict_with_generate", False)):
+    - prompt_only_input_ids=True: input_ids per sample contain only the prompt (no response).
+      Prompt is the non-pad tokens of input_ids[i]. prompt_starts still from labels.
+    - prompt_only_input_ids=False (training-style): prompt_end from labels, prompt = slice
+      input_ids[i, :prompt_end], strip leading pad; if empty after strip and row has
+      non-pad tokens, use non-pad tokens as prompt.
     """
     B = input_ids.shape[0]
     prompts: list[list[int]] = []
     prompt_lens: list[int] = []
+    prompt_starts: list[int] = []
     _pad = getattr(tokenizer, "pad_token_id", None) if tokenizer else None
     pad_token_id = _pad if isinstance(_pad, (int, float)) else None
+
+    def _strip_leading_pad(tokens: list[int], pad_id: int) -> list[int]:
+        while tokens and tokens[0] == pad_id:
+            tokens = tokens[1:]
+        return tokens
+
     for i in range(B):
         if labels is not None:
             label_mask = labels[i] != ignore_index
@@ -122,35 +162,44 @@ def _build_prompts_for_sampler(
                 prompt_end = input_ids.shape[1]
         else:
             prompt_end = input_ids.shape[1]
-        if prompt_end == 0 and pad_token_id is not None:
-            non_pad = (input_ids[i] != pad_token_id).view(-1)
-            prompt_len_from_input = non_pad.sum().item()
-            if prompt_len_from_input > 0:
+        prompt_starts.append(prompt_end)
+
+        if prompt_only_input_ids:
+            if pad_token_id is not None:
+                non_pad = (input_ids[i] != pad_token_id).view(-1)
                 prompt = input_ids[i][non_pad].cpu().tolist()
-                prompts.append(prompt)
-                prompt_lens.append(len(prompt))
-                continue
-        prompt = input_ids[i, :prompt_end].cpu().tolist()
+            else:
+                prompt = input_ids[i].cpu().tolist()
+        else:
+            prompt = input_ids[i, :prompt_end].cpu().tolist()
+            if pad_token_id is not None:
+                prompt = _strip_leading_pad(prompt, pad_token_id)
+                non_pad_count = (input_ids[i] != pad_token_id).sum().item()
+                if len(prompt) == 0 and non_pad_count > 0:
+                    non_pad = (input_ids[i] != pad_token_id).view(-1)
+                    prompt = input_ids[i][non_pad].cpu().tolist()
+
         prompts.append(prompt)
         prompt_lens.append(len(prompt))
-    return prompts, prompt_lens
+    return prompts, prompt_lens, prompt_starts
 
 
 def _build_target_sequences_for_sampler(
     labels: torch.Tensor,
-    prompt_lens: List[int],
+    prompt_starts: List[int],
     L: int,
     ignore_index: int = IGNORE_INDEX,
 ) -> List[List[int]]:
     """Build target token lists for the generated region only (one list per batch sample, length L).
 
-    For each sample j, takes labels[j, prompt_lens[j]:prompt_lens[j]+L]. If the slice is shorter
-    than L, pads with ignore_index so the sampler receives exactly L tokens per sample.
+    For each sample j, takes labels[j, prompt_starts[j]:prompt_starts[j]+L]. prompt_starts[j]
+    is the start index of the generation region in labels. If the slice is shorter than L,
+    pads with ignore_index so the sampler receives exactly L tokens per sample.
     """
     B = labels.shape[0]
     target_sequences = []
     for j in range(B):
-        start = prompt_lens[j]
+        start = prompt_starts[j]
         end = min(start + L, labels.shape[1])
         row = labels[j, start:end].cpu().tolist()
         if len(row) < L:
@@ -284,13 +333,14 @@ def _per_position_scores_from_R_F_batch(
     R: torch.Tensor,
     F: torch.Tensor,
     labels: Optional[torch.Tensor],
-    prompt_lens: List[int],
+    prompt_starts: List[int],
     L: int,
     trajectory_config: Dict[str, Any],
     report_step: Optional[int] = None,
 ) -> Optional[List[List[float]]]:
     """Build per-sample per-position probability scores from R, F for use with Min-K etc.
 
+    prompt_starts[i] is the start index of the generation region in labels (use for labels[i, start:start+L]).
     If report_step is set, uses effective-step logits at that step (s_eff(ell,s)=min(s,F[ell])).
     Returns list of list of float (one list per sample), or None if labels missing.
     """
@@ -301,8 +351,8 @@ def _per_position_scores_from_R_F_batch(
     provider = FixationStepWiseScoreProvider(logit_alignment=logit_alignment)
     out: List[List[float]] = []
     for i in range(B):
-        pl = prompt_lens[i] if isinstance(prompt_lens[i], int) else int(prompt_lens[i].item())
-        gen_labels = labels[i, pl : pl + L]
+        start = prompt_starts[i] if isinstance(prompt_starts[i], int) else int(prompt_starts[i].item())
+        gen_labels = labels[i, start : start + L]
         batch_prov = {"labels": gen_labels.unsqueeze(0)}
         model_or_logits: Dict[str, Any] = {"R": R[i].unsqueeze(0), "F": F[i].unsqueeze(0)}
         if report_step is not None:
@@ -396,6 +446,14 @@ def _generate_trajectories_for_dataloader(
 ) -> Dict[str, Dict[str, Any]]:
     """Generate trajectories for all samples in a dataloader. Returns {idx_str: trajectories}."""
     trajectories_by_idx = {}
+    tokenizer = getattr(sampler, "tokenizer", None)
+    n_dataset = len(dataloader.dataset)
+    n_batches = len(dataloader)
+    prompt_only_input_ids = getattr(dataloader.dataset, "predict_with_generate", False)
+    logger.info(
+        "[trajectory_dataloader] starting: dataset_size=%s batches=%s predict_with_generate=%s",
+        n_dataset, n_batches, prompt_only_input_ids,
+    )
     for batch_idx, batch in enumerate(dataloader):
         input_ids = batch["input_ids"]
         labels = batch.get("labels")
@@ -407,21 +465,52 @@ def _generate_trajectories_for_dataloader(
             ),
         )
         B = input_ids.shape[0]
-        prompts = []
-        prompt_lens = []
-        for i in range(B):
-            if labels is not None:
-                label_mask = labels[i] != IGNORE_INDEX
-                prompt_end = (
-                    label_mask.nonzero()[0][0].item()
-                    if label_mask.any()
-                    else input_ids.shape[1]
-                )
-            else:
-                prompt_end = input_ids.shape[1]
-            prompts.append(input_ids[i, :prompt_end].cpu().tolist())
-            prompt_lens.append(len(prompts[-1]))
+        if tokenizer is not None:
+            prompts, prompt_lens, prompt_starts = _build_prompts_for_sampler(
+                input_ids, labels, tokenizer, IGNORE_INDEX,
+                prompt_only_input_ids=prompt_only_input_ids,
+            )
+        else:
+            prompts = []
+            prompt_lens = []
+            prompt_starts = []
+            for i in range(B):
+                if labels is not None:
+                    label_mask = labels[i] != IGNORE_INDEX
+                    prompt_end = (
+                        label_mask.nonzero()[0][0].item()
+                        if label_mask.any()
+                        else input_ids.shape[1]
+                    )
+                else:
+                    prompt_end = input_ids.shape[1]
+                prompt_starts.append(prompt_end)
+                if prompt_only_input_ids:
+                    prompts.append(input_ids[i].cpu().tolist())
+                else:
+                    prompts.append(input_ids[i, :prompt_end].cpu().tolist())
+                prompt_lens.append(len(prompts[-1]))
 
+        # Log when sample 0 has empty or EOS/pad-only prompt (for correlating with sampler empty_response_sample0_detected)
+        if B > 0 and logger.isEnabledFor(logging.DEBUG):
+            pl0 = prompt_lens[0]
+            idx0 = indices[0].item() if torch.is_tensor(indices[0]) else indices[0]
+            p0 = prompts[0]
+            if pl0 == 0:
+                logger.debug(
+                    "[trajectory] batch=%s dataset_index_sample0=%s prompt_len_sample0=0 (empty prompt sent to sampler)",
+                    batch_idx, idx0,
+                )
+            elif len(p0) > 0:
+                pad_id = getattr(sampler, "tokenizer", None) and getattr(sampler.tokenizer, "pad_token_id", None)
+                eos_id = getattr(sampler, "tokenizer", None) and getattr(sampler.tokenizer, "eos_token_id", None)
+                if pad_id is None and eos_id is not None:
+                    pad_id = eos_id
+                if pad_id is not None and all(t == pad_id or t == eos_id for t in p0):
+                    logger.debug(
+                        "[trajectory] batch=%s dataset_index_sample0=%s prompt_len_sample0=%s prompt_first5=%s (all tokens EOS/pad)",
+                        batch_idx, idx0, pl0, p0[:5],
+                    )
         _sampler_kw = _trajectory_sampler_kwargs(trajectory_config)
         evaluation_mode = _sampler_kw.get("evaluation_mode", "unguided")
         sample_kw = dict(
@@ -434,11 +523,11 @@ def _generate_trajectories_for_dataloader(
         if evaluation_mode in ("guided_native", "guided_skew") and labels is not None:
             L_gen = _sampler_kw.get("max_new_tokens")
             if L_gen is None:
-                L_gen = max(labels.shape[1] - prompt_lens[i] for i in range(B))
+                L_gen = max(labels.shape[1] - prompt_starts[i] for i in range(B))
             else:
                 L_gen = int(L_gen)
             target_sequences = _build_target_sequences_for_sampler(
-                labels, prompt_lens, L_gen, IGNORE_INDEX
+                labels, prompt_starts, L_gen, IGNORE_INDEX
             )
             sample_kw["target_sequences"] = target_sequences
             sample_kw["evaluation_mode"] = evaluation_mode
@@ -446,8 +535,16 @@ def _generate_trajectories_for_dataloader(
         logits_history = sampler_output.logits_history
         fixation_steps = sampler_output.fixation_steps
         if logits_history is None or len(logits_history) == 0:
+            logger.warning(
+                "[trajectory_dataloader] batch_idx=%s skipped: no logits_history",
+                batch_idx,
+            )
             continue
         if fixation_steps is None:
+            logger.warning(
+                "[trajectory_dataloader] batch_idx=%s skipped: no fixation_steps",
+                batch_idx,
+            )
             continue
 
         out = trajectories_from_logits(
@@ -463,6 +560,16 @@ def _generate_trajectories_for_dataloader(
                 "L": L,
             }
         del logits_history, out
+    n_collected = len(trajectories_by_idx)
+    logger.info(
+        "[trajectory_dataloader] done: trajectories_collected=%s dataset_size=%s",
+        n_collected, n_dataset,
+    )
+    if n_collected != n_dataset:
+        logger.warning(
+            "[trajectory_dataloader] trajectory count mismatch: got %s expected %s (some batches may have been skipped)",
+            n_collected, n_dataset,
+        )
     return trajectories_by_idx
 
 
@@ -592,7 +699,10 @@ def _compute_retain_mu_by_step(
         _ = batch.get("attention_mask")  # reserved
         _ = batch.get("index", torch.arange(batch_idx * batch_size, (batch_idx + 1) * batch_size))  # indices, reserved
         B = input_ids.shape[0]
-        prompts, prompt_lens = _build_prompts_for_sampler(input_ids, labels, tokenizer, IGNORE_INDEX)
+        prompts, prompt_lens, prompt_starts = _build_prompts_for_sampler(
+            input_ids, labels, tokenizer, IGNORE_INDEX,
+            prompt_only_input_ids=getattr(data_retain, "predict_with_generate", False),
+        )
         evaluation_mode = _sampler_kw.get("evaluation_mode", "unguided")
         sample_kw = dict(
             inputs=prompts,
@@ -602,16 +712,24 @@ def _compute_retain_mu_by_step(
             **_sampler_kw,
         )
         if evaluation_mode in ("guided_native", "guided_skew") and labels is not None:
-            L_gen = _sampler_kw.get("max_new_tokens") or max(labels.shape[1] - prompt_lens[j] for j in range(B))
-            target_sequences = _build_target_sequences_for_sampler(labels, prompt_lens, int(L_gen), IGNORE_INDEX)
+            L_gen = _sampler_kw.get("max_new_tokens") or max(labels.shape[1] - prompt_starts[j] for j in range(B))
+            target_sequences = _build_target_sequences_for_sampler(labels, prompt_starts, int(L_gen), IGNORE_INDEX)
             sample_kw["target_sequences"] = target_sequences
             sample_kw["evaluation_mode"] = evaluation_mode
         sampler_output = sampler.sample(**sample_kw)
         logits_history = sampler_output.logits_history
         fixation_steps = sampler_output.fixation_steps
         if logits_history is None or len(logits_history) == 0:
+            logger.warning(
+                "[retain_MU] batch_idx=%s skipped: no logits_history",
+                batch_idx,
+            )
             continue
         if fixation_steps is None:
+            logger.warning(
+                "[retain_MU] batch_idx=%s skipped: no fixation_steps",
+                batch_idx,
+            )
             continue
         out = trajectories_from_logits(
             logits_history, fixation_steps, prompt_lens, return_trajectory_tensors=False
@@ -634,17 +752,17 @@ def _compute_retain_mu_by_step(
             sample_traj = {"R": R[sample_idx], "F": F[sample_idx], "S": S, "L": L}
             L_eff_b = effective_lengths[sample_idx]
             sample_labels = labels[sample_idx] if labels is not None else None
-            sample_prompt_len = prompt_lens[sample_idx]
+            sample_prompt_start = prompt_starts[sample_idx]
             generated_labels = None
             if sample_labels is not None:
-                generated_labels = sample_labels[sample_prompt_len : sample_prompt_len + L]
+                generated_labels = sample_labels[sample_prompt_start : sample_prompt_start + L]
                 if generated_labels.shape[0] < L:
                     padding = torch.full(
                         (L - generated_labels.shape[0],), IGNORE_INDEX,
                         dtype=generated_labels.dtype, device=generated_labels.device,
                     )
                     generated_labels = torch.cat([generated_labels, padding])
-            generated_input_ids = input_ids[sample_idx][sample_prompt_len : sample_prompt_len + L]
+            generated_input_ids = input_ids[sample_idx][sample_prompt_start : sample_prompt_start + L]
             if generated_input_ids.shape[0] < L:
                 padding = torch.zeros(L - generated_input_ids.shape[0], dtype=generated_input_ids.dtype, device=input_ids.device)
                 generated_input_ids = torch.cat([generated_input_ids, padding])
@@ -694,7 +812,7 @@ def _compute_retain_mu_by_step(
                             tokenizer=tokenizer,
                             sample_labels=generated_labels.unsqueeze(0) if generated_labels is not None else None,
                             sample_input_ids=input_ids[sample_idx].unsqueeze(0),
-                            sample_prompt_len=sample_prompt_len,
+                            sample_prompt_len=sample_prompt_start,
                             metric_config=cfg,
                             sample_idx="0",
                             step=step,
@@ -1699,6 +1817,8 @@ def trajectory_metrics(model, **kwargs):
 
         # When model is DiffusionModelAdapter, set use_fixation_logits so __call__ returns
         # fixation logits (trajectory run). Default True for trajectory metrics.
+        # Note: This runs after prepare_kwargs_evaluate_metric (and pre_compute), so
+        # pre_compute runs with the adapter still at default False (single forward).
         if hasattr(model, "adapter_config"):
             model.adapter_config.use_fixation_logits = trajectory_config.get(
                 "use_fixation_logits", True
@@ -2006,12 +2126,26 @@ def trajectory_metrics(model, **kwargs):
                 else len(dataloader.dataset)
             )
             expected_batches = (n_samples + batch_size - 1) // batch_size
+            if _key is not None and logger.isEnabledFor(logging.DEBUG):
+                logger.debug(
+                    "Trajectory dataset_key=%s: %s samples, batch_size=%s, expected_batches=%s",
+                    _key, n_samples, batch_size, expected_batches,
+                )
             logger.info(
                 f"Trajectory forget dataset: {n_samples} samples, batch_size {batch_size}, "
                 f"expected batches: {expected_batches} (last batch index: {expected_batches - 1})"
             )
-            if use_distributed_sampler:
-                logger.info(
+            if logger.isEnabledFor(logging.DEBUG):
+                _sampler_kw_preview = _trajectory_sampler_kwargs(trajectory_config)
+                _max_new = _sampler_kw_preview.get("max_new_tokens")
+                _interval = _sampler_kw_preview.get("trajectory_sample_interval")
+                _pred_gen = getattr(dataloader.dataset, "predict_with_generate", False)
+                logger.debug(
+                    "Trajectory config: max_new_tokens=%s trajectory_sample_interval=%s predict_with_generate=%s",
+                    _max_new, _interval, _pred_gen,
+                )
+            if use_distributed_sampler and logger.isEnabledFor(logging.DEBUG):
+                logger.debug(
                     f"Data parallel: rank {rank}/{world_size} processes {n_samples} samples (no duplication)"
                 )
             all_rouge_futures: list = []
@@ -2037,8 +2171,10 @@ def trajectory_metrics(model, **kwargs):
                 B = input_ids.shape[0]
         
                 # Prepare inputs for sampler (list of token sequences)
-                prompts, prompt_lens = _build_prompts_for_sampler(
-                    input_ids, labels, tokenizer, IGNORE_INDEX
+                _prompt_only_input_ids = getattr(dataloader.dataset, "predict_with_generate", False)
+                prompts, prompt_lens, prompt_starts = _build_prompts_for_sampler(
+                    input_ids, labels, tokenizer, IGNORE_INDEX,
+                    prompt_only_input_ids=_prompt_only_input_ids,
                 )
                 if guardrail_config_with_pools is not None:
                     prompts, prompt_lens = transform_prompts(
@@ -2063,20 +2199,20 @@ def trajectory_metrics(model, **kwargs):
                     L_gen = _sampler_kw.get("max_new_tokens")
                     if L_gen is None:
                         L_gen = max(
-                            labels.shape[1] - prompt_lens[j] for j in range(B)
+                            labels.shape[1] - prompt_starts[j] for j in range(B)
                         )
                     else:
                         L_gen = int(L_gen)
                     target_sequences = _build_target_sequences_for_sampler(
-                        labels, prompt_lens, L_gen, IGNORE_INDEX
+                        labels, prompt_starts, L_gen, IGNORE_INDEX
                     )
                     sample_kw["target_sequences"] = target_sequences
                     sample_kw["evaluation_mode"] = evaluation_mode
                 sampler_output = sampler.sample(**sample_kw)
                 _batch_elapsed = time.perf_counter() - _batch_t0
                 gpu_set_phase("trajectory_after_sampler", batch_idx=batch_idx)
-                if batch_idx % _log_interval == 0 or batch_idx == 0 or batch_idx == expected_batches - 1:
-                    logger.info(
+                if (batch_idx % _log_interval == 0 or batch_idx == 0 or batch_idx == expected_batches - 1) and logger.isEnabledFor(logging.DEBUG):
+                    logger.debug(
                         "Batch %s/%s: diffusion sampling done in %.1fs",
                         batch_idx + 1, expected_batches, _batch_elapsed,
                     )
@@ -2141,7 +2277,7 @@ def trajectory_metrics(model, **kwargs):
                     for step in steps_to_use:
                         if use_generalized_privleak:
                             per_position_scores_forget = _per_position_scores_from_R_F_batch(
-                                R, F, labels, prompt_lens, L, trajectory_config,
+                                R, F, labels, prompt_starts, L, trajectory_config,
                                 report_step=step,
                             )
                             if per_position_scores_forget is not None:
@@ -2172,6 +2308,19 @@ def trajectory_metrics(model, **kwargs):
                     sample_labels = labels[sample_idx] if labels is not None else None
                     sample_input_ids = input_ids[sample_idx]
                     sample_prompt_len = prompt_lens[sample_idx]
+                    sample_generation_start = _generation_start(
+                        sample_idx, prompt_starts, prompt_lens, _prompt_only_input_ids
+                    )
+                    _gs = sample_generation_start
+                    _ps = prompt_starts[sample_idx]
+                    logger.debug(
+                        "trajectory slice: sample_idx=%s generation_start=%s (prompt_starts=%s, prompt_len=%s) L=%s",
+                        sample_idx,
+                        _gs.item() if hasattr(_gs, "item") else _gs,
+                        _ps.item() if hasattr(_ps, "item") else _ps,
+                        sample_prompt_len.item() if hasattr(sample_prompt_len, "item") else sample_prompt_len,
+                        L,
+                    )
 
                     # Extract only the generated portion of labels to match logits shape [V, L]
                 # Logits from trajectory only cover generated tokens (L), not the prompt
@@ -2179,9 +2328,8 @@ def trajectory_metrics(model, **kwargs):
                 # So if logits are [1, L, V], after processing: logits [1, L-1, V], labels [1, L-1]
                     # This means we need labels of length L to get L-1 after shift
                     if sample_labels is not None:
-                        # Extract generated region: from prompt_end to prompt_end + L
-                        # L is now the generated length (not full sequence length)
-                        generated_labels = sample_labels[sample_prompt_len:sample_prompt_len + L]
+                        # Extract generated region at generation start (not prompt_lens; wrong when left-padded)
+                        generated_labels = sample_labels[sample_generation_start:sample_generation_start + L]
                         # Pad with IGNORE_INDEX if needed (shouldn't happen, but safety check)
                         if generated_labels.shape[0] < L:
                             padding = torch.full(
@@ -2202,7 +2350,7 @@ def trajectory_metrics(model, **kwargs):
                     # Create batch template for logit metrics
                     # Use generated token IDs so metrics that use input_ids (e.g. mia_min_k via tokenwise_logprobs)
                     # score log P(actual next token) at each position, not dummy zeros.
-                    generated_input_ids = sample_input_ids[sample_prompt_len : sample_prompt_len + L]
+                    generated_input_ids = sample_input_ids[sample_generation_start : sample_generation_start + L]
                     if generated_input_ids.shape[0] < L:
                         padding = torch.zeros(
                             L - generated_input_ids.shape[0],
@@ -2592,6 +2740,10 @@ def trajectory_metrics(model, **kwargs):
                         torch.cuda.synchronize()
                         torch.cuda.empty_cache()
 
+            logger.info(
+                "[trajectory_batch_phase] complete: expected_batches=%s dataset_key=%s",
+                expected_batches, _key,
+            )
             if executor is not None and all_rouge_futures:
                 for item in all_rouge_futures:
                     if len(item) == 5:
@@ -2620,8 +2772,9 @@ def trajectory_metrics(model, **kwargs):
                             (h_batch_idx + 1) * h_input_ids.shape[0],
                         ),
                     )  # h_indices, reserved
-                    h_prompts, h_prompt_lens = _build_prompts_for_sampler(
-                        h_input_ids, h_labels, tokenizer, IGNORE_INDEX
+                    h_prompts, h_prompt_lens, h_prompt_starts = _build_prompts_for_sampler(
+                        h_input_ids, h_labels, tokenizer, IGNORE_INDEX,
+                        prompt_only_input_ids=getattr(holdout_dataloader.dataset, "predict_with_generate", False),
                     )
                     h_sampler_kw = _trajectory_sampler_kwargs(trajectory_config)
                     h_eval_mode = h_sampler_kw.get("evaluation_mode", "unguided")
@@ -2637,13 +2790,13 @@ def trajectory_metrics(model, **kwargs):
                         h_L_gen = h_sampler_kw.get("max_new_tokens")
                         if h_L_gen is None:
                             h_L_gen = max(
-                                h_labels.shape[1] - h_prompt_lens[j]
+                                h_labels.shape[1] - h_prompt_starts[j]
                                 for j in range(h_B)
                             )
                         else:
                             h_L_gen = int(h_L_gen)
                         h_target_sequences = _build_target_sequences_for_sampler(
-                            h_labels, h_prompt_lens, h_L_gen, IGNORE_INDEX
+                            h_labels, h_prompt_starts, h_L_gen, IGNORE_INDEX
                         )
                         h_sample_kw["target_sequences"] = h_target_sequences
                         h_sample_kw["evaluation_mode"] = h_eval_mode
@@ -2665,7 +2818,7 @@ def trajectory_metrics(model, **kwargs):
                     for step in h_steps_to_use:
                         if use_generalized_privleak:
                             per_position_scores_holdout = _per_position_scores_from_R_F_batch(
-                                h_R, h_F, h_batch.get("labels"), h_prompt_lens, h_L, trajectory_config,
+                                h_R, h_F, h_batch.get("labels"), h_prompt_starts, h_L, trajectory_config,
                                 report_step=step,
                             )
                             if per_position_scores_holdout is not None:

@@ -5,7 +5,13 @@ from data.utils import IGNORE_INDEX
 
 
 class DataCollatorForSupervisedDataset(object):
-    """Collate examples for supervised fine-tuning."""
+    """Collate examples for supervised fine-tuning.
+
+    Pads ``input_ids`` and ``labels`` to their own max lengths per batch (independently).
+    So ``input_ids.shape[1]`` and ``labels.shape[1]`` can differ. Do not assume position
+    alignment between the two; use content-start indices (e.g. prompt_starts, generation_start)
+    when slicing. See docs/trajectory_metrics.md for trajectory conventions.
+    """
 
     def __init__(
         self,

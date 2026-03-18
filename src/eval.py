@@ -14,9 +14,18 @@ from evals.distributed import (
     _total_samples_from_merged_logs,
 )
 
-# Set up logging
+# Set up logging (level from LOGLEVEL env: DEBUG, INFO, WARNING, ERROR; default INFO)
+_level_map = {
+    "DEBUG": logging.DEBUG,
+    "INFO": logging.INFO,
+    "WARNING": logging.WARNING,
+    "ERROR": logging.ERROR,
+    "CRITICAL": logging.CRITICAL,
+}
+_log_level_name = os.environ.get("LOGLEVEL", "INFO").upper()
+_log_level = _level_map.get(_log_level_name, logging.INFO)
 logging.basicConfig(
-    level=logging.INFO,
+    level=_log_level,
     format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
     force=True
 )
@@ -33,6 +42,12 @@ def main(cfg: DictConfig):
     Args:
         cfg (DictConfig): Config to train
     """
+    # Hydra replaces the root handler with job_logging (e.g. colorlog); set its level to DEBUG
+    # so evaluator/trajectory DEBUG lines are emitted when LOGLEVEL=DEBUG.
+    if os.environ.get("LOGLEVEL", "").upper() == "DEBUG":
+        logging.root.setLevel(logging.DEBUG)
+        for h in logging.root.handlers:
+            h.setLevel(logging.DEBUG)
     rank = get_rank()
     world_size = get_world_size()
     if world_size > 1:

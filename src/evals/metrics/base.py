@@ -1,6 +1,7 @@
 import os
 import json
 import logging
+import time
 from typing import Callable, Any, Dict
 
 import torch
@@ -294,8 +295,14 @@ class UnlearningMetric:
                 )
                 pre_metric_kwargs = kwargs.copy()
                 pre_metric_kwargs.update(**pre_metric_cfg)
+                _t0 = time.perf_counter()
                 _results = pre_metric.evaluate(
                     model, pre_metric_name, cache=cache, **pre_metric_kwargs
+                )
+                _elapsed = time.perf_counter() - _t0
+                logger.info(
+                    "pre_compute %s for %s took %.1fs (one-time before trajectory; result unused in trajectory path)",
+                    pre_metric_name, metric_name, _elapsed,
                 )
             pre_metric_results.update({access_name: _results})
         if pre_metric_results:

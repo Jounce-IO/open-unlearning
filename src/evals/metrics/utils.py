@@ -279,12 +279,19 @@ def evaluate_probability_confidence_ordered(model, batch):
 def tokenwise_logprobs(model, batch, grad=False, return_labels=False):
     """
     Compute token-wise next token prediction logprobs for all labeled tokens for each sample in a batch.
+    Expects batch with input_ids and labels of the same sequence length and position-aligned
+    (e.g. trajectory batch_template). Trimming to logits length preserves alignment when lengths match.
+
     `grad` decides whether gradients are turned on
     Returns
     log_probs_batch (List[Tensor]): Tensors of size seq_len where seq_len is length of labeled tokens
     labels_batch (List[Tensor]): List of tensors of length N. Returned only if return_labels is True
     """
     batch = {k: v.to(model.device) for k, v in batch.items()}
+    if batch.get("labels") is not None and isinstance(batch["labels"], torch.Tensor):
+        assert batch["input_ids"].shape[1] == batch["labels"].shape[1], (
+            "tokenwise_logprobs expects input_ids and labels with same sequence length (position-aligned)."
+        )
     with torch.set_grad_enabled(grad):
         output = model(**batch)
 
@@ -333,6 +340,9 @@ def tokenwise_logprobs_from_logits(batch, logits, return_labels=False):
     """
     Compute token-wise next token prediction logprobs from precomputed logits (no model call).
 
+    Expects batch with input_ids and labels of the same sequence length and position-aligned
+    (e.g. trajectory batch_template).
+
     Same output as tokenwise_logprobs(model, batch) when model(**batch).logits == logits.
     Caller should pass batch and logits on the same device.
 
@@ -341,6 +351,10 @@ def tokenwise_logprobs_from_logits(batch, logits, return_labels=False):
         If return_labels=True: (log_probs_batch, labels_batch).
     """
     batch = {k: v.to(logits.device) if isinstance(v, torch.Tensor) else v for k, v in batch.items()}
+    if batch.get("labels") is not None and isinstance(batch["labels"], torch.Tensor):
+        assert batch["input_ids"].shape[1] == batch["labels"].shape[1], (
+            "tokenwise_logprobs_from_logits expects input_ids and labels with same sequence length (position-aligned)."
+        )
     bsz, seq_len, V = logits.shape
     if batch["input_ids"].shape[1] > seq_len:
         batch = {**batch, "input_ids": batch["input_ids"][:, :seq_len]}
