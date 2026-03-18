@@ -951,6 +951,28 @@ _MU_DATASET_KEYS = {
     "ra": ("ra_Q_A_Prob_normalised", "ra_Q_A_ROUGE", "ra_Truth_Ratio"),
     "wf": ("wf_Q_A_Prob_normalised", "wf_Q_A_ROUGE", "wf_Truth_Ratio"),
 }
+EXPECTED_9_MU_KEYS = frozenset(
+    k for keys in _MU_DATASET_KEYS.values() for k in keys
+)
+
+
+def _validate_merged_9_mu(retain_agg_by_step: dict) -> None:
+    """Raise ValueError if any step/view does not have exactly EXPECTED_9_MU_KEYS (for 9-metric path)."""
+    if not retain_agg_by_step:
+        return
+    first_step = next(iter(retain_agg_by_step.values()))
+    for view in ("full", "eos"):
+        if view not in first_step:
+            continue
+        keys = set(first_step[view].keys())
+        if keys != EXPECTED_9_MU_KEYS:
+            missing = EXPECTED_9_MU_KEYS - keys
+            extra = keys - EXPECTED_9_MU_KEYS
+            raise ValueError(
+                "Trajectory MU 9-metric merge failed: expected exactly "
+                f"{EXPECTED_9_MU_KEYS!r}, got keys {keys!r}; "
+                f"missing={missing!r} extra={extra!r}"
+            )
 
 
 def _compute_mu_for_dataset(
@@ -2521,6 +2543,7 @@ def trajectory_metrics(model, **kwargs):
                             **wf_res.get(step_key, {}).get(view, {}),
                         }
                     retain_agg_by_step[step_key] = merged
+                _validate_merged_9_mu(retain_agg_by_step)
                 logger.info(
                     "Trajectory MU: merged 9 components for %s steps (full and eos).",
                     len(retain_agg_by_step),

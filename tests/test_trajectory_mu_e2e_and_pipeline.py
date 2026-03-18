@@ -511,6 +511,74 @@ class TestComputeMuForDatasetE2E:
                     assert isinstance(comp[k], dict) and "agg_value" in comp[k]
 
 
+class TestNineMetricMergeValidation:
+    """Validate EXPECTED_9_MU_KEYS and _validate_merged_9_mu (9-metric merge assertion)."""
+
+    def test_expected_9_mu_keys_has_nine_and_matches_dataset_keys(self):
+        from evals.metrics.trajectory_metrics import (
+            _MU_DATASET_KEYS,
+            EXPECTED_9_MU_KEYS,
+        )
+
+        assert len(EXPECTED_9_MU_KEYS) == 9
+        expected_from_datasets = frozenset(
+            k for keys in _MU_DATASET_KEYS.values() for k in keys
+        )
+        assert EXPECTED_9_MU_KEYS == expected_from_datasets
+        assert "retain_Q_A_Prob" in EXPECTED_9_MU_KEYS
+        assert "ra_Q_A_Prob_normalised" in EXPECTED_9_MU_KEYS
+        assert "wf_Truth_Ratio" in EXPECTED_9_MU_KEYS
+
+    def test_validate_merged_9_mu_pass_with_all_nine_keys(self):
+        from evals.metrics.trajectory_metrics import (
+            EXPECTED_9_MU_KEYS,
+            _validate_merged_9_mu,
+        )
+
+        retain_agg_by_step = {
+            "0": {
+                "full": {k: {"agg_value": 0.5} for k in EXPECTED_9_MU_KEYS},
+                "eos": {k: {"agg_value": 0.5} for k in EXPECTED_9_MU_KEYS},
+            },
+        }
+        _validate_merged_9_mu(retain_agg_by_step)
+
+    def test_validate_merged_9_mu_empty_dict_no_raise(self):
+        from evals.metrics.trajectory_metrics import _validate_merged_9_mu
+
+        _validate_merged_9_mu({})
+
+    def test_validate_merged_9_mu_fail_missing_key_raises(self):
+        from evals.metrics.trajectory_metrics import (
+            EXPECTED_9_MU_KEYS,
+            _validate_merged_9_mu,
+        )
+
+        keys_minus_one = set(EXPECTED_9_MU_KEYS) - {"wf_Truth_Ratio"}
+        retain_agg_by_step = {
+            "0": {
+                "full": {k: {"agg_value": 0.5} for k in keys_minus_one},
+            },
+        }
+        with pytest.raises(ValueError) as exc_info:
+            _validate_merged_9_mu(retain_agg_by_step)
+        assert "missing" in str(exc_info.value).lower()
+        assert "wf_Truth_Ratio" in str(exc_info.value) or "extra" in str(exc_info.value).lower()
+
+    def test_validate_merged_9_mu_fail_extra_key_raises(self):
+        from evals.metrics.trajectory_metrics import (
+            EXPECTED_9_MU_KEYS,
+            _validate_merged_9_mu,
+        )
+
+        keys_plus_extra = dict({k: {"agg_value": 0.5} for k in EXPECTED_9_MU_KEYS})
+        keys_plus_extra["extra_key"] = {"agg_value": 0.1}
+        retain_agg_by_step = {"0": {"full": keys_plus_extra}}
+        with pytest.raises(ValueError) as exc_info:
+            _validate_merged_9_mu(retain_agg_by_step)
+        assert "extra" in str(exc_info.value).lower()
+
+
 class TestTrajectoryMetricsNineComponentE2E:
     """Full trajectory_metrics with retain+ra+wf yields 9 components (mock sampler, real data)."""
 
