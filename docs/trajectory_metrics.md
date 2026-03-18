@@ -562,12 +562,18 @@ The `trajectory_metrics` function returns a dictionary following the standard me
     },
     # When hm_aggregate (trajectory_model_utility) is computed and a retain set is used:
     "retain_mu_components_by_step": {
-        # Step index -> retain-set components that feed the harmonic mean (hm_aggregate).
-        # Use this to debug why trajectory_model_utility is 0 (any component 0 => hmean 0).
+        # Per step: either flat (single view) or nested by trajectory view (full / eos).
         "0": {
-            "retain_Q_A_Prob": 0.5,
-            "retain_Q_A_ROUGE": 0.3,
-            "retain_Truth_Ratio": 0.9
+            "full": {
+                "retain_Q_A_Prob": 0.5,
+                "retain_Q_A_ROUGE": 0.3,
+                "retain_Truth_Ratio": 0.9,
+            },
+            "eos": {
+                "retain_Q_A_Prob": 0.48,
+                "retain_Q_A_ROUGE": 0.28,
+                "retain_Truth_Ratio": 0.88,
+            },
         },
         "1": {...},
         ...
@@ -575,7 +581,7 @@ The `trajectory_metrics` function returns a dictionary following the standard me
 }
 ```
 
-**`retain_mu_components_by_step`** (optional): Present when the evaluation uses the **retain** dataset and the metric list includes **hm_aggregate** (trajectory_model_utility). It maps each step index to the three retain-set values that are combined into the harmonic mean: `retain_Q_A_Prob`, `retain_Q_A_ROUGE`, and `retain_Truth_Ratio`. If any of these is 0 at a step, the harmonic mean (and thus trajectory_model_utility) is 0 at that step. Use this field to diagnose zero utility in reports.
+**`retain_mu_components_by_step`** (optional): Present when the evaluation uses the **retain** dataset and the metric list includes **hm_aggregate** (trajectory_model_utility). When `include_views` has both **full** and **eos**, each step maps to **`full`** and **`eos`** sub-objects, each with the three retain-set scalars that feed the harmonic mean for that view: `retain_Q_A_Prob`, `retain_Q_A_ROUGE`, `retain_Truth_Ratio`. With a single view, the step may still nest under that view key, or match the legacy flat shape (three keys at step). If any component is 0 at a step for a view, the harmonic mean (trajectory_model_utility) for that view is 0 at that step.
 
 ### Step count (S) and reference compatibility
 

@@ -364,6 +364,20 @@ def _per_position_scores_from_R_F_batch(
     return out
 
 
+def _truncate_per_position_scores_eos(
+    per_position_scores: List[List[float]],
+    effective_lengths: List[int],
+    cap_L: int,
+) -> List[List[float]]:
+    """Truncate each sample's per-position scores to eos-aligned length (same rule as forget eos view)."""
+    out: List[List[float]] = []
+    for i, scores in enumerate(per_position_scores):
+        le = int(effective_lengths[i]) if i < len(effective_lengths) else cap_L
+        le = min(le, cap_L, len(scores))
+        out.append(list(scores[:le]))
+    return out
+
+
 def _derive_steps_to_use(
     S: int,
     trajectory_config: Union[Dict, DictConfig],
@@ -551,13 +565,23 @@ def _generate_trajectories_for_dataloader(
             logits_history, fixation_steps, prompt_lens, return_trajectory_tensors=False
         )
         R, F, S, L = out["R"], out["F"], out["S"], out["L"]
+        seq_eff = getattr(sampler_output, "sequences", None)
+        eos_id = getattr(sampler.tokenizer, "eos_token_id", None) if getattr(sampler, "tokenizer", None) else None
+        if eos_id is None:
+            eos_id = trajectory_config.get("eos_token_id") if trajectory_config else None
+        if seq_eff is not None and eos_id is not None and seq_eff.dim() >= 2:
+            eff_lens = effective_lengths_from_eos(seq_eff, prompt_lens, L, eos_id)
+        else:
+            eff_lens = [L] * R.shape[0]
         for i in range(R.shape[0]):
             idx = indices[i].item() if torch.is_tensor(indices[i]) else indices[i]
+            le = int(eff_lens[i]) if i < len(eff_lens) else L
             trajectories_by_idx[str(idx)] = {
                 "R": R[i],
                 "F": F[i],
                 "S": S,
                 "L": L,
+                "effective_length": min(le, int(L)),
             }
         del logits_history, out
     n_collected = len(trajectories_by_idx)
@@ -632,7 +656,8 @@ def _compute_retain_mu_by_step(
 ) -> Dict[str, Dict[str, Dict[str, float]]]:
     """
     Compute per-step retain-set aggregates (Prob, ROUGE, Truth Ratio) for trajectory MU.
-    Returns retain_agg_by_step[step_index] = {retain_Q_A_Prob: {agg_value: v}, ...}.
+    Returns retain_agg_by_step[step_index][view] = {retain_Q_A_Prob: {agg_value: v}, ...}
+    for view in include_views subset of (full, eos). Legacy flat step dict (no view key) is not produced.
     Used so hm_aggregate at each step uses current model's retain metrics, not reference_logs.
     """
     from evals.gpu_phase_logger import set_phase as gpu_set_phase
@@ -685,7 +710,17 @@ def _compute_retain_mu_by_step(
     _sampler_kw = _trajectory_sampler_kwargs(trajectory_config)
     _ = trajectory_config.get("rouge_type") or kwargs.get("rouge_type", "rougeL_recall")  # rouge_type, reserved
     rouge_scorer_instance = rouge_scorer.RougeScorer(["rouge1", "rougeL"], use_stemmer=True)
-    per_step_lists = defaultdict(lambda: {"prob": [], "rouge": [], "tr": []})
+    _iv = trajectory_config.get("include_views", ["full"]) if trajectory_config else ["full"]
+    if isinstance(_iv, str):
+        _iv = [_iv]
+    _mu_views = [str(v).lower() for v in _iv if str(v).lower() in ("full", "eos")]
+    if not _mu_views:
+        _mu_views = ["full"]
+
+    def _empty_mu_pl() -> Dict[str, Dict[str, List[Any]]]:
+        return {v: {"prob": [], "rouge": [], "tr": []} for v in _mu_views}
+
+    per_step_lists: Dict[int, Dict[str, Dict[str, List[Any]]]] = defaultdict(_empty_mu_pl)
     _retain_batches = len(retain_dataloader)
     _retain_log_interval = max(1, _retain_batches // 10) if _retain_batches else 1
     logger.info("Retain MU: %s batches to process", _retain_batches)
@@ -793,35 +828,90 @@ def _compute_retain_mu_by_step(
                 logits = _get_logits_at_step(sample_traj, traj_name, step)
                 if logits.dim() == 2:
                     logits = logits.transpose(0, 1).unsqueeze(0)
-                L_eff_slice = min(L_eff_b, logits.shape[1])
-                logits_view = logits[:, :L_eff_slice] if L_eff_slice < logits.shape[1] else logits
-                # Probability invariant: step logits and batch labels must have same length.
-                # Slice batch_template to L_eff_slice so labels match logits_view.
-                batch_template_step = _slice_batch_template_to_length(batch_template, L_eff_slice)
+                L_eff_slice = min(int(L_eff_b), L)
+                logits_eos = (
+                    logits[:, :L_eff_slice] if L_eff_slice < logits.shape[1] else logits
+                )
+                batch_template_eos = (
+                    _slice_batch_template_to_length(batch_template, L_eff_slice)
+                    if L_eff_slice < L
+                    else batch_template
+                )
 
                 for metric_name, key in (("probability", "prob"), ("rouge", "rouge"), ("truth_ratio", "tr")):
                     m = metric_objs.get(metric_name)
                     if m is None:
                         continue
                     cfg = metric_objs.get(f"{metric_name}_config") or {}
+                    val_full: Optional[float] = None
                     try:
-                        res = _call_metric_at_step(
-                            metric=m,
-                            logits=logits_view,
-                            batch_template=batch_template_step,
-                            tokenizer=tokenizer,
-                            sample_labels=generated_labels.unsqueeze(0) if generated_labels is not None else None,
-                            sample_input_ids=input_ids[sample_idx].unsqueeze(0),
-                            sample_prompt_len=sample_prompt_start,
-                            metric_config=cfg,
-                            sample_idx="0",
-                            step=step,
-                            step_index=step_idx,
-                            **kwargs_retain,
-                        )
-                        val = _extract_metric_scalar(res)
-                        if val is not None:
-                            per_step_lists[step_idx][key].append(val)
+                        if "full" in _mu_views:
+                            res_f = _call_metric_at_step(
+                                metric=m,
+                                logits=logits,
+                                batch_template=batch_template,
+                                tokenizer=tokenizer,
+                                sample_labels=generated_labels.unsqueeze(0)
+                                if generated_labels is not None
+                                else None,
+                                sample_input_ids=input_ids[sample_idx].unsqueeze(0),
+                                sample_prompt_len=sample_prompt_start,
+                                metric_config=cfg,
+                                sample_idx="0",
+                                step=step,
+                                step_index=step_idx,
+                                **kwargs_retain,
+                            )
+                            val_full = _extract_metric_scalar(res_f)
+                            if val_full is not None:
+                                per_step_lists[step_idx]["full"][key].append(val_full)
+                        if "eos" in _mu_views:
+                            if L_eff_slice >= L and val_full is not None:
+                                # Same sequence (no early EOS); reuse full result — correct, not hidden fallback
+                                per_step_lists[step_idx]["eos"][key].append(val_full)
+                            else:
+                                try:
+                                    res_e = _call_metric_at_step(
+                                        metric=m,
+                                        logits=logits_eos,
+                                        batch_template=batch_template_eos,
+                                        tokenizer=tokenizer,
+                                        sample_labels=generated_labels.unsqueeze(0)
+                                        if generated_labels is not None
+                                        else None,
+                                        sample_input_ids=input_ids[sample_idx].unsqueeze(0),
+                                        sample_prompt_len=sample_prompt_start,
+                                        metric_config=cfg,
+                                        sample_idx="0",
+                                        step=step,
+                                        step_index=step_idx,
+                                        **kwargs_retain,
+                                    )
+                                    ve = _extract_metric_scalar(res_e)
+                                    if ve is None:
+                                        logger.warning(
+                                            "retain MU eos: metric=%s diffusion_step=%s retain_step_idx=%s "
+                                            "sample_idx=%s batch_idx=%s returned no scalar (not copying full view)",
+                                            metric_name,
+                                            step,
+                                            step_idx,
+                                            sample_idx,
+                                            batch_idx,
+                                        )
+                                    else:
+                                        per_step_lists[step_idx]["eos"][key].append(ve)
+                                except Exception as ee:
+                                    logger.warning(
+                                        "retain MU eos: metric=%s diffusion_step=%s retain_step_idx=%s "
+                                        "sample_idx=%s batch_idx=%s failed: %s",
+                                        metric_name,
+                                        step,
+                                        step_idx,
+                                        sample_idx,
+                                        batch_idx,
+                                        ee,
+                                        exc_info=True,
+                                    )
                     except Exception as e:
                         logger.debug("retain MU %s at step %s: %s", metric_name, step, e)
 
@@ -830,22 +920,26 @@ def _compute_retain_mu_by_step(
             torch.cuda.empty_cache()
 
     for step_idx in sorted(per_step_lists.keys()):
-        pl = per_step_lists[step_idx]
-        prob_vals = pl["prob"]
-        rouge_vals = pl["rouge"]
-        tr_vals = pl["tr"]
-        agg_prob = float(np.mean(prob_vals)) if prob_vals else None
-        agg_rouge = float(np.mean(rouge_vals)) if rouge_vals else None
-        agg_tr = float(np.mean(tr_vals)) if tr_vals else None
-        pre = {}
-        if agg_prob is not None:
-            pre["retain_Q_A_Prob"] = {"agg_value": agg_prob}
-        if agg_rouge is not None:
-            pre["retain_Q_A_ROUGE"] = {"agg_value": agg_rouge}
-        if agg_tr is not None:
-            pre["retain_Truth_Ratio"] = {"agg_value": agg_tr}
-        if pre:
-            retain_agg_by_step[str(step_idx)] = pre
+        step_entry: Dict[str, Any] = {}
+        for view in _mu_views:
+            pl = per_step_lists[step_idx][view]
+            prob_vals = pl["prob"]
+            rouge_vals = pl["rouge"]
+            tr_vals = pl["tr"]
+            agg_prob = float(np.mean(prob_vals)) if prob_vals else None
+            agg_rouge = float(np.mean(rouge_vals)) if rouge_vals else None
+            agg_tr = float(np.mean(tr_vals)) if tr_vals else None
+            pre = {}
+            if agg_prob is not None:
+                pre["retain_Q_A_Prob"] = {"agg_value": agg_prob}
+            if agg_rouge is not None:
+                pre["retain_Q_A_ROUGE"] = {"agg_value": agg_rouge}
+            if agg_tr is not None:
+                pre["retain_Truth_Ratio"] = {"agg_value": agg_tr}
+            if pre:
+                step_entry[view] = pre
+        if step_entry:
+            retain_agg_by_step[str(step_idx)] = step_entry
 
     logger.info("trajectory_model_utility: computed retain-set aggregates for %s steps (current model)", len(retain_agg_by_step))
     return retain_agg_by_step
@@ -1473,7 +1567,33 @@ def _call_metric_at_step(
         if step_index is not None and retain_agg_by_step:
             pre_compute_step = retain_agg_by_step.get(str(step_index)) or retain_agg_by_step.get(step_index)
             if pre_compute_step:
-                metric_kwargs["pre_compute"] = pre_compute_step
+                _nested_views = False
+                if isinstance(pre_compute_step, dict):
+                    for _vx in ("full", "eos"):
+                        _inner = pre_compute_step.get(_vx)
+                        if isinstance(_inner, dict) and any(
+                            str(k).startswith("retain_") for k in _inner
+                        ):
+                            _nested_views = True
+                            break
+                if _nested_views:
+                    view = kwargs.get("trajectory_view")
+                    if view not in ("full", "eos"):
+                        raise ValueError(
+                            "hm_aggregate: trajectory_view must be 'full' or 'eos' when "
+                            "retain_agg_by_step stores per-view aggregates (no default)."
+                        )
+                    _inner = pre_compute_step.get(view)
+                    if not isinstance(_inner, dict) or not any(
+                        str(k).startswith("retain_") for k in _inner
+                    ):
+                        raise ValueError(
+                            f"hm_aggregate: missing retain aggregate for view {view!r} "
+                            f"at step_index={step_index}"
+                        )
+                    metric_kwargs["pre_compute"] = _inner
+                else:
+                    metric_kwargs["pre_compute"] = pre_compute_step
 
     # Step-matched retain reference: privleak uses retain (from retain_mia_by_step), ks_test uses retain_ftr (from retain_forget_tr_by_step).
     if metric.name in ("privleak", "ks_test"):
@@ -2072,12 +2192,18 @@ def trajectory_metrics(model, **kwargs):
                 attack_cls = None
                 attack_kwargs = {}
                 attack_cls_name = None
+            _pv_s = [v for v in include_views if v in ("full", "eos")]
+            if not _pv_s:
+                _pv_s = ["full"]
             privleak_streaming_cfg = {
                 "device": _device,
                 "privleak_cfg": privleak_cfg,
                 "attack_cls": attack_cls,
                 "attack_cls_name": attack_cls_name,
                 "attack_kwargs": attack_kwargs,
+                "_pv_views": _pv_s,
+                "_layout": "dual" if len(_pv_s) > 1 else "single",
+                "_single_view": _pv_s[0] if len(_pv_s) == 1 else None,
             }
 
         run_steps_to_use = None
@@ -2240,7 +2366,14 @@ def trajectory_metrics(model, **kwargs):
                 eos_token_id = getattr(tokenizer, "eos_token_id", None) if tokenizer else None
                 if eos_token_id is None and trajectory_config:
                     eos_token_id = trajectory_config.get("eos_token_id")
-                if sequences is not None and sequences.dim() >= 2 and "eos" in include_views:
+                _pv_s = privleak_streaming_cfg.get("_pv_views") if privleak_streaming_cfg else []
+                _need_eos_len = "eos" in include_views or (
+                    privleak_needs_dual
+                    and not multi_dataset
+                    and isinstance(_pv_s, list)
+                    and len(_pv_s) > 1
+                )
+                if sequences is not None and sequences.dim() >= 2 and _need_eos_len:
                     effective_lengths = effective_lengths_from_eos(
                         sequences, prompt_lens, L, eos_token_id
                     )
@@ -2260,29 +2393,66 @@ def trajectory_metrics(model, **kwargs):
                     and _key is None
                 ):
                     cfg = privleak_streaming_cfg
-                    privleak_accumulators = {
-                        step: MIAStreamingAccumulator(
-                            cfg["attack_cls"],
-                            collator,
-                            batch_size,
-                            cfg["device"],
-                            **cfg["attack_kwargs"],
-                        )
-                        for step in run_steps_to_use
-                    }
+                    _acc_kw = dict(
+                        attack_cls=cfg["attack_cls"],
+                        collator=collator,
+                        batch_size=batch_size,
+                        device=cfg["device"],
+                        **cfg["attack_kwargs"],
+                    )
+                    if cfg.get("_layout") == "dual":
+                        privleak_accumulators = {
+                            v: {
+                                step: MIAStreamingAccumulator(**_acc_kw)
+                                for step in run_steps_to_use
+                            }
+                            for v in cfg["_pv_views"]
+                        }
+                    else:
+                        privleak_accumulators = {
+                            step: MIAStreamingAccumulator(**_acc_kw)
+                            for step in run_steps_to_use
+                        }
                 if privleak_accumulators is not None and _key is None:
                     use_generalized_privleak = trajectory_config.get(
                         "use_generalized_sequence_probability", True
                     )
+                    _plc = privleak_streaming_cfg or {}
+                    _dual_pl = _plc.get("_layout") == "dual"
                     for step in steps_to_use:
                         if use_generalized_privleak:
                             per_position_scores_forget = _per_position_scores_from_R_F_batch(
                                 R, F, labels, prompt_starts, L, trajectory_config,
                                 report_step=step,
                             )
-                            if per_position_scores_forget is not None:
-                                privleak_accumulators[step].add_forget_batch(
+                            if per_position_scores_forget is None:
+                                continue
+                            if not _dual_pl:
+                                sv = _plc.get("_single_view") or "full"
+                                if sv == "full":
+                                    privleak_accumulators[step].add_forget_batch(
+                                        batch, per_position_scores=per_position_scores_forget
+                                    )
+                                else:
+                                    privleak_accumulators[step].add_forget_batch(
+                                        batch,
+                                        per_position_scores=_truncate_per_position_scores_eos(
+                                            per_position_scores_forget,
+                                            list(effective_lengths),
+                                            L,
+                                        ),
+                                    )
+                            else:
+                                privleak_accumulators["full"][step].add_forget_batch(
                                     batch, per_position_scores=per_position_scores_forget
+                                )
+                                privleak_accumulators["eos"][step].add_forget_batch(
+                                    batch,
+                                    per_position_scores=_truncate_per_position_scores_eos(
+                                        per_position_scores_forget,
+                                        list(effective_lengths),
+                                        L,
+                                    ),
                                 )
                         else:
                             logits_list = [
@@ -2292,7 +2462,47 @@ def trajectory_metrics(model, **kwargs):
                                 for i in range(B)
                             ]
                             logits_batch = torch.stack(logits_list, dim=0)
-                            privleak_accumulators[step].add_forget_batch(batch, logits_batch)
+                            if not _dual_pl:
+                                sv = _plc.get("_single_view") or "full"
+                                if sv == "full":
+                                    privleak_accumulators[step].add_forget_batch(
+                                        batch, logits_batch
+                                    )
+                                else:
+                                    for i in range(B):
+                                        Li = min(int(effective_lengths[i]), L)
+                                        lb = logits_list[i][:Li].unsqueeze(0)
+                                        sb = {
+                                            k: (
+                                                v[i : i + 1]
+                                                if torch.is_tensor(v)
+                                                and v.dim() > 0
+                                                and v.shape[0] == B
+                                                else v
+                                            )
+                                            for k, v in batch.items()
+                                        }
+                                        privleak_accumulators[step].add_forget_batch(sb, lb)
+                            else:
+                                privleak_accumulators["full"][step].add_forget_batch(
+                                    batch, logits_batch
+                                )
+                                for i in range(B):
+                                    Li = min(int(effective_lengths[i]), L)
+                                    lb = logits_list[i][:Li].unsqueeze(0)
+                                    sb = {
+                                        k: (
+                                            v[i : i + 1]
+                                            if torch.is_tensor(v)
+                                            and v.dim() > 0
+                                            and v.shape[0] == B
+                                            else v
+                                        )
+                                        for k, v in batch.items()
+                                    }
+                                    privleak_accumulators["eos"][step].add_forget_batch(
+                                        sb, lb
+                                    )
                 gpu_set_phase("trajectory_after_trajectories", batch_idx=batch_idx)
 
                 # Process each sample in batch (each sample uses its own R, F; logits computed on-demand)
@@ -2629,6 +2839,9 @@ def trajectory_metrics(model, **kwargs):
                                     for view in include_views:
                                         bt = batch_template if view == "full" else batch_template_eos
                                         logits_view = logits[:, :L_eff_slice] if view == "eos" else logits
+                                        kwargs_metric = dict(kwargs_clean)
+                                        if metric_name == "hm_aggregate":
+                                            kwargs_metric["trajectory_view"] = view
                                         result = _call_metric_at_step(
                                             metric=metric,
                                             logits=logits_view,
@@ -2639,7 +2852,7 @@ def trajectory_metrics(model, **kwargs):
                                             sample_prompt_len=sample_prompt_len,
                                             metric_config=metric_cfg,
                                             sample_idx=idx_str,
-                                            **kwargs_clean
+                                            **kwargs_metric
                                         )
                                         metric_value = None
                                         if isinstance(result, dict):
@@ -2812,6 +3025,22 @@ def trajectory_metrics(model, **kwargs):
                     del h_logits_history, h_out
                     h_B = h_R.shape[0] if hasattr(h_R, "shape") else len(h_R)
                     h_steps_to_use = [s for s in run_steps_to_use if s < h_S]
+                    h_sequences = getattr(h_sampler_output, "sequences", None)
+                    h_eos_id = getattr(tokenizer, "eos_token_id", None) if tokenizer else None
+                    if h_eos_id is None and trajectory_config:
+                        h_eos_id = trajectory_config.get("eos_token_id")
+                    _plc_h = privleak_streaming_cfg or {}
+                    _dual_h = _plc_h.get("_layout") == "dual"
+                    _pv_h = _plc_h.get("_pv_views") or ["full"]
+                    _need_h_eff = "eos" in include_views or (
+                        _dual_h and len(_pv_h) > 1
+                    )
+                    if h_sequences is not None and h_sequences.dim() >= 2 and _need_h_eff and h_eos_id is not None:
+                        h_effective_lengths = effective_lengths_from_eos(
+                            h_sequences, h_prompt_lens, h_L, h_eos_id
+                        )
+                    else:
+                        h_effective_lengths = [h_L] * h_B
                     use_generalized_privleak = trajectory_config.get(
                         "use_generalized_sequence_probability", True
                     )
@@ -2821,9 +3050,36 @@ def trajectory_metrics(model, **kwargs):
                                 h_R, h_F, h_batch.get("labels"), h_prompt_starts, h_L, trajectory_config,
                                 report_step=step,
                             )
-                            if per_position_scores_holdout is not None:
-                                privleak_accumulators[step].add_holdout_batch(
-                                    h_batch, per_position_scores=per_position_scores_holdout
+                            if per_position_scores_holdout is None:
+                                continue
+                            if not _dual_h:
+                                sv = _plc_h.get("_single_view") or "full"
+                                if sv == "full":
+                                    privleak_accumulators[step].add_holdout_batch(
+                                        h_batch,
+                                        per_position_scores=per_position_scores_holdout,
+                                    )
+                                else:
+                                    privleak_accumulators[step].add_holdout_batch(
+                                        h_batch,
+                                        per_position_scores=_truncate_per_position_scores_eos(
+                                            per_position_scores_holdout,
+                                            list(h_effective_lengths),
+                                            h_L,
+                                        ),
+                                    )
+                            else:
+                                privleak_accumulators["full"][step].add_holdout_batch(
+                                    h_batch,
+                                    per_position_scores=per_position_scores_holdout,
+                                )
+                                privleak_accumulators["eos"][step].add_holdout_batch(
+                                    h_batch,
+                                    per_position_scores=_truncate_per_position_scores_eos(
+                                        per_position_scores_holdout,
+                                        list(h_effective_lengths),
+                                        h_L,
+                                    ),
                                 )
                         else:
                             h_logits_list = [
@@ -2833,17 +3089,56 @@ def trajectory_metrics(model, **kwargs):
                                 for i in range(h_B)
                             ]
                             h_logits_batch = torch.stack(h_logits_list, dim=0)
-                            privleak_accumulators[step].add_holdout_batch(
-                                h_batch, h_logits_batch
-                            )
+                            if not _dual_h:
+                                sv = _plc_h.get("_single_view") or "full"
+                                if sv == "full":
+                                    privleak_accumulators[step].add_holdout_batch(
+                                        h_batch, h_logits_batch
+                                    )
+                                else:
+                                    for i in range(h_B):
+                                        Li = min(int(h_effective_lengths[i]), h_L)
+                                        lb = h_logits_list[i][:Li].unsqueeze(0)
+                                        sb = {
+                                            k: (
+                                                v[i : i + 1]
+                                                if torch.is_tensor(v)
+                                                and v.dim() > 0
+                                                and v.shape[0] == h_B
+                                                else v
+                                            )
+                                            for k, v in h_batch.items()
+                                        }
+                                        privleak_accumulators[step].add_holdout_batch(sb, lb)
+                            else:
+                                privleak_accumulators["full"][step].add_holdout_batch(
+                                    h_batch, h_logits_batch
+                                )
+                                for i in range(h_B):
+                                    Li = min(int(h_effective_lengths[i]), h_L)
+                                    lb = h_logits_list[i][:Li].unsqueeze(0)
+                                    sb = {
+                                        k: (
+                                            v[i : i + 1]
+                                            if torch.is_tensor(v)
+                                            and v.dim() > 0
+                                            and v.shape[0] == h_B
+                                            else v
+                                        )
+                                        for k, v in h_batch.items()
+                                    }
+                                    privleak_accumulators["eos"][step].add_holdout_batch(
+                                        sb, lb
+                                    )
                     del h_R, h_F
                     if should_run_gc(0.9):
                         gc.collect()
                         if torch.cuda.is_available():
                             torch.cuda.empty_cache()
+                _plc_f = privleak_streaming_cfg or {}
+                _dual_f = _plc_f.get("_layout") == "dual"
                 for step in run_steps_to_use:
                     gpu_set_phase("privleak_dual_step", step=step)
-                    pre_result = privleak_accumulators[step].aggregate()
                     ref_logs = kwargs.get("reference_logs") or {}
                     retain_logs = ref_logs.get("retain_model_logs") or {}
                     by_step = retain_logs.get("retain_mia_by_step") or {}
@@ -2859,19 +3154,56 @@ def trajectory_metrics(model, **kwargs):
                             ref_logs["retain_model_logs"] = {}
                         ref_logs["retain_model_logs"] = dict(retain_logs)
                         ref_logs["retain_model_logs"]["retain"] = step_retain
-                    privleak_result = _get_metric_from_registry("privleak")._metric_fn(
-                        model=None,
-                        pre_compute=pre_result,
-                        reference_logs=ref_logs,
-                        ref_value=privleak_cfg.get("ref_value", 0.5),
-                        **{k: v for k, v in kwargs.items() if k not in ("model", "tokenizer", "pre_compute", "reference_logs")},
-                    )
-                    pv = privleak_result.get("agg_value")
-                    for view in include_views:
-                        for traj_name in trajectory_names:
-                            if step not in step_values_by_view[view][traj_name]:
-                                step_values_by_view[view][traj_name][step] = {m: [] for m in loaded_metrics}
-                            step_values_by_view[view][traj_name][step]["privleak"].append(pv)
+                    _kw_pl = {
+                        k: v
+                        for k, v in kwargs.items()
+                        if k not in ("model", "tokenizer", "pre_compute", "reference_logs")
+                    }
+                    if not _dual_f:
+                        pre_result = privleak_accumulators[step].aggregate()
+                        privleak_result = _get_metric_from_registry("privleak")._metric_fn(
+                            model=None,
+                            pre_compute=pre_result,
+                            reference_logs=ref_logs,
+                            ref_value=privleak_cfg.get("ref_value", 0.5),
+                            **_kw_pl,
+                        )
+                        pv = privleak_result.get("agg_value")
+                        v_target = _plc_f.get("_single_view") or "full"
+                        for view in include_views:
+                            if view != v_target:
+                                continue
+                            for traj_name in trajectory_names:
+                                if step not in step_values_by_view[view][traj_name]:
+                                    step_values_by_view[view][traj_name][step] = {
+                                        m: [] for m in loaded_metrics
+                                    }
+                                step_values_by_view[view][traj_name][step]["privleak"].append(
+                                    pv
+                                )
+                    else:
+                        for view in ("full", "eos"):
+                            if view not in privleak_accumulators:
+                                continue
+                            pre_result = privleak_accumulators[view][step].aggregate()
+                            privleak_result = _get_metric_from_registry("privleak")._metric_fn(
+                                model=None,
+                                pre_compute=pre_result,
+                                reference_logs=ref_logs,
+                                ref_value=privleak_cfg.get("ref_value", 0.5),
+                                **_kw_pl,
+                            )
+                            pv = privleak_result.get("agg_value")
+                            if view not in include_views:
+                                continue
+                            for traj_name in trajectory_names:
+                                if step not in step_values_by_view[view][traj_name]:
+                                    step_values_by_view[view][traj_name][step] = {
+                                        m: [] for m in loaded_metrics
+                                    }
+                                step_values_by_view[view][traj_name][step]["privleak"].append(
+                                    pv
+                                )
                 privleak_accumulators = None
 
         # Multi-dataset: run privleak dual trajectory after per-key loops
@@ -2925,41 +3257,29 @@ def trajectory_metrics(model, **kwargs):
                 except (StopIteration, AttributeError):
                     device = torch.device("cpu")
                 privleak_cfg = loaded_metrics["privleak"]["config"]
-                for step in steps_to_use_dual:
-                    gpu_set_phase("privleak_dual_step", step=step)
-                    logits_by_key = {}
-                    for key, traj_by_idx in trajectories_by_key.items():
-                        logits_by_key[key] = {
-                            idx: _get_logits_at_step(traj, "steps", step)
-                            for idx, traj in traj_by_idx.items()
-                        }
-                    dual_wrapper = DualLogitModelWrapper(logits_by_key, device)
-                    kwargs_priv = {
-                        "data": {"forget": primary_data, "holdout": secondary_data},
-                        "collators": collator,
-                        "batch_size": batch_size,
-                        **{k: v for k, v in kwargs.items() if k not in ("tokenizer", "model", "data", "collators")},
-                    }
-                    pre_result = _compute_pre_compute_metrics_at_step(
-                        pre_compute_config=privleak_cfg.get("pre_compute", {}),
-                        logits=next(iter(logits_by_key["forget"].values())),
-                        batch_template={},
-                        tokenizer=tokenizer,
-                        sample_labels=None,
-                        sample_input_ids=torch.zeros(1),
-                        sample_prompt_len=0,
-                        sample_idx="0",
-                        model_wrapper_override=dual_wrapper,
-                        **kwargs_priv,
-                    )
+                pre_pc = privleak_cfg.get("pre_compute", {}) or {}
+                _md_attack = get_attacker("min_k") if "mia_min_k" in pre_pc else None
+                _md_attack_kw = dict(pre_pc.get("mia_min_k", {})) if _md_attack else {}
+                use_gen_md = trajectory_config.get(
+                    "use_generalized_sequence_probability", True
+                )
+
+                def _ref_logs_privleak_md(st: int) -> Any:
                     ref_logs = kwargs.get("reference_logs") or {}
                     retain_logs = ref_logs.get("retain_model_logs") or {}
                     by_step = retain_logs.get("retain_mia_by_step") or {}
-                    step_retain = by_step.get(str(step)) or by_step.get(str(steps_to_use_dual.index(step) if step in steps_to_use_dual else step))
+                    step_retain = by_step.get(str(st)) or by_step.get(
+                        str(
+                            steps_to_use_dual.index(st)
+                            if st in steps_to_use_dual
+                            else st
+                        )
+                    )
                     if step_retain is None and retain_logs:
                         from evals.metrics.base import RetainReferenceValidationError
+
                         raise RetainReferenceValidationError(
-                            f"reference_logs was provided but step-matched retain (retain_mia_by_step) not found for step {step!r}. No fallback."
+                            f"reference_logs was provided but step-matched retain (retain_mia_by_step) not found for step {st!r}. No fallback."
                         )
                     if step_retain is not None:
                         ref_logs = copy.deepcopy(ref_logs)
@@ -2967,19 +3287,252 @@ def trajectory_metrics(model, **kwargs):
                             ref_logs["retain_model_logs"] = {}
                         ref_logs["retain_model_logs"] = dict(retain_logs)
                         ref_logs["retain_model_logs"]["retain"] = step_retain
-                    privleak_result = _get_metric_from_registry("privleak")._metric_fn(
-                        model=dual_wrapper,
-                        pre_compute=pre_result,
-                        reference_logs=ref_logs,
-                        ref_value=privleak_cfg.get("ref_value", 0.5),
-                        **{k: v for k, v in kwargs.items() if k not in ("model", "tokenizer", "pre_compute", "reference_logs")},
-                    )
-                    pv = privleak_result.get("agg_value")
-                    for view in include_views:
+                    return ref_logs
+
+                _kw_priv = {
+                    k: v
+                    for k, v in kwargs.items()
+                    if k not in ("model", "tokenizer", "pre_compute", "reference_logs")
+                }
+
+                for step in steps_to_use_dual:
+                    gpu_set_phase("privleak_dual_step", step=step)
+                    ref_logs = _ref_logs_privleak_md(step)
+                    pv_full = None
+                    if "full" in include_views:
+                        logits_by_key = {}
+                        for key, traj_by_idx in trajectories_by_key.items():
+                            logits_by_key[key] = {
+                                idx: _get_logits_at_step(traj, "steps", step)
+                                for idx, traj in traj_by_idx.items()
+                            }
+                        dual_wrapper = DualLogitModelWrapper(logits_by_key, device)
+                        kwargs_priv = {
+                            "data": {"forget": primary_data, "holdout": secondary_data},
+                            "collators": collator,
+                            "batch_size": batch_size,
+                            **{
+                                k: v
+                                for k, v in kwargs.items()
+                                if k not in ("tokenizer", "model", "data", "collators")
+                            },
+                        }
+                        pre_result = _compute_pre_compute_metrics_at_step(
+                            pre_compute_config=privleak_cfg.get("pre_compute", {}),
+                            logits=next(iter(logits_by_key["forget"].values())),
+                            batch_template={},
+                            tokenizer=tokenizer,
+                            sample_labels=None,
+                            sample_input_ids=torch.zeros(1),
+                            sample_prompt_len=0,
+                            sample_idx="0",
+                            model_wrapper_override=dual_wrapper,
+                            **kwargs_priv,
+                        )
+                        privleak_result = _get_metric_from_registry("privleak")._metric_fn(
+                            model=dual_wrapper,
+                            pre_compute=pre_result,
+                            reference_logs=ref_logs,
+                            ref_value=privleak_cfg.get("ref_value", 0.5),
+                            **_kw_priv,
+                        )
+                        pv_full = privleak_result.get("agg_value")
                         for traj_name in trajectory_names:
-                            if step not in step_values_by_view[view][traj_name]:
-                                step_values_by_view[view][traj_name][step] = {m: [] for m in loaded_metrics}
-                            step_values_by_view[view][traj_name][step]["privleak"].append(pv)
+                            if step not in step_values_by_view["full"][traj_name]:
+                                step_values_by_view["full"][traj_name][step] = {
+                                    m: [] for m in loaded_metrics
+                                }
+                            step_values_by_view["full"][traj_name][step][
+                                "privleak"
+                            ].append(pv_full)
+
+                    if "eos" in include_views:
+                        if not (use_gen_md and _md_attack is not None):
+                            raise ValueError(
+                                "Trajectory privleak (multi_dataset, eos view): requires "
+                                "trajectory_config.use_generalized_sequence_probability=true "
+                                "and privleak pre_compute mia_min_k. "
+                                "Eos privleak is not copied from full (no hidden fallback)."
+                            )
+                        try:
+                            _dev_md = (
+                                getattr(model, "device", None)
+                                or next(model.parameters()).device
+                            )
+                        except (StopIteration, AttributeError):
+                            _dev_md = torch.device("cpu")
+                        acc_md = MIAStreamingAccumulator(
+                            _md_attack,
+                            collator,
+                            batch_size,
+                            _dev_md,
+                            **_md_attack_kw,
+                        )
+                        prompt_only_f = getattr(
+                            primary_data, "predict_with_generate", False
+                        )
+                        prompt_only_h = getattr(
+                            secondary_data, "predict_with_generate", False
+                        )
+                        for f_batch in dataloader:
+                            f_ids = f_batch["input_ids"]
+                            f_labels = f_batch.get("labels")
+                            f_idx = f_batch.get(
+                                "index",
+                                torch.arange(f_ids.shape[0]),
+                            )
+                            f_B = f_ids.shape[0]
+                            _, _, f_ps = _build_prompts_for_sampler(
+                                f_ids,
+                                f_labels,
+                                tokenizer,
+                                IGNORE_INDEX,
+                                prompt_only_input_ids=prompt_only_f,
+                            )
+                            f_R = torch.stack(
+                                [
+                                    forget_traj[
+                                        str(
+                                            f_idx[j].item()
+                                            if torch.is_tensor(f_idx[j])
+                                            else f_idx[j]
+                                        )
+                                    ]["R"]
+                                    for j in range(f_B)
+                                ]
+                            )
+                            f_F = torch.stack(
+                                [
+                                    forget_traj[
+                                        str(
+                                            f_idx[j].item()
+                                            if torch.is_tensor(f_idx[j])
+                                            else f_idx[j]
+                                        )
+                                    ]["F"]
+                                    for j in range(f_B)
+                                ]
+                            )
+                            f_L = int(forget_traj[str(f_idx[0].item())]["L"])
+                            f_eff = [
+                                forget_traj[
+                                    str(
+                                        f_idx[j].item()
+                                        if torch.is_tensor(f_idx[j])
+                                        else f_idx[j]
+                                    )
+                                ].get("effective_length", f_L)
+                                for j in range(f_B)
+                            ]
+                            f_pp = _per_position_scores_from_R_F_batch(
+                                f_R,
+                                f_F,
+                                f_labels,
+                                f_ps,
+                                f_L,
+                                trajectory_config,
+                                report_step=step,
+                            )
+                            if f_pp is not None:
+                                acc_md.add_forget_batch(
+                                    f_batch,
+                                    per_position_scores=_truncate_per_position_scores_eos(
+                                        f_pp, f_eff, f_L
+                                    ),
+                                )
+                        for h_batch in holdout_dataloader:
+                            h_ids = h_batch["input_ids"]
+                            h_labels = h_batch.get("labels")
+                            h_idx = h_batch.get(
+                                "index",
+                                torch.arange(h_ids.shape[0]),
+                            )
+                            h_B = h_ids.shape[0]
+                            _, _, h_ps = _build_prompts_for_sampler(
+                                h_ids,
+                                h_labels,
+                                tokenizer,
+                                IGNORE_INDEX,
+                                prompt_only_input_ids=prompt_only_h,
+                            )
+                            h_R = torch.stack(
+                                [
+                                    holdout_traj[
+                                        str(
+                                            h_idx[j].item()
+                                            if torch.is_tensor(h_idx[j])
+                                            else h_idx[j]
+                                        )
+                                    ]["R"]
+                                    for j in range(h_B)
+                                ]
+                            )
+                            h_F = torch.stack(
+                                [
+                                    holdout_traj[
+                                        str(
+                                            h_idx[j].item()
+                                            if torch.is_tensor(h_idx[j])
+                                            else h_idx[j]
+                                        )
+                                    ]["F"]
+                                    for j in range(h_B)
+                                ]
+                            )
+                            h_Lt = int(holdout_traj[str(h_idx[0].item())]["L"])
+                            h_eff = [
+                                holdout_traj[
+                                    str(
+                                        h_idx[j].item()
+                                        if torch.is_tensor(h_idx[j])
+                                        else h_idx[j]
+                                    )
+                                ].get("effective_length", h_Lt)
+                                for j in range(h_B)
+                            ]
+                            h_pp = _per_position_scores_from_R_F_batch(
+                                h_R,
+                                h_F,
+                                h_labels,
+                                h_ps,
+                                h_Lt,
+                                trajectory_config,
+                                report_step=step,
+                            )
+                            if h_pp is not None:
+                                acc_md.add_holdout_batch(
+                                    h_batch,
+                                    per_position_scores=_truncate_per_position_scores_eos(
+                                        h_pp, h_eff, h_Lt
+                                    ),
+                                )
+                        pre_eos = acc_md.aggregate()
+                        pr_e = _get_metric_from_registry("privleak")._metric_fn(
+                            model=None,
+                            pre_compute=pre_eos,
+                            reference_logs=ref_logs,
+                            ref_value=privleak_cfg.get("ref_value", 0.5),
+                            **_kw_priv,
+                        )
+                        pv_eos = pr_e.get("agg_value")
+                        if pv_eos is None:
+                            logger.error(
+                                "Trajectory privleak (multi_dataset, eos): agg_value is None at "
+                                "step=%s (empty accumulators or privleak failure). "
+                                "Not substituting full-view privleak.",
+                                step,
+                            )
+                            raise ValueError(
+                                f"Trajectory privleak (multi_dataset, eos): agg_value is None at step {step}"
+                            )
+                        for traj_name in trajectory_names:
+                            if step not in step_values_by_view["eos"][traj_name]:
+                                step_values_by_view["eos"][traj_name][step] = {
+                                    m: [] for m in loaded_metrics
+                                }
+                            step_values_by_view["eos"][traj_name][step][
+                                "privleak"
+                            ].append(pv_eos)
             else:
                 logger.warning("Privleak dual trajectories empty, skipping privleak")
 
@@ -3256,12 +3809,41 @@ def trajectory_metrics(model, **kwargs):
         if "hm_aggregate" in loaded_metrics and retain_agg_by_step:
             components = {}
             for step_key, pre in retain_agg_by_step.items():
-                components[str(step_key)] = {}
-                for name in ("retain_Q_A_Prob", "retain_Q_A_ROUGE", "retain_Truth_Ratio"):
-                    ent = pre.get(name)
-                    if isinstance(ent, dict) and "agg_value" in ent:
-                        v = ent["agg_value"]
-                        components[str(step_key)][name] = float(v) if isinstance(v, (int, float, np.floating)) else v
+                sk = str(step_key)
+                nested_by_view = False
+                if isinstance(pre, dict):
+                    for _v in ("full", "eos"):
+                        pv0 = pre.get(_v)
+                        if isinstance(pv0, dict) and any(
+                            str(x).startswith("retain_") for x in pv0
+                        ):
+                            nested_by_view = True
+                            break
+                if nested_by_view:
+                    components[sk] = {}
+                    for view in ("full", "eos"):
+                        if view not in pre:
+                            continue
+                        pv = pre[view]
+                        if not isinstance(pv, dict):
+                            continue
+                        components[sk][view] = {}
+                        for name in ("retain_Q_A_Prob", "retain_Q_A_ROUGE", "retain_Truth_Ratio"):
+                            ent = pv.get(name)
+                            if isinstance(ent, dict) and "agg_value" in ent:
+                                v = ent["agg_value"]
+                                components[sk][view][name] = (
+                                    float(v) if isinstance(v, (int, float, np.floating)) else v
+                                )
+                else:
+                    components[sk] = {}
+                    for name in ("retain_Q_A_Prob", "retain_Q_A_ROUGE", "retain_Truth_Ratio"):
+                        ent = pre.get(name) if isinstance(pre, dict) else None
+                        if isinstance(ent, dict) and "agg_value" in ent:
+                            v = ent["agg_value"]
+                            components[sk][name] = (
+                                float(v) if isinstance(v, (int, float, np.floating)) else v
+                            )
             if components:
                 result["retain_mu_components_by_step"] = components
 
