@@ -163,3 +163,102 @@ def test_retain_mu_components_nested_by_view():
     assert "full" in components[step_key] and "eos" in components[step_key]
     assert components[step_key]["full"]["retain_Q_A_Prob"] == 0.8
     assert components[step_key]["eos"]["retain_Q_A_Prob"] == 0.2
+
+
+def test_hm_aggregate_nine_keys_uses_all():
+    """hm_aggregate with 9 MU components returns harmonic mean of all 9 (full trajectory MU)."""
+    import scipy.stats
+
+    metric = METRICS_REGISTRY["hm_aggregate"]
+    # 9 components: retain_*, ra_*, wf_*
+    vals = [0.5 + i * 0.05 for i in range(9)]
+    pre = {
+        "retain_Q_A_Prob": {"agg_value": vals[0]},
+        "retain_Q_A_ROUGE": {"agg_value": vals[1]},
+        "retain_Truth_Ratio": {"agg_value": vals[2]},
+        "ra_Q_A_Prob_normalised": {"agg_value": vals[3]},
+        "ra_Q_A_ROUGE": {"agg_value": vals[4]},
+        "ra_Truth_Ratio": {"agg_value": vals[5]},
+        "wf_Q_A_Prob_normalised": {"agg_value": vals[6]},
+        "wf_Q_A_ROUGE": {"agg_value": vals[7]},
+        "wf_Truth_Ratio": {"agg_value": vals[8]},
+    }
+    logits = torch.zeros(1, 2, 8)
+    batch_t = {
+        "input_ids": torch.zeros(1, 2, dtype=torch.long),
+        "attention_mask": torch.ones(1, 2, dtype=torch.long),
+        "index": torch.tensor([0]),
+    }
+    retain_agg = {"0": {"full": pre, "eos": pre}}
+    r = _call_metric_at_step(
+        metric,
+        logits,
+        batch_t,
+        metric_config={},
+        sample_idx="0",
+        step_index=0,
+        retain_agg_by_step=retain_agg,
+        trajectory_view="full",
+    )
+    expected = scipy.stats.hmean(vals)
+    assert r["agg_value"] is not None
+    assert abs(r["agg_value"] - expected) < 1e-9
+
+
+def test_hm_aggregate_three_keys_unchanged():
+    """hm_aggregate with 3 retain components returns hmean of 3 (backward compat)."""
+    import scipy.stats
+
+    metric = METRICS_REGISTRY["hm_aggregate"]
+    pre = {
+        "retain_Q_A_Prob": {"agg_value": 0.8},
+        "retain_Q_A_ROUGE": {"agg_value": 0.7},
+        "retain_Truth_Ratio": {"agg_value": 0.6},
+    }
+    logits = torch.zeros(1, 2, 8)
+    batch_t = {
+        "input_ids": torch.zeros(1, 2, dtype=torch.long),
+        "attention_mask": torch.ones(1, 2, dtype=torch.long),
+        "index": torch.tensor([0]),
+    }
+    retain_agg = {"0": {"full": pre, "eos": pre}}
+    r = _call_metric_at_step(
+        metric,
+        logits,
+        batch_t,
+        metric_config={},
+        sample_idx="0",
+        step_index=0,
+        retain_agg_by_step=retain_agg,
+        trajectory_view="full",
+    )
+    assert abs(r["agg_value"] - scipy.stats.hmean([0.8, 0.7, 0.6])) < 1e-9
+
+
+def test_hm_aggregate_nested_nine_keys_requires_view():
+    """With 9-key nested structure, trajectory_view is required (no silent default)."""
+    import pytest
+
+    metric = METRICS_REGISTRY["hm_aggregate"]
+    pre = {
+        "retain_Q_A_Prob": {"agg_value": 0.5},
+        "ra_Q_A_Prob_normalised": {"agg_value": 0.5},
+        "wf_Q_A_Prob_normalised": {"agg_value": 0.5},
+    }
+    retain_agg = {"0": {"full": pre, "eos": pre}}
+    logits = torch.zeros(1, 2, 8)
+    batch_t = {
+        "input_ids": torch.zeros(1, 2, dtype=torch.long),
+        "attention_mask": torch.ones(1, 2, dtype=torch.long),
+        "index": torch.tensor([0]),
+    }
+    with pytest.raises(ValueError, match="trajectory_view"):
+        _call_metric_at_step(
+            metric,
+            logits,
+            batch_t,
+            metric_config={},
+            sample_idx="0",
+            step_index=0,
+            retain_agg_by_step=retain_agg,
+        )

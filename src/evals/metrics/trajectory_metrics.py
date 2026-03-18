@@ -945,6 +945,370 @@ def _compute_retain_mu_by_step(
     return retain_agg_by_step
 
 
+# Metric key names per dataset for full 9-metric MU (paper/invariants).
+_MU_DATASET_KEYS = {
+    "retain": ("retain_Q_A_Prob", "retain_Q_A_ROUGE", "retain_Truth_Ratio"),
+    "ra": ("ra_Q_A_Prob_normalised", "ra_Q_A_ROUGE", "ra_Truth_Ratio"),
+    "wf": ("wf_Q_A_Prob_normalised", "wf_Q_A_ROUGE", "wf_Truth_Ratio"),
+}
+
+
+def _compute_mu_for_dataset(
+    model: Any,
+    data_dataset: Any,
+    dataset_key: str,
+    collator: Any,
+    batch_size: int,
+    trajectory_config: Union[Dict, DictConfig],
+    tokenizer: Any,
+    loaded_metrics: Dict[str, Any],
+    sort_by_length: bool,
+    use_distributed_sampler: bool,
+    world_size: int,
+    rank: int,
+    **kwargs: Any,
+) -> Dict[str, Dict[str, Dict[str, Any]]]:
+    """
+    Compute per-step, per-view aggregates for one MU dataset (retain, ra, or wf).
+    Returns {step_index: {view: {metric_key: {"agg_value": v}}}} with 3 keys per dataset.
+    For retain: retain_Q_A_Prob, retain_Q_A_ROUGE, retain_Truth_Ratio.
+    For ra/wf: *_Q_A_Prob_normalised, *_Q_A_ROUGE, *_Truth_Ratio (normalised prob = correct/(correct+wrong+1e-10)).
+    """
+    from evals.gpu_phase_logger import set_phase as gpu_set_phase
+
+    key_prob, key_rouge, key_tr = _MU_DATASET_KEYS[dataset_key]
+    use_normalised_prob = dataset_key in ("ra", "wf")
+    result_by_step = {}
+    run_steps_to_use = None
+    traj_name = "steps"
+    mu_sub_metrics = ("probability", "rouge", "truth_ratio")
+    metric_objs = {}
+    for name in mu_sub_metrics:
+        if name in loaded_metrics:
+            metric_objs[name] = loaded_metrics[name]["metric"]
+            metric_objs[f"{name}_config"] = loaded_metrics[name].get("config") or {}
+        else:
+            try:
+                metric_objs[name] = _get_metric_from_registry(name)
+                metric_objs[f"{name}_config"] = {}
+            except ValueError:
+                metric_objs[name] = None
+                metric_objs[f"{name}_config"] = {}
+    if not all(metric_objs.get(m) for m in mu_sub_metrics):
+        logger.warning(
+            "trajectory_model_utility: missing probability/rouge/truth_ratio for dataset_key=%s; skipping",
+            dataset_key,
+        )
+        return result_by_step
+
+    if sort_by_length:
+        dataloader = DataLoader(
+            data_dataset,
+            batch_size=batch_size,
+            sampler=LengthSortedSampler(data_dataset),
+            collate_fn=collator,
+        )
+    elif use_distributed_sampler:
+        dataloader = DataLoader(
+            data_dataset,
+            batch_size=batch_size,
+            sampler=DistributedSampler(data_dataset, num_replicas=world_size, rank=rank, shuffle=False),
+            collate_fn=collator,
+        )
+    else:
+        dataloader = DataLoader(data_dataset, batch_size=batch_size, collate_fn=collator)
+
+    sampler = _get_sampler_from_model(model)
+    if sampler is None:
+        logger.warning(
+            "trajectory_model_utility: no sampler on model for dataset_key=%s; skipping",
+            dataset_key,
+        )
+        return result_by_step
+
+    _sampler_kw = _trajectory_sampler_kwargs(trajectory_config)
+    rouge_scorer_instance = rouge_scorer.RougeScorer(["rouge1", "rougeL"], use_stemmer=True)
+    _iv = trajectory_config.get("include_views", ["full"]) if trajectory_config else ["full"]
+    if isinstance(_iv, str):
+        _iv = [_iv]
+    _mu_views = [str(v).lower() for v in _iv if str(v).lower() in ("full", "eos")]
+    if not _mu_views:
+        _mu_views = ["full"]
+
+    def _empty_pl():
+        return {"prob": [], "prob_wrong": [], "rouge": [], "tr": []}
+
+    per_step_lists: Dict[int, Dict[str, Dict[str, List[Any]]]] = defaultdict(
+        lambda: {v: _empty_pl() for v in _mu_views}
+    )
+    n_batches = len(dataloader)
+    log_interval = max(1, n_batches // 10) if n_batches else 1
+    logger.info(
+        "Trajectory MU: computing per-step aggregates for dataset %s (%s batches)",
+        dataset_key,
+        n_batches,
+    )
+
+    for batch_idx, batch in enumerate(dataloader):
+        gpu_set_phase("mu_batch", metric=dataset_key, batch_idx=batch_idx)
+        if batch_idx % log_interval == 0 or batch_idx == 0 or batch_idx == n_batches - 1:
+            logger.info("Trajectory MU dataset %s batch %s/%s", dataset_key, batch_idx + 1, n_batches)
+        input_ids = batch["input_ids"]
+        labels = batch.get("labels")
+        has_dual = "labels_correct" in batch and "labels_wrong" in batch
+        B = input_ids.shape[0]
+        prompts, prompt_lens, prompt_starts = _build_prompts_for_sampler(
+            input_ids,
+            labels,
+            tokenizer,
+            IGNORE_INDEX,
+            prompt_only_input_ids=getattr(data_dataset, "predict_with_generate", False),
+        )
+        evaluation_mode = _sampler_kw.get("evaluation_mode", "unguided")
+        sample_kw = dict(
+            inputs=prompts,
+            config=None,
+            return_dict=True,
+            return_logits=True,
+            **_sampler_kw,
+        )
+        if evaluation_mode in ("guided_native", "guided_skew") and labels is not None:
+            L_gen = _sampler_kw.get("max_new_tokens") or max(
+                labels.shape[1] - prompt_starts[j] for j in range(B)
+            )
+            target_sequences = _build_target_sequences_for_sampler(
+                labels, prompt_starts, int(L_gen), IGNORE_INDEX
+            )
+            sample_kw["target_sequences"] = target_sequences
+            sample_kw["evaluation_mode"] = evaluation_mode
+        sampler_output = sampler.sample(**sample_kw)
+        logits_history = sampler_output.logits_history
+        fixation_steps = sampler_output.fixation_steps
+        if logits_history is None or len(logits_history) == 0:
+            logger.debug("[MU %s] batch_idx=%s: no logits_history", dataset_key, batch_idx)
+            continue
+        if fixation_steps is None:
+            logger.debug("[MU %s] batch_idx=%s: no fixation_steps", dataset_key, batch_idx)
+            continue
+        out = trajectories_from_logits(
+            logits_history, fixation_steps, prompt_lens, return_trajectory_tensors=False
+        )
+        R, F, S, L = out["R"], out["F"], out["S"], out["L"]
+        del logits_history
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache()
+        if run_steps_to_use is None:
+            run_steps_to_use, _ = _derive_steps_to_use(S, trajectory_config)
+        steps_to_use = [s for s in run_steps_to_use if s < S]
+        sequences = getattr(sampler_output, "sequences", None)
+        eos_token_id = (
+            getattr(tokenizer, "eos_token_id", None)
+            or (trajectory_config.get("eos_token_id") if trajectory_config else None)
+        )
+        if sequences is not None and eos_token_id is not None:
+            effective_lengths = effective_lengths_from_eos(
+                sequences, prompt_lens, L, eos_token_id
+            )
+        else:
+            effective_lengths = [L] * B
+
+        for sample_idx in range(B):
+            sample_traj = {"R": R[sample_idx], "F": F[sample_idx], "S": S, "L": L}
+            L_eff_b = effective_lengths[sample_idx]
+            sample_labels = labels[sample_idx] if labels is not None else None
+            sample_prompt_start = prompt_starts[sample_idx]
+            generated_labels = None
+            if sample_labels is not None:
+                generated_labels = sample_labels[
+                    sample_prompt_start : sample_prompt_start + L
+                ]
+                if generated_labels.shape[0] < L:
+                    padding = torch.full(
+                        (L - generated_labels.shape[0],),
+                        IGNORE_INDEX,
+                        dtype=generated_labels.dtype,
+                        device=generated_labels.device,
+                    )
+                    generated_labels = torch.cat([generated_labels, padding])
+            generated_input_ids = input_ids[sample_idx][
+                sample_prompt_start : sample_prompt_start + L
+            ]
+            if generated_input_ids.shape[0] < L:
+                padding = torch.zeros(
+                    L - generated_input_ids.shape[0],
+                    dtype=generated_input_ids.dtype,
+                    device=input_ids.device,
+                )
+                generated_input_ids = torch.cat([generated_input_ids, padding])
+            batch_template = {
+                "input_ids": generated_input_ids.unsqueeze(0),
+                "labels": generated_labels.unsqueeze(0) if generated_labels is not None else None,
+                "attention_mask": torch.ones((1, L), dtype=torch.long, device=input_ids.device),
+                "index": torch.tensor([0], dtype=torch.long, device=input_ids.device),
+            }
+            for key in ("labels_correct", "labels_wrong"):
+                if key in batch:
+                    batch_template[key] = _batch_template_dual_labels(
+                        batch, sample_idx, key, L, IGNORE_INDEX
+                    )
+            ground_truth_str = ""
+            if generated_labels is not None:
+                valid = generated_labels[generated_labels != IGNORE_INDEX]
+                ground_truth_str = (
+                    tokenizer.decode(valid.tolist(), skip_special_tokens=True)
+                    if len(valid) > 0
+                    else ""
+                )
+            kwargs_mu = {
+                "ground_truth": ground_truth_str,
+                "rouge_scorer": rouge_scorer_instance,
+                "trajectory_config": trajectory_config,
+                **{k: v for k, v in kwargs.items() if k not in ("tokenizer", "model", "data")},
+            }
+
+            for step_idx, step in enumerate(steps_to_use):
+                logits = _get_logits_at_step(sample_traj, traj_name, step)
+                if logits.dim() == 2:
+                    logits = logits.transpose(0, 1).unsqueeze(0)
+                L_eff_slice = min(int(L_eff_b), L)
+                logits_eos = (
+                    logits[:, :L_eff_slice]
+                    if L_eff_slice < logits.shape[1]
+                    else logits
+                )
+                batch_template_eos = (
+                    _slice_batch_template_to_length(batch_template, L_eff_slice)
+                    if L_eff_slice < L
+                    else batch_template
+                )
+                prob_obj = metric_objs.get("probability")
+                rouge_obj = metric_objs.get("rouge")
+                cfg_prob = metric_objs.get("probability_config") or {}
+                cfg_rouge = metric_objs.get("rouge_config") or {}
+
+                def _run_prob(bt, log, vname):
+                    res = _call_metric_at_step(
+                        metric=prob_obj,
+                        logits=log,
+                        batch_template=bt,
+                        tokenizer=tokenizer,
+                        sample_labels=generated_labels.unsqueeze(0)
+                        if generated_labels is not None
+                        else None,
+                        sample_input_ids=input_ids[sample_idx].unsqueeze(0),
+                        sample_prompt_len=sample_prompt_start,
+                        metric_config=cfg_prob,
+                        sample_idx="0",
+                        step=step,
+                        step_index=step_idx,
+                        **kwargs_mu,
+                    )
+                    return _extract_metric_scalar(res)
+
+                def _run_rouge(bt, log, vname):
+                    res = _call_metric_at_step(
+                        metric=rouge_obj,
+                        logits=log,
+                        batch_template=bt,
+                        tokenizer=tokenizer,
+                        sample_labels=generated_labels.unsqueeze(0)
+                        if generated_labels is not None
+                        else None,
+                        sample_input_ids=input_ids[sample_idx].unsqueeze(0),
+                        sample_prompt_len=sample_prompt_start,
+                        metric_config=cfg_rouge,
+                        sample_idx="0",
+                        step=step,
+                        step_index=step_idx,
+                        **kwargs_mu,
+                    )
+                    return _extract_metric_scalar(res)
+
+                for view_name in _mu_views:
+                    bt = batch_template if view_name == "full" else batch_template_eos
+                    lg = logits if view_name == "full" else logits_eos
+                    pl = per_step_lists[step_idx][view_name]
+                    try:
+                        if has_dual:
+                            labels_correct_slice = bt.get("labels_correct")
+                            labels_wrong_slice = bt.get("labels_wrong")
+                            if isinstance(labels_wrong_slice, list):
+                                labels_wrong_slice = labels_wrong_slice[0] if labels_wrong_slice else None
+                            if labels_wrong_slice is not None and labels_correct_slice is not None:
+                                bt_correct = dict(bt)
+                                bt_correct["labels"] = (
+                                    labels_correct_slice
+                                    if not isinstance(labels_correct_slice, list)
+                                    else labels_correct_slice[0]
+                                )
+                                bt_wrong = dict(bt)
+                                bt_wrong["labels"] = labels_wrong_slice.unsqueeze(0) if labels_wrong_slice.dim() == 1 else labels_wrong_slice
+                                pc = _run_prob(bt_correct, lg, view_name)
+                                pw = _run_prob(bt_wrong, lg, view_name)
+                                if pc is not None and pw is not None:
+                                    norm = pc / (pc + pw + 1e-10)
+                                    pl["tr"].append(norm)
+                                    if use_normalised_prob:
+                                        pl["prob"].append(norm)
+                                    else:
+                                        pl["prob"].append(pc)
+                                elif pc is not None and not use_normalised_prob:
+                                    pl["prob"].append(pc)
+                            else:
+                                pc = _run_prob(bt, lg, view_name)
+                                if pc is not None:
+                                    pl["prob"].append(pc)
+                                    pl["tr"].append(pc)
+                        else:
+                            pc = _run_prob(bt, lg, view_name)
+                            if pc is not None:
+                                pl["prob"].append(pc)
+                                pl["tr"].append(pc)
+                        rv = _run_rouge(bt, lg, view_name)
+                        if rv is not None:
+                            pl["rouge"].append(rv)
+                    except Exception as e:
+                        logger.debug(
+                            "MU %s %s step %s sample %s: %s",
+                            dataset_key,
+                            view_name,
+                            step,
+                            sample_idx,
+                            e,
+                        )
+
+        del R, F, out
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache()
+
+    for step_idx in sorted(per_step_lists.keys()):
+        step_entry = {}
+        for view in _mu_views:
+            pl = per_step_lists[step_idx][view]
+            agg_prob = float(np.mean(pl["prob"])) if pl["prob"] else None
+            agg_rouge = float(np.mean(pl["rouge"])) if pl["rouge"] else None
+            agg_tr = float(np.mean(pl["tr"])) if pl["tr"] else None
+            pre = {}
+            if agg_prob is not None:
+                pre[key_prob] = {"agg_value": agg_prob}
+            if agg_rouge is not None:
+                pre[key_rouge] = {"agg_value": agg_rouge}
+            if agg_tr is not None:
+                pre[key_tr] = {"agg_value": agg_tr}
+            if pre:
+                step_entry[view] = pre
+        if step_entry:
+            result_by_step[str(step_idx)] = step_entry
+
+    logger.info(
+        "Trajectory MU: computed %s aggregates for dataset %s (%s steps)",
+        len(result_by_step),
+        dataset_key,
+        len(result_by_step),
+    )
+    return result_by_step
+
+
 def _compute_pre_compute_metrics_at_step(
     pre_compute_config: Dict[str, Any],
     logits: torch.Tensor,
@@ -1560,10 +1924,18 @@ def _call_metric_at_step(
     # Add pre_compute results if available
     if pre_compute_results:
         metric_kwargs["pre_compute"] = pre_compute_results
-    # trajectory_model_utility: use current model's retain-set metrics at this step (from retain_agg_by_step), not reference_logs
+    # trajectory_model_utility: use current model's MU aggregates at this step (3 or 9 keys), not reference_logs
     elif metric.name == "hm_aggregate":
         retain_agg_by_step = kwargs.get("retain_agg_by_step") or {}
         step_index = kwargs.get("step_index")
+
+        def _is_mu_component_key(k):
+            return (
+                str(k).startswith("retain_")
+                or str(k).startswith("ra_")
+                or str(k).startswith("wf_")
+            )
+
         if step_index is not None and retain_agg_by_step:
             pre_compute_step = retain_agg_by_step.get(str(step_index)) or retain_agg_by_step.get(step_index)
             if pre_compute_step:
@@ -1571,9 +1943,7 @@ def _call_metric_at_step(
                 if isinstance(pre_compute_step, dict):
                     for _vx in ("full", "eos"):
                         _inner = pre_compute_step.get(_vx)
-                        if isinstance(_inner, dict) and any(
-                            str(k).startswith("retain_") for k in _inner
-                        ):
+                        if isinstance(_inner, dict) and any(_is_mu_component_key(k) for k in _inner):
                             _nested_views = True
                             break
                 if _nested_views:
@@ -1584,11 +1954,9 @@ def _call_metric_at_step(
                             "retain_agg_by_step stores per-view aggregates (no default)."
                         )
                     _inner = pre_compute_step.get(view)
-                    if not isinstance(_inner, dict) or not any(
-                        str(k).startswith("retain_") for k in _inner
-                    ):
+                    if not isinstance(_inner, dict) or not any(_is_mu_component_key(k) for k in _inner):
                         raise ValueError(
-                            f"hm_aggregate: missing retain aggregate for view {view!r} "
+                            f"hm_aggregate: missing MU aggregate for view {view!r} "
                             f"at step_index={step_index}"
                         )
                     metric_kwargs["pre_compute"] = _inner
@@ -1999,11 +2367,12 @@ def trajectory_metrics(model, **kwargs):
                 "trajectory_model_utility (hm_aggregate) will be None: add a retain dataset to the eval config (e.g. TOFU_QA_retain_eval with access_key: retain) so current model's retain-set metrics are computed per step."
             )
 
-        # Handle multi-dataset only when there are keys beyond forget/holdout/retain (e.g. MUSE: forget_knowmem, retain_knowmem).
-        # "retain" is used only for trajectory_model_utility (retain pass); we still run the main loop on forget/holdout.
+        # Handle multi-dataset only when there are keys beyond reserved (e.g. MUSE: forget_knowmem, retain_knowmem).
+        # Reserved keys: forget, holdout, retain (main loop + MU), ra, wf (MU only). Adding ra/wf does NOT enable multi_dataset.
+        RESERVED_DATA_KEYS = {"forget", "holdout", "retain", "ra", "wf"}
         multi_dataset = (
             isinstance(data, dict)
-            and bool(set(data.keys()) - {"forget", "holdout", "retain"})
+            and bool(set(data.keys()) - RESERVED_DATA_KEYS)
         )
         if isinstance(data, dict) and "forget" in data and "holdout" in data:
             primary_data = data["forget"]
@@ -2015,7 +2384,7 @@ def trajectory_metrics(model, **kwargs):
             primary_data = data if not multi_dataset else None
             secondary_data = None
 
-        single_dataset_keys = [k for k in data if k not in ("forget", "holdout", "retain")] if multi_dataset else []
+        single_dataset_keys = [k for k in data if k not in RESERVED_DATA_KEYS] if multi_dataset else []
 
         # Create dataloader(s). When distributed (world_size > 1), use DistributedSampler per rank.
         if not multi_dataset:
@@ -2067,15 +2436,14 @@ def trajectory_metrics(model, **kwargs):
         else:
             holdout_dataloader = None
 
-        # Compute retain-set metrics per step for trajectory_model_utility (hm_aggregate); then pass retain_agg_by_step into kwargs
+        # Compute MU per-step aggregates for trajectory_model_utility (hm_aggregate). When retain+ra+wf present, full 9-metric; else retain-only 3-metric.
         retain_agg_by_step = {}
         if (
             "hm_aggregate" in loaded_metrics
             and isinstance(data, dict)
             and data.get("retain") is not None
         ):
-            # Avoid passing keys already given as positional args (causes "multiple values" TypeError)
-            _retain_mu_kw = {
+            _mu_kw = {
                 k: v
                 for k, v in kwargs.items()
                 if k
@@ -2093,20 +2461,85 @@ def trajectory_metrics(model, **kwargs):
                     "rank",
                 )
             }
-            retain_agg_by_step = _compute_retain_mu_by_step(
-                model,
-                data["retain"],
-                collator,
-                batch_size,
-                trajectory_config,
-                tokenizer,
-                loaded_metrics,
-                sort_by_length,
-                use_distributed_sampler,
-                world_size,
-                rank,
-                **_retain_mu_kw,
-            )
+            has_ra = data.get("ra") is not None
+            has_wf = data.get("wf") is not None
+            if has_ra and has_wf:
+                logger.info(
+                    "Trajectory MU: running full 9-metric (retain, ra, wf)."
+                )
+                retain_res = _compute_mu_for_dataset(
+                    model,
+                    data["retain"],
+                    "retain",
+                    collator,
+                    batch_size,
+                    trajectory_config,
+                    tokenizer,
+                    loaded_metrics,
+                    sort_by_length,
+                    use_distributed_sampler,
+                    world_size,
+                    rank,
+                    **_mu_kw,
+                )
+                ra_res = _compute_mu_for_dataset(
+                    model,
+                    data["ra"],
+                    "ra",
+                    collator,
+                    batch_size,
+                    trajectory_config,
+                    tokenizer,
+                    loaded_metrics,
+                    sort_by_length,
+                    use_distributed_sampler,
+                    world_size,
+                    rank,
+                    **_mu_kw,
+                )
+                wf_res = _compute_mu_for_dataset(
+                    model,
+                    data["wf"],
+                    "wf",
+                    collator,
+                    batch_size,
+                    trajectory_config,
+                    tokenizer,
+                    loaded_metrics,
+                    sort_by_length,
+                    use_distributed_sampler,
+                    world_size,
+                    rank,
+                    **_mu_kw,
+                )
+                for step_key in retain_res:
+                    merged = {}
+                    for view in retain_res[step_key]:
+                        merged[view] = {
+                            **retain_res[step_key][view],
+                            **ra_res.get(step_key, {}).get(view, {}),
+                            **wf_res.get(step_key, {}).get(view, {}),
+                        }
+                    retain_agg_by_step[step_key] = merged
+                logger.info(
+                    "Trajectory MU: merged 9 components for %s steps (full and eos).",
+                    len(retain_agg_by_step),
+                )
+            else:
+                retain_agg_by_step = _compute_retain_mu_by_step(
+                    model,
+                    data["retain"],
+                    collator,
+                    batch_size,
+                    trajectory_config,
+                    tokenizer,
+                    loaded_metrics,
+                    sort_by_length,
+                    use_distributed_sampler,
+                    world_size,
+                    rank,
+                    **_mu_kw,
+                )
         kwargs["retain_agg_by_step"] = retain_agg_by_step
 
         # Log once when reference_logs was provided but step-matched data is missing (no fallback to aggregate).
@@ -3807,6 +4240,12 @@ def trajectory_metrics(model, **kwargs):
         # Expose retain MU components per step so reports show which of Prob/ROUGE/Truth_Ratio is 0 when hm_aggregate is 0.
         retain_agg_by_step = kwargs.get("retain_agg_by_step") or {}
         if "hm_aggregate" in loaded_metrics and retain_agg_by_step:
+            def _is_mu_key(x):
+                return (
+                    str(x).startswith("retain_")
+                    or str(x).startswith("ra_")
+                    or str(x).startswith("wf_")
+                )
             components = {}
             for step_key, pre in retain_agg_by_step.items():
                 sk = str(step_key)
@@ -3814,9 +4253,7 @@ def trajectory_metrics(model, **kwargs):
                 if isinstance(pre, dict):
                     for _v in ("full", "eos"):
                         pv0 = pre.get(_v)
-                        if isinstance(pv0, dict) and any(
-                            str(x).startswith("retain_") for x in pv0
-                        ):
+                        if isinstance(pv0, dict) and any(_is_mu_key(x) for x in pv0):
                             nested_by_view = True
                             break
                 if nested_by_view:
@@ -3828,22 +4265,21 @@ def trajectory_metrics(model, **kwargs):
                         if not isinstance(pv, dict):
                             continue
                         components[sk][view] = {}
-                        for name in ("retain_Q_A_Prob", "retain_Q_A_ROUGE", "retain_Truth_Ratio"):
-                            ent = pv.get(name)
-                            if isinstance(ent, dict) and "agg_value" in ent:
+                        for name, ent in pv.items():
+                            if _is_mu_key(name) and isinstance(ent, dict) and "agg_value" in ent:
                                 v = ent["agg_value"]
                                 components[sk][view][name] = (
                                     float(v) if isinstance(v, (int, float, np.floating)) else v
                                 )
                 else:
                     components[sk] = {}
-                    for name in ("retain_Q_A_Prob", "retain_Q_A_ROUGE", "retain_Truth_Ratio"):
-                        ent = pre.get(name) if isinstance(pre, dict) else None
-                        if isinstance(ent, dict) and "agg_value" in ent:
-                            v = ent["agg_value"]
-                            components[sk][name] = (
-                                float(v) if isinstance(v, (int, float, np.floating)) else v
-                            )
+                    if isinstance(pre, dict):
+                        for name, ent in pre.items():
+                            if _is_mu_key(name) and isinstance(ent, dict) and "agg_value" in ent:
+                                v = ent["agg_value"]
+                                components[sk][name] = (
+                                    float(v) if isinstance(v, (int, float, np.floating)) else v
+                                )
             if components:
                 result["retain_mu_components_by_step"] = components
 
