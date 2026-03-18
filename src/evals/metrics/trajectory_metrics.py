@@ -1185,6 +1185,8 @@ def _compute_mu_for_dataset(
                 "ground_truth": ground_truth_str,
                 "rouge_scorer": rouge_scorer_instance,
                 "trajectory_config": trajectory_config,
+                "dataset_key": dataset_key,
+                "last_step_index": len(steps_to_use) - 1,
                 **{k: v for k, v in kwargs.items() if k not in ("tokenizer", "model", "data")},
             }
 
@@ -1773,6 +1775,48 @@ def _handle_text_based_metric(logits, tokenizer, sample_labels, sample_input_ids
     if use_rouge_only:
         from evals.metrics.utils import eval_rouge_recall_batch
 
+        # DEBUG-only: log prompt/gen/gt for first and last step, sample 0 and 1 (once in a few samples per trajectory).
+        if logger.isEnabledFor(logging.DEBUG):
+            _step_index = kwargs.get("step_index")
+            _last_step_index = kwargs.get("last_step_index")
+            _sidx = kwargs.get("sample_idx")
+            _first_step = _step_index == 0 or (_step_index is not None and _step_index == 0)
+            _is_last_step = (
+                _step_index is not None
+                and _last_step_index is not None
+                and _step_index == _last_step_index
+            )
+            _log_sample = _sidx in (0, "0", 1, "1")
+            if (_first_step or _is_last_step) and _log_sample:
+                _max_len = 100
+                _gen_snippet = (gen_text or "")[:_max_len] + ("..." if len(gen_text or "") > _max_len else "")
+                _gt_snippet = (ground_truth or "")[:_max_len] + ("..." if len(ground_truth or "") > _max_len else "")
+                _prompt_snippet = ""
+                _sid = kwargs.get("sample_input_ids")
+                _spl = kwargs.get("sample_prompt_len")
+                if _sid is not None and _spl is not None:
+                    try:
+                        _pl = int(_spl) if not hasattr(_spl, "item") else int(_spl.item())
+                        _ids = _sid[0] if _sid.dim() > 1 else _sid
+                        if hasattr(_ids, "tolist"):
+                            _ids = _ids.tolist()
+                        _prompt_text = tokenizer.decode(_ids[:_pl], skip_special_tokens=True)
+                        _prompt_snippet = (_prompt_text[:_max_len] + ("..." if len(_prompt_text) > _max_len else "")) if _prompt_text else ""
+                    except Exception:  # noqa: S110
+                        _prompt_snippet = "(decode failed)"
+                _ds_key = kwargs.get("dataset_key")
+                _step = kwargs.get("step")
+                logger.debug(
+                    "ROUGE decoded sample (dataset_key=%s step_index=%s step=%s sample_idx=%s): prompt=%r gen=%r gt=%r",
+                    _ds_key,
+                    _step_index,
+                    _step,
+                    _sidx,
+                    _prompt_snippet,
+                    _gen_snippet,
+                    _gt_snippet,
+                )
+
         result = eval_rouge_recall_batch(
             [gen_text],
             [ground_truth],
@@ -2156,21 +2200,17 @@ def _call_metric_at_step(
         
         if needs_generation:
             # This is likely a text-based metric that needs model.generate()
-            # Use generic text-based handler
-            logger.debug(
-                f"Metric {metric_name} appears to be text-based (requires generation). "
-                f"Using generic text-based handler."
+            # Use generic text-based handler. Text handler expects [1, L, V] or [L, V]; do not transpose.
+            logger.info(
+                "Using generic text-based handler for %s (direct call failed: %s).",
+                metric_name,
+                e,
             )
             try:
-                # Get original logits (before reshaping)
-                original_logits = logits  # Already in [1, L, V] format
-                if original_logits.dim() == 3:
-                    original_logits = original_logits[0]  # [L, V]
-                original_logits = original_logits.transpose(0, 1)  # [V, L] for decode function
-                
+                # Pass logits as-is: already [1, L, V] from normalization above; _handle_text_based_metric expects sequence last.
                 text_kw = {**kwargs, "batch": batch, "sample_idx": sample_idx}
                 result = _handle_text_based_metric(
-                    logits=original_logits,
+                    logits=logits,
                     tokenizer=tokenizer,
                     sample_labels=sample_labels,
                     sample_input_ids=sample_input_ids,
@@ -2186,7 +2226,7 @@ def _call_metric_at_step(
                     f"Original error: {e}",
                     exc_info=True
                 )
-                return None
+                raise
         else:
             logger.warning(
                 f"Error calling metric {metric_name} at step: {e}. "
@@ -2202,13 +2242,10 @@ def _call_metric_at_step(
                 f"Trying generic text-based handler."
             )
             try:
-                original_logits = logits
-                if original_logits.dim() == 3:
-                    original_logits = original_logits[0]  # [L, V]
-                original_logits = original_logits.transpose(0, 1)  # [V, L]
+                # Text handler expects [1, L, V] or [L, V]; logits already normalized above, do not transpose.
                 text_kw = {**kwargs, "batch": batch, "sample_idx": sample_idx}
                 result = _handle_text_based_metric(
-                    logits=original_logits,
+                    logits=logits,
                     tokenizer=tokenizer,
                     sample_labels=sample_labels,
                     sample_input_ids=sample_input_ids,

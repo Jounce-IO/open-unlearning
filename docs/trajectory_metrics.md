@@ -420,6 +420,7 @@ R = R_full[:, max_prompt_len:max_prompt_len + generated_len, :]  # [V, L, S]
 ```
 
 Similarly for fixation steps and labels:
+
 ```python
 # Extract fixation steps for generated region
 F = fixation_steps[0][max_prompt_len:max_prompt_len + L]  # [L]
@@ -433,6 +434,10 @@ generated_input_ids = sample_input_ids[generation_start : generation_start + L] 
 ```
 
 With left-padded batches, using `prompt_lens[sample_idx]` alone as the slice start is **wrong** when `prompt_starts[sample_idx] > 0`: that index is in sequence-from-sampler space, not in batch labels space. Always use **generation_start** (content start + prompt length for full-convo, or content start for IGNORE-for-prompt) when slicing `labels` or aligned `input_ids`.
+
+### Text-based (ROUGE) path and logits shape
+
+The trajectory text-based handler (used for ROUGE in the 9-metric MU path) expects logits in **`[1, L, V]`** or **`[L, V]`** (sequence length L, vocab size V last). Callers must not pass `[V, L]`; the handler does not transpose. `_call_metric_at_step` normalizes 2D `[V, L]` from `_get_logits_at_step` to `[1, L, V]` before calling the metric or the generic text-based fallback. When the direct metric call fails and the fallback is used, logits are passed through as `[1, L, V]` (no transpose). At DEBUG log level, the handler logs short prompt/gen/gt snippets for the first and last step and a few samples per dataset to aid debugging.
 
 #### Label conventions and generation start
 
