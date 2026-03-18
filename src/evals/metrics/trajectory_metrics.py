@@ -1185,6 +1185,8 @@ def _compute_mu_for_dataset(
                 "ground_truth": ground_truth_str,
                 "rouge_scorer": rouge_scorer_instance,
                 "trajectory_config": trajectory_config,
+                "dataset_key": dataset_key,
+                "last_step_index": len(steps_to_use) - 1,
                 **{k: v for k, v in kwargs.items() if k not in ("tokenizer", "model", "data")},
             }
 
@@ -1748,11 +1750,17 @@ def _handle_text_based_metric(logits, tokenizer, sample_labels, sample_input_ids
     Returns:
         Metric result (list of dicts)
     """
-    # Decode logits to text via argmax
+    # Decode logits to text via argmax (expect logits [1, L, V] or [L, V]; argmax dim=-1 -> [L])
     if logits.dim() == 3:
         logits = logits[0]  # [L, V]
     predicted_tokens = torch.argmax(logits, dim=-1)  # [L]
     gen_text = tokenizer.decode(predicted_tokens.tolist(), skip_special_tokens=True)
+    if len(gen_text) > 50000:
+        logger.warning(
+            "ROUGE gen_text length=%s (expected on order of L tokens); logits.shape=%s; possible shape/transpose bug",
+            len(gen_text),
+            logits.shape,
+        )
     guardrail_config = kwargs.get("guardrail_config")
     if guardrail_config is not None:
         gen_text = transform_output_text(
@@ -1775,23 +1783,48 @@ def _handle_text_based_metric(logits, tokenizer, sample_labels, sample_input_ids
 
         _step = kwargs.get("step")
         _sidx = kwargs.get("sample_idx")
-        if not (gen_text or "").strip():
+        if not (gen_text or "").strip() and logger.isEnabledFor(logging.DEBUG):
             logger.debug(
                 "ROUGE (rouge-only path): empty generated text (gen_len=0 or whitespace-only); "
                 "score will be 0. step=%s sample_idx=%s",
                 _step,
                 _sidx,
             )
-        # Log actual decoded text for a few samples (step 0, sample 0) for debugging
-        _log_text = _step in (0, "0") and _sidx in (0, "0")
+        # Log actual decoded text for first and last step, first sample only, when DEBUG enabled (avoid decode cost at INFO).
+        _step_index = kwargs.get("step_index")
+        _first_step = _step_index == 0 or _step in (0, "0")
+        _last_step_index = kwargs.get("last_step_index")
+        _is_last_step = (
+            _step_index is not None
+            and _last_step_index is not None
+            and _step_index == _last_step_index
+        )
+        _log_text = (_first_step or _is_last_step) and _sidx in (0, "0") and logger.isEnabledFor(logging.DEBUG)
         if _log_text:
             _max_len = 100
             _gen_snippet = (gen_text or "")[: _max_len] + ("..." if len(gen_text or "") > _max_len else "")
             _gt_snippet = (ground_truth or "")[: _max_len] + ("..." if len(ground_truth or "") > _max_len else "")
+            _prompt_snippet = ""
+            _sid = kwargs.get("sample_input_ids")
+            _spl = kwargs.get("sample_prompt_len")
+            if _sid is not None and _spl is not None:
+                try:
+                    _pl = int(_spl) if not hasattr(_spl, "item") else int(_spl.item())
+                    _ids = _sid[0] if _sid.dim() > 1 else _sid
+                    if hasattr(_ids, "tolist"):
+                        _ids = _ids.tolist()
+                    _prompt_text = tokenizer.decode(_ids[:_pl], skip_special_tokens=True)
+                    _prompt_snippet = (_prompt_text[: _max_len] + ("..." if len(_prompt_text) > _max_len else "")) if _prompt_text else ""
+                except Exception:  # noqa: S110
+                    _prompt_snippet = "(decode failed)"
+            _ds_key = kwargs.get("dataset_key")
             logger.debug(
-                "ROUGE decoded sample (step=%s sample_idx=%s): gen=%r gt=%r",
+                "ROUGE decoded sample (dataset_key=%s step_index=%s step=%s sample_idx=%s): prompt=%r gen=%r gt=%r",
+                _ds_key,
+                _step_index,
                 _step,
                 _sidx,
+                _prompt_snippet,
                 _gen_snippet,
                 _gt_snippet,
             )
@@ -1806,9 +1839,15 @@ def _handle_text_based_metric(logits, tokenizer, sample_labels, sample_input_ids
             result_dict = result[0]
             if isinstance(result_dict, dict) and rouge_type in result_dict:
                 score = result_dict[rouge_type]
-                logger.debug(
-                    f"ROUGE {rouge_type} (rouge-only path): gen_len={len(gen_text)}, gt_len={len(ground_truth)}, score={score}"
-                )
+                if logger.isEnabledFor(logging.DEBUG):
+                    logger.debug(
+                        "ROUGE %s (rouge-only path): dataset_key=%s gen_len=%s gt_len=%s score=%s",
+                        rouge_type,
+                        kwargs.get("dataset_key"),
+                        len(gen_text),
+                        len(ground_truth),
+                        score,
+                    )
                 return [{"score": score}]
         return result
 
