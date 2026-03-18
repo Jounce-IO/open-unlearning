@@ -19,7 +19,7 @@ trajectory_config:
   sampler_kwargs:
     steps: 16  # Reduced for testing
     temperature: 0.0
-    max_new_tokens: 32  # Reduced for testing
+    max_new_tokens: 128
 
 # path uses ${data_split} for News/Books; data_split is set at root by experiment/dllm eval
 # split must be in hf_args (QADataset passes hf_args to load_dataset); slice for samples

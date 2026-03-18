@@ -19,7 +19,7 @@ trajectory_config:
   sampler_kwargs:
     steps: 16
     temperature: 0.0
-    max_new_tokens: 32
+    max_new_tokens: 128
 # path uses ${data_split}; data_split set at root by experiment/CLI
 # split override via eval.metrics.trajectory_metrics.datasets.MUSE_forget_knowmem.args.hf_args.split
 datasets:

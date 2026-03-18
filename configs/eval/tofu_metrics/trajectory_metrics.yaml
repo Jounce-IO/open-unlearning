@@ -20,7 +20,7 @@ trajectory_config:
   sampler_kwargs:
     steps: 16
     temperature: 0.0
-    max_new_tokens: 32
+    max_new_tokens: 200
 datasets:
   TOFU_QA_forget:
     args:
