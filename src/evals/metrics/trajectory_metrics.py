@@ -1773,6 +1773,13 @@ def _handle_text_based_metric(logits, tokenizer, sample_labels, sample_input_ids
     if use_rouge_only:
         from evals.metrics.utils import eval_rouge_recall_batch
 
+        if not (gen_text or "").strip():
+            logger.debug(
+                "ROUGE (rouge-only path): empty generated text (gen_len=0 or whitespace-only); "
+                "score will be 0. step=%s sample_idx=%s",
+                kwargs.get("step"),
+                kwargs.get("sample_idx"),
+            )
         result = eval_rouge_recall_batch(
             [gen_text],
             [ground_truth],
