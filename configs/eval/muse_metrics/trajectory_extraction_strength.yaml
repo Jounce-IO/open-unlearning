@@ -1,5 +1,8 @@
 # @package eval.muse_trajectory.metrics.trajectory_extraction_strength
 # Trajectory-wrapped extraction_strength - same metric/dataset as regular, computed at each diffusion step
+#
+# max_new_tokens: 128 — matches upstream MUSE extraction_strength (verbmem dataset).
+# Upstream: https://github.com/locuslab/open-unlearning/blob/main/configs/eval/muse_metrics/extraction_strength.yaml
 
 defaults:
   - ../../data/datasets@datasets: MUSE_forget_verbmem

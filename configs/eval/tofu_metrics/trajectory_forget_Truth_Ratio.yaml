@@ -1,5 +1,10 @@
 # @package eval.tofu_trajectory.metrics.trajectory_forget_Truth_Ratio
 # Trajectory-wrapped forget_Truth_Ratio - truth_ratio with para/pert pre_compute at each step
+#
+# max_new_tokens (sampler): 200 — aligned with upstream TOFU generation default.
+# Upstream references:
+#   - https://github.com/locuslab/open-unlearning/blob/main/configs/generation/default.yaml
+#   - https://github.com/locuslab/open-unlearning/blob/main/configs/eval/tofu_metrics/forget_Truth_Ratio.yaml
 
 defaults:
   - ../../data/datasets@datasets: TOFU_QA_forget_para_pert

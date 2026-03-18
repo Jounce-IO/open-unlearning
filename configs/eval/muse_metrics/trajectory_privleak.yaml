@@ -1,6 +1,12 @@
 # @package eval.muse_trajectory.metrics.trajectory_privleak
 # Trajectory-wrapped privleak - mia_min_k at each step, compared to retain reference
 # Requires secondary dataset (holdout) support in trajectory_metrics
+#
+# max_new_tokens (sampler): 128 — coalesced MUSE trajectory uses one cap for all metrics; matches
+# upstream verbmem ROUGE generation cap (knowmem standalone uses 32; privleak upstream has no generation_args).
+# Upstream references:
+#   - https://github.com/locuslab/open-unlearning/blob/main/configs/eval/muse_metrics/privleak.yaml
+#   - https://github.com/locuslab/open-unlearning/blob/main/configs/eval/muse_metrics/forget_verbmem_ROUGE.yaml
 
 defaults:
   - .@pre_compute.mia_min_k: mia_min_k

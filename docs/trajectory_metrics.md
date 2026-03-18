@@ -604,6 +604,8 @@ The number of trajectory steps **S** in a run is the length of `logits_history` 
 
 **Reference compatibility:** Step-matched metrics (e.g. `trajectory_privleak`, `trajectory_forget_quality`) look up the reference by step index. If the consuming run has more steps than the reference (e.g. 24 vs 22), the loader raises `RetainReferenceValidationError` for the missing steps. Use the same `trajectory_config.sampler_kwargs` (especially `max_new_tokens` and `trajectory_sample_interval`) when producing and consuming reference logs so that S matches.
 
+**Upstream-aligned `max_new_tokens`:** Each trajectory metric YAML under [`configs/eval/tofu_metrics/`](https://github.com/locuslab/open-unlearning/tree/main/configs/eval/tofu_metrics) and [`configs/eval/muse_metrics/`](https://github.com/locuslab/open-unlearning/tree/main/configs/eval/muse_metrics) includes comments linking to the matching [locuslab/open-unlearning](https://github.com/locuslab/open-unlearning) configs (e.g. TOFU **200** from [`configs/generation/default.yaml`](https://github.com/locuslab/open-unlearning/blob/main/configs/generation/default.yaml); MUSE knowmem ROUGE **32** vs verbmem **128**). Prefer those defaults when comparing to non-trajectory upstream runs.
+
 **Note on `retain_mu_components_by_step`:** This field is built from a separate pass over the **retain** dataloader. The retain pass can yield a different S than the forget pass (e.g. 24 vs 22) if the first batch of each has different effective lengths or capture schedules. The canonical reference step count for compatibility is the one from `mia_min_k_by_step` / `forget_truth_ratio_by_step` (forget pass).
 
 ## Best Practices

@@ -1,5 +1,10 @@
 # @package eval.muse_trajectory.metrics.trajectory_metrics_minimal
 # Minimal trajectory metrics config - only ROUGE, 5 samples
+#
+# max_new_tokens (sampler): 128 — same rationale as trajectory_metrics.yaml (verbmem-aligned cap for coalesced runs).
+# Upstream references:
+#   - https://github.com/locuslab/open-unlearning/blob/main/configs/eval/muse_metrics/forget_knowmem_ROUGE.yaml
+#   - https://github.com/locuslab/open-unlearning/blob/main/configs/eval/muse_metrics/forget_verbmem_ROUGE.yaml
 
 defaults:
   - ../../data/datasets@datasets: MUSE_forget_knowmem

@@ -2,6 +2,11 @@
 # Trajectory-based metrics for dLLM evaluation
 # Computes metrics at each diffusion step across three trajectory types
 # Note: Using _global_ to allow this metric to work with any eval config (muse, trajectory_test, etc.)
+#
+# max_new_tokens (sampler): 128 — coalesced trajectory cap; matches upstream verbmem ROUGE (knowmem ROUGE alone is 32).
+# Upstream references:
+#   - https://github.com/locuslab/open-unlearning/blob/main/configs/eval/muse_metrics/forget_knowmem_ROUGE.yaml
+#   - https://github.com/locuslab/open-unlearning/blob/main/configs/eval/muse_metrics/forget_verbmem_ROUGE.yaml
 
 defaults:
   - ../../data/datasets@datasets: MUSE_forget_knowmem

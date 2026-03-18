@@ -1,5 +1,10 @@
 # @package eval.tofu_trajectory.metrics.trajectory_forget_quality
 # Trajectory-wrapped forget_quality - ks_test comparing forget truth_ratio to retain at each step
+#
+# max_new_tokens (sampler): 200 — aligned with upstream TOFU generation default.
+# Upstream references:
+#   - https://github.com/locuslab/open-unlearning/blob/main/configs/generation/default.yaml
+#   - https://github.com/locuslab/open-unlearning/blob/main/configs/eval/tofu_metrics/forget_quality.yaml
 
 defaults:
   - ../../data/datasets@datasets: TOFU_QA_forget_para_pert

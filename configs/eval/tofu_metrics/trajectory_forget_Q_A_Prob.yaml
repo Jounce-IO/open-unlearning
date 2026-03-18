@@ -1,5 +1,10 @@
 # @package eval.tofu_trajectory.metrics.trajectory_forget_Q_A_Prob
 # Trajectory-wrapped forget_Q_A_Prob - same metric/dataset as regular, computed at each diffusion step
+#
+# max_new_tokens (sampler / generation): 200 — aligned with upstream locuslab/open-unlearning TOFU defaults.
+# Upstream references:
+#   - https://github.com/locuslab/open-unlearning/blob/main/configs/generation/default.yaml
+#   - https://github.com/locuslab/open-unlearning/blob/main/configs/eval/tofu_metrics/forget_Q_A_Prob.yaml
 
 defaults:
   - ../../data/datasets@datasets: TOFU_QA_forget

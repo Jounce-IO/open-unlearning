@@ -1,5 +1,10 @@
 # @package eval.tofu_trajectory.metrics.trajectory_extraction_strength
 # Trajectory-wrapped extraction_strength - same metric/dataset as regular, computed at each diffusion step
+#
+# max_new_tokens (sampler): 200 — same generation budget as other TOFU evals (upstream default).
+# Upstream references:
+#   - https://github.com/locuslab/open-unlearning/blob/main/configs/generation/default.yaml
+#   - https://github.com/locuslab/open-unlearning/blob/main/configs/eval/tofu_metrics/extraction_strength.yaml
 
 defaults:
   - ../../data/datasets@datasets: TOFU_QA_forget
