@@ -69,6 +69,103 @@ _trajectory_single_retain_warned: set = set()
 DEFAULT_TRAJECTORY_SAMPLE_INTERVAL = 8
 
 
+def _debug_log_trajectory_metric_coverage(
+    agg_value_by_view: Dict[str, Any],
+    loaded_metrics: Dict[str, Any],
+    trajectory_names: List[str],
+    include_views: List[str],
+) -> None:
+    """Emit TRAJECTORY_METRIC_COVERAGE lines (grep/parse to verify all metrics ran)."""
+    if not logger.isEnabledFor(logging.DEBUG):
+        return
+    metric_names = sorted(loaded_metrics.keys())
+    for view in include_views:
+        for traj_name in trajectory_names:
+            lengths: Dict[str, int] = {}
+            finite: Dict[str, int] = {}
+            for metric_name in metric_names:
+                block = (agg_value_by_view.get(view) or {}).get(traj_name) or {}
+                arr = block.get(metric_name)
+                if arr is None:
+                    logger.debug(
+                        "TRAJECTORY_METRIC_COVERAGE view=%s traj=%s metric=%s array_len=0 finite_values=0 missing=1",
+                        view,
+                        traj_name,
+                        metric_name,
+                    )
+                    continue
+                a = np.asarray(arr, dtype=np.float64)
+                n = int(a.size)
+                n_fin = int(np.sum(np.isfinite(a)))
+                lengths[metric_name] = n
+                finite[metric_name] = n_fin
+                logger.debug(
+                    "TRAJECTORY_METRIC_COVERAGE view=%s traj=%s metric=%s array_len=%s finite_values=%s",
+                    view,
+                    traj_name,
+                    metric_name,
+                    n,
+                    n_fin,
+                )
+            pos_lens = {m: lengths[m] for m in lengths if lengths[m] > 0}
+            if len(set(pos_lens.values())) > 1:
+                logger.warning(
+                    "TRAJECTORY_METRIC_LEN_MISMATCH view=%s traj=%s array_len_by_metric=%s",
+                    view,
+                    traj_name,
+                    pos_lens,
+                )
+            if pos_lens:
+                ref = max(pos_lens.values())
+                thin = [m for m in metric_names if lengths.get(m, 0) not in (0, ref)]
+                if thin:
+                    logger.debug(
+                        "TRAJECTORY_METRIC_SHORT_OR_EMPTY view=%s traj=%s expected_len=%s metrics_not_len=%s",
+                        view,
+                        traj_name,
+                        ref,
+                        thin,
+                    )
+
+
+def _debug_log_mu_submetric_coverage(retain_agg_by_step: Dict[str, Any]) -> None:
+    """Emit TRAJECTORY_MU_SUBMETRIC_* for hm_aggregate pre_compute components per step."""
+    if not logger.isEnabledFor(logging.DEBUG) or not retain_agg_by_step:
+        return
+
+    def _step_sort(k):
+        s = str(k)
+        return int(s) if s.isdigit() else 0
+
+    steps = sorted(retain_agg_by_step.keys(), key=_step_sort)
+    logger.debug(
+        "TRAJECTORY_MU_SUBMETRIC_STEPS mu_aggregate_steps=%s first_step=%s last_step=%s",
+        len(steps),
+        steps[0] if steps else None,
+        steps[-1] if steps else None,
+    )
+    for sk in (steps[0], steps[-1]) if steps else []:
+        pre = retain_agg_by_step[sk]
+        if not isinstance(pre, dict):
+            continue
+        for view in ("full", "eos"):
+            inner = pre.get(view)
+            if not isinstance(inner, dict):
+                continue
+            keys = sorted(
+                k
+                for k, v in inner.items()
+                if isinstance(v, dict) and "agg_value" in v
+            )
+            logger.debug(
+                "TRAJECTORY_MU_SUBMETRIC_COVERAGE step=%s view=%s submetric_count=%s submetrics=%s",
+                sk,
+                view,
+                len(keys),
+                keys,
+            )
+
+
 EVALUATION_MODES = ("unguided", "guided_native", "guided_skew")
 
 
@@ -913,7 +1010,8 @@ def _compute_retain_mu_by_step(
                                         exc_info=True,
                                     )
                     except Exception as e:
-                        logger.debug("retain MU %s at step %s: %s", metric_name, step, e)
+                        if logger.isEnabledFor(logging.DEBUG):
+                            logger.debug("retain MU %s at step %s: %s", metric_name, step, e)
 
         del R, F, out
         if torch.cuda.is_available():
@@ -1107,10 +1205,12 @@ def _compute_mu_for_dataset(
         logits_history = sampler_output.logits_history
         fixation_steps = sampler_output.fixation_steps
         if logits_history is None or len(logits_history) == 0:
-            logger.debug("[MU %s] batch_idx=%s: no logits_history", dataset_key, batch_idx)
+            if logger.isEnabledFor(logging.DEBUG):
+                logger.debug("[MU %s] batch_idx=%s: no logits_history", dataset_key, batch_idx)
             continue
         if fixation_steps is None:
-            logger.debug("[MU %s] batch_idx=%s: no fixation_steps", dataset_key, batch_idx)
+            if logger.isEnabledFor(logging.DEBUG):
+                logger.debug("[MU %s] batch_idx=%s: no fixation_steps", dataset_key, batch_idx)
             continue
         out = trajectories_from_logits(
             logits_history, fixation_steps, prompt_lens, return_trajectory_tensors=False
@@ -1292,14 +1392,15 @@ def _compute_mu_for_dataset(
                         if rv is not None:
                             pl["rouge"].append(rv)
                     except Exception as e:
-                        logger.debug(
-                            "MU %s %s step %s sample %s: %s",
-                            dataset_key,
-                            view_name,
-                            step,
-                            sample_idx,
-                            e,
-                        )
+                        if logger.isEnabledFor(logging.DEBUG):
+                            logger.debug(
+                                "MU %s %s step %s sample %s: %s",
+                                dataset_key,
+                                view_name,
+                                step,
+                                sample_idx,
+                                e,
+                            )
 
         del R, F, out
         if torch.cuda.is_available():
@@ -1828,9 +1929,14 @@ def _handle_text_based_metric(logits, tokenizer, sample_labels, sample_input_ids
             result_dict = result[0]
             if isinstance(result_dict, dict) and rouge_type in result_dict:
                 score = result_dict[rouge_type]
-                logger.debug(
-                    f"ROUGE {rouge_type} (rouge-only path): gen_len={len(gen_text)}, gt_len={len(ground_truth)}, score={score}"
-                )
+                if logger.isEnabledFor(logging.DEBUG):
+                    logger.debug(
+                        "ROUGE %s (rouge-only path): gen_len=%s gt_len=%s score=%s",
+                        rouge_type,
+                        len(gen_text),
+                        len(ground_truth),
+                        score,
+                    )
                 return [{"score": score}]
         return result
 
@@ -1883,9 +1989,14 @@ def _handle_text_based_metric(logits, tokenizer, sample_labels, sample_input_ids
             result_dict = result[0]
             if isinstance(result_dict, dict) and rouge_type in result_dict:
                 score = result_dict[rouge_type]
-                logger.debug(
-                    f"ROUGE {rouge_type}: gen_len={len(gen_text)}, gt_len={len(ground_truth)}, score={score}"
-                )
+                if logger.isEnabledFor(logging.DEBUG):
+                    logger.debug(
+                        "ROUGE %s: gen_len=%s gt_len=%s score=%s",
+                        rouge_type,
+                        len(gen_text),
+                        len(ground_truth),
+                        score,
+                    )
                 return [{"score": score}]
 
     return result
@@ -2619,6 +2730,8 @@ def trajectory_metrics(model, **kwargs):
                     rank,
                     **_mu_kw,
                 )
+        if "hm_aggregate" in loaded_metrics and logger.isEnabledFor(logging.DEBUG):
+            _debug_log_mu_submetric_coverage(retain_agg_by_step)
         kwargs["retain_agg_by_step"] = retain_agg_by_step
 
         # Log once when reference_logs was provided but step-matched data is missing (no fallback to aggregate).
@@ -3035,14 +3148,17 @@ def trajectory_metrics(model, **kwargs):
                     )
                     _gs = sample_generation_start
                     _ps = prompt_starts[sample_idx]
-                    logger.debug(
-                        "trajectory slice: sample_idx=%s generation_start=%s (prompt_starts=%s, prompt_len=%s) L=%s",
-                        sample_idx,
-                        _gs.item() if hasattr(_gs, "item") else _gs,
-                        _ps.item() if hasattr(_ps, "item") else _ps,
-                        sample_prompt_len.item() if hasattr(sample_prompt_len, "item") else sample_prompt_len,
-                        L,
-                    )
+                    if logger.isEnabledFor(logging.DEBUG):
+                        logger.debug(
+                            "trajectory slice: sample_idx=%s generation_start=%s (prompt_starts=%s, prompt_len=%s) L=%s",
+                            sample_idx,
+                            _gs.item() if hasattr(_gs, "item") else _gs,
+                            _ps.item() if hasattr(_ps, "item") else _ps,
+                            sample_prompt_len.item()
+                            if hasattr(sample_prompt_len, "item")
+                            else sample_prompt_len,
+                            L,
+                        )
 
                     # Extract only the generated portion of labels to match logits shape [V, L]
                 # Logits from trajectory only cover generated tokens (L), not the prompt
@@ -3408,9 +3524,17 @@ def trajectory_metrics(model, **kwargs):
                                                             break
                                         elif isinstance(result, (int, float, np.number)):
                                             metric_value = float(result)
-                                        if metric_name == "extraction_strength" and step in (steps_to_use[0], steps_to_use[-1]) and metric_value is not None:
+                                        if (
+                                            logger.isEnabledFor(logging.DEBUG)
+                                            and metric_name == "extraction_strength"
+                                            and step in (steps_to_use[0], steps_to_use[-1])
+                                            and metric_value is not None
+                                        ):
                                             logger.debug(
-                                                f"extraction_strength step={step} sample={idx_str}: value={metric_value}"
+                                                "extraction_strength step=%s sample=%s value=%s",
+                                                step,
+                                                idx_str,
+                                                metric_value,
                                             )
                                         if metric_value is not None:
                                             step_values_by_view[view][traj_name][step][metric_name].append(metric_value)
@@ -4165,6 +4289,14 @@ def trajectory_metrics(model, **kwargs):
             agg_value_by_view[view] = agg_value
             step_distribution_by_view[view] = step_distribution
 
+        if logger.isEnabledFor(logging.DEBUG):
+            _debug_log_trajectory_metric_coverage(
+                agg_value_by_view,
+                loaded_metrics,
+                trajectory_names,
+                include_views,
+            )
+
         # Build trajectory step metadata so results can interpret step indices (which diffusion/unmasked-token step each index is).
         sampler_kwargs = trajectory_config.get("sampler_kwargs", {})
         num_trajectory_steps = 0
@@ -4207,6 +4339,21 @@ def trajectory_metrics(model, **kwargs):
             trajectory_step_metadata["effective_length_by_index"] = effective_length_by_index
         if prompt_len_by_index:
             trajectory_step_metadata["prompt_len_by_index"] = prompt_len_by_index
+
+        if logger.isEnabledFor(logging.DEBUG) and num_trajectory_steps > 0:
+            fv0 = include_views[0] if include_views else "full"
+            prob_arr = (agg_value_by_view.get(fv0) or {}).get("steps", {}).get(
+                "probability", np.array([])
+            )
+            prob_len = int(np.asarray(prob_arr).size)
+            logger.debug(
+                "TRAJECTORY_STEP_META num_trajectory_steps=%s step_values_count=%s "
+                "probability_on_steps_traj_len=%s lengths_match=%s",
+                num_trajectory_steps,
+                len(step_values) if step_values is not None else 0,
+                prob_len,
+                prob_len == num_trajectory_steps,
+            )
 
         # Single path: build one result dict; display part (per-name or single key), then canonical keys once.
         internal_names = list(loaded_metrics.keys())

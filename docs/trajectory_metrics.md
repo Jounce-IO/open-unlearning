@@ -606,6 +606,25 @@ The number of trajectory steps **S** in a run is the length of `logits_history` 
 
 **Upstream-aligned `max_new_tokens`:** Each trajectory metric YAML under [`configs/eval/tofu_metrics/`](https://github.com/locuslab/open-unlearning/tree/main/configs/eval/tofu_metrics) and [`configs/eval/muse_metrics/`](https://github.com/locuslab/open-unlearning/tree/main/configs/eval/muse_metrics) includes comments linking to the matching [locuslab/open-unlearning](https://github.com/locuslab/open-unlearning) configs (e.g. TOFU **200** from [`configs/generation/default.yaml`](https://github.com/locuslab/open-unlearning/blob/main/configs/generation/default.yaml); MUSE knowmem ROUGE **32** vs verbmem **128**). Prefer those defaults when comparing to non-trajectory upstream runs.
 
+### Validating all metrics ran (DEBUG logs)
+
+With **`LOGLEVEL=DEBUG`**, trajectory aggregation emits one line per **view × trajectory type × metric**:
+
+- `TRAJECTORY_METRIC_COVERAGE view=full|eos traj=steps|fixation_* metric=... array_len=N finite_values=M`
+- **`array_len`**: number of trajectory steps in the aggregated series (should match across metrics for the same view×traj).
+- **`finite_values`**: how many steps have a non-NaN aggregate (should be `> 0` if the metric ran).
+- **`TRAJECTORY_MU_SUBMETRIC_COVERAGE`**: when **`hm_aggregate`** runs, first/last step list **retain MU** sub-keys (e.g. `retain_Q_A_Prob`, `retain_Q_A_ROUGE`, `retain_Truth_Ratio`) per view.
+- **`TRAJECTORY_STEP_META`**: `num_trajectory_steps` vs **probability** series length on **`steps`** traj (should show `lengths_match=True`).
+
+**Check pod logs after a run:**
+
+```bash
+kubectl logs job/<release-name> -n <namespace> 2>&1 | \
+  uv run python open-unlearning/scripts/validate_trajectory_metric_coverage_from_log.py
+```
+
+Override expected metrics/views/trajs if you used a subset (see `--help`). Add **`--require-mu`** to assert **hm_aggregate** retain sub-metrics were logged. Exit code **0** = all expected combinations present with data; **1** = missing/length mismatch; **2** = no coverage lines (DEBUG not enabled).
+
 **Note on `retain_mu_components_by_step`:** This field is built from a separate pass over the **retain** dataloader. The retain pass can yield a different S than the forget pass (e.g. 24 vs 22) if the first batch of each has different effective lengths or capture schedules. The canonical reference step count for compatibility is the one from `mia_min_k_by_step` / `forget_truth_ratio_by_step` (forget pass).
 
 ## Best Practices
