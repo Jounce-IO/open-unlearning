@@ -262,3 +262,31 @@ def test_hm_aggregate_nested_nine_keys_requires_view():
             step_index=0,
             retain_agg_by_step=retain_agg,
         )
+
+
+def test_hm_aggregate_returns_none_when_any_component_is_none():
+    """hm_aggregate must not silently drop None; when any component is None, return agg_value=None (no hidden fallback)."""
+    metric = METRICS_REGISTRY["hm_aggregate"]
+    pre = {
+        "retain_Q_A_Prob": {"agg_value": 0.8},
+        "retain_Q_A_ROUGE": {"agg_value": None},
+        "retain_Truth_Ratio": {"agg_value": 0.6},
+    }
+    retain_agg = {"0": {"full": pre, "eos": pre}}
+    logits = torch.zeros(1, 2, 8)
+    batch_t = {
+        "input_ids": torch.zeros(1, 2, dtype=torch.long),
+        "attention_mask": torch.ones(1, 2, dtype=torch.long),
+        "index": torch.tensor([0]),
+    }
+    r = _call_metric_at_step(
+        metric,
+        logits,
+        batch_t,
+        metric_config={},
+        sample_idx="0",
+        step_index=0,
+        retain_agg_by_step=retain_agg,
+        trajectory_view="full",
+    )
+    assert r["agg_value"] is None
