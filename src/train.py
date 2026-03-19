@@ -153,6 +153,15 @@ def main(cfg: DictConfig):
     )
 
     if trainer_args.do_train:
+        try:
+            from dllm.callbacks.train_diagnostics import TrainSpeedDiagnosticsCallback
+
+            trainer.add_callback(TrainSpeedDiagnosticsCallback(source="open_unlearning_train"))
+        except ImportError:
+            logger.warning(
+                "TrainSpeedDiagnosticsCallback unavailable (dllm not on PYTHONPATH); "
+                "training speed diagnostic logs are disabled."
+            )
         trainer.add_callback(_WandbRunIdCallback(trainer_args.output_dir))
         trainer.add_callback(_WandbDllmConfigCallback())
         make_checkpoint_loadable_fn = None
