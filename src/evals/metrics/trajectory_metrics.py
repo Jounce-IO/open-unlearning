@@ -815,12 +815,13 @@ def _compute_retain_mu_by_step(
     _sampler_kw = _trajectory_sampler_kwargs(trajectory_config)
     _ = trajectory_config.get("rouge_type") or kwargs.get("rouge_type", "rougeL_recall")  # rouge_type, reserved
     rouge_scorer_instance = rouge_scorer.RougeScorer(["rouge1", "rougeL"], use_stemmer=True)
-    _iv = trajectory_config.get("include_views", ["full"]) if trajectory_config else ["full"]
+    # Use same default as main trajectory loop so retain MU has both full and eos when main loop expects both.
+    _iv = trajectory_config.get("include_views", ["full", "eos"]) if trajectory_config else ["full", "eos"]
     if isinstance(_iv, str):
         _iv = [_iv]
     _mu_views = [str(v).lower() for v in _iv if str(v).lower() in ("full", "eos")]
     if not _mu_views:
-        _mu_views = ["full"]
+        _mu_views = ["full", "eos"]
 
     def _empty_mu_pl() -> Dict[str, Dict[str, List[Any]]]:
         return {v: {"prob": [], "rouge": [], "tr": []} for v in _mu_views}
@@ -1198,12 +1199,15 @@ def _compute_mu_for_dataset(
 
     _sampler_kw = _trajectory_sampler_kwargs(trajectory_config)
     rouge_scorer_instance = rouge_scorer.RougeScorer(["rouge1", "rougeL"], use_stemmer=True)
-    _iv = trajectory_config.get("include_views", ["full"]) if trajectory_config else ["full"]
+    # Use same default as main trajectory loop (["full", "eos"]) so MU pre-compute always produces
+    # both views when the main loop will ask for both; default ["full"] alone caused full-view
+    # hm_aggregate to be empty in reports when config had only eos or key was missing.
+    _iv = trajectory_config.get("include_views", ["full", "eos"]) if trajectory_config else ["full", "eos"]
     if isinstance(_iv, str):
         _iv = [_iv]
     _mu_views = [str(v).lower() for v in _iv if str(v).lower() in ("full", "eos")]
     if not _mu_views:
-        _mu_views = ["full"]
+        _mu_views = ["full", "eos"]
 
     def _empty_pl():
         return {"prob": [], "prob_wrong": [], "rouge": [], "tr": []}

@@ -389,3 +389,164 @@ def test_hm_aggregate_view_dict_with_non_mu_keys_returns_none():
         trajectory_view="full",
     )
     assert r["agg_value"] is None
+
+
+# --- Many more scenarios: step key type, empty retain, wrong view, per-traj edge cases ---
+
+def test_hm_aggregate_step_index_int_and_str_both_resolved():
+    """Step key can be int or str; lookup uses str(step_index) or step_key."""
+    import pytest
+
+    metric = METRICS_REGISTRY["hm_aggregate"]
+    pre = {"retain_Q_A_Prob": {"agg_value": 0.5}, "retain_Q_A_ROUGE": {"agg_value": 0.5}, "retain_Truth_Ratio": {"agg_value": 0.5}}
+    logits = torch.zeros(1, 2, 8)
+    batch_t = {"input_ids": torch.zeros(1, 2, dtype=torch.long), "attention_mask": torch.ones(1, 2, dtype=torch.long), "index": torch.tensor([0])}
+
+    for step_index, step_key in [(0, "0"), (1, "1")]:
+        retain_agg = {step_key: {"full": pre, "eos": pre}}
+        r = _call_metric_at_step(
+            metric, logits, batch_t, metric_config={}, sample_idx="0", step_index=step_index,
+            retain_agg_by_step=retain_agg, trajectory_view="full",
+        )
+        assert r["agg_value"] is not None
+
+
+def test_hm_aggregate_retain_agg_empty_dict_returns_none():
+    """When retain_agg_by_step is empty, hm_aggregate gets no pre_compute -> returns None."""
+    metric = METRICS_REGISTRY["hm_aggregate"]
+    logits = torch.zeros(1, 2, 8)
+    batch_t = {"input_ids": torch.zeros(1, 2, dtype=torch.long), "attention_mask": torch.ones(1, 2, dtype=torch.long), "index": torch.tensor([0])}
+    r = _call_metric_at_step(
+        metric, logits, batch_t, metric_config={}, sample_idx="0", step_index=0,
+        retain_agg_by_step={}, trajectory_view="full",
+    )
+    assert r["agg_value"] is None
+
+
+def test_hm_aggregate_retain_agg_none_treated_as_empty():
+    """When retain_agg_by_step is None (caller passes None), treated as empty -> None."""
+    metric = METRICS_REGISTRY["hm_aggregate"]
+    logits = torch.zeros(1, 2, 8)
+    batch_t = {"input_ids": torch.zeros(1, 2, dtype=torch.long), "attention_mask": torch.ones(1, 2, dtype=torch.long), "index": torch.tensor([0])}
+    r = _call_metric_at_step(
+        metric, logits, batch_t, metric_config={}, sample_idx="0", step_index=0,
+        retain_agg_by_step=None, trajectory_view="full",
+    )
+    assert r["agg_value"] is None
+
+
+def test_hm_aggregate_trajectory_view_invalid_raises():
+    """trajectory_view must be 'full' or 'eos' when structure is per-view; invalid value raises."""
+    import pytest
+
+    metric = METRICS_REGISTRY["hm_aggregate"]
+    retain_agg = {"0": {"full": {"retain_Q_A_Prob": {"agg_value": 0.5}}, "eos": {"retain_Q_A_Prob": {"agg_value": 0.5}}}}
+    logits = torch.zeros(1, 2, 8)
+    batch_t = {"input_ids": torch.zeros(1, 2, dtype=torch.long), "attention_mask": torch.ones(1, 2, dtype=torch.long), "index": torch.tensor([0])}
+    with pytest.raises(ValueError, match="trajectory_view"):
+        _call_metric_at_step(
+            metric, logits, batch_t, metric_config={}, sample_idx="0", step_index=0,
+            retain_agg_by_step=retain_agg, trajectory_view="invalid",
+        )
+
+
+def test_hm_aggregate_step_key_missing_returns_none():
+    """When step_index has no entry in retain_agg_by_step, pre_compute is missing -> None."""
+    metric = METRICS_REGISTRY["hm_aggregate"]
+    retain_agg = {"0": {"full": {"retain_Q_A_Prob": {"agg_value": 0.5}}, "eos": {"retain_Q_A_Prob": {"agg_value": 0.5}}}}
+    logits = torch.zeros(1, 2, 8)
+    batch_t = {"input_ids": torch.zeros(1, 2, dtype=torch.long), "attention_mask": torch.ones(1, 2, dtype=torch.long), "index": torch.tensor([0])}
+    r = _call_metric_at_step(
+        metric, logits, batch_t, metric_config={}, sample_idx="0", step_index=99,
+        retain_agg_by_step=retain_agg, trajectory_view="full",
+    )
+    assert r["agg_value"] is None
+
+
+def test_hm_aggregate_per_traj_missing_traj_name_returns_none():
+    """Per-traj: traj_name not in retain_agg_by_step -> by_traj.get(traj_name) empty -> None."""
+    metric = METRICS_REGISTRY["hm_aggregate"]
+    retain_agg = {"steps": {"0": {"full": {"retain_Q_A_Prob": {"agg_value": 0.5}}, "eos": {"retain_Q_A_Prob": {"agg_value": 0.5}}}}}
+    logits = torch.zeros(1, 2, 8)
+    batch_t = {"input_ids": torch.zeros(1, 2, dtype=torch.long), "attention_mask": torch.ones(1, 2, dtype=torch.long), "index": torch.tensor([0])}
+    r = _call_metric_at_step(
+        metric, logits, batch_t, metric_config={}, sample_idx="0", step_index=0,
+        retain_agg_by_step=retain_agg, traj_name="fixation_ratio", trajectory_view="full",
+    )
+    assert r["agg_value"] is None
+
+
+def test_hm_aggregate_eos_empty_full_populated_returns_none_for_eos():
+    """Inverse of full-empty: eos view empty dict, full populated; request eos -> None."""
+    metric = METRICS_REGISTRY["hm_aggregate"]
+    retain_agg = {
+        "0": {
+            "full": {"retain_Q_A_Prob": {"agg_value": 0.5}, "retain_Q_A_ROUGE": {"agg_value": 0.5}, "retain_Truth_Ratio": {"agg_value": 0.5}},
+            "eos": {},
+        },
+    }
+    logits = torch.zeros(1, 2, 8)
+    batch_t = {"input_ids": torch.zeros(1, 2, dtype=torch.long), "attention_mask": torch.ones(1, 2, dtype=torch.long), "index": torch.tensor([0])}
+    r_full = _call_metric_at_step(metric, logits, batch_t, metric_config={}, sample_idx="0", step_index=0, retain_agg_by_step=retain_agg, trajectory_view="full")
+    r_eos = _call_metric_at_step(metric, logits, batch_t, metric_config={}, sample_idx="0", step_index=0, retain_agg_by_step=retain_agg, trajectory_view="eos")
+    assert r_full["agg_value"] is not None
+    assert r_eos["agg_value"] is None
+
+
+def test_hm_aggregate_nine_keys_all_none_returns_none():
+    """All 9 components have agg_value None -> hmean would fail; hm_aggregate returns None."""
+    metric = METRICS_REGISTRY["hm_aggregate"]
+    from evals.metrics.trajectory_metrics import EXPECTED_9_MU_KEYS
+    pre = {k: {"agg_value": None} for k in EXPECTED_9_MU_KEYS}
+    retain_agg = {"0": {"full": pre, "eos": pre}}
+    logits = torch.zeros(1, 2, 8)
+    batch_t = {"input_ids": torch.zeros(1, 2, dtype=torch.long), "attention_mask": torch.ones(1, 2, dtype=torch.long), "index": torch.tensor([0])}
+    r = _call_metric_at_step(metric, logits, batch_t, metric_config={}, sample_idx="0", step_index=0, retain_agg_by_step=retain_agg, trajectory_view="full")
+    assert r["agg_value"] is None
+
+
+def test_hm_aggregate_flat_structure_no_view_keys_used_as_is():
+    """Legacy flat: pre_compute_step has no 'full'/'eos' keys but has MU keys -> used as single pre_compute."""
+    metric = METRICS_REGISTRY["hm_aggregate"]
+    pre = {"retain_Q_A_Prob": {"agg_value": 0.5}, "retain_Q_A_ROUGE": {"agg_value": 0.5}, "retain_Truth_Ratio": {"agg_value": 0.5}}
+    retain_agg = {"0": pre}
+    logits = torch.zeros(1, 2, 8)
+    batch_t = {"input_ids": torch.zeros(1, 2, dtype=torch.long), "attention_mask": torch.ones(1, 2, dtype=torch.long), "index": torch.tensor([0])}
+    r = _call_metric_at_step(metric, logits, batch_t, metric_config={}, sample_idx="0", step_index=0, retain_agg_by_step=retain_agg, trajectory_view="full")
+    assert r["agg_value"] is not None
+
+
+def test_hm_aggregate_per_traj_all_four_trajectory_types_both_views():
+    """Per-traj: all four traj types with both views; each (traj_name, view) returns valid hmean."""
+    import scipy.stats
+
+    metric = METRICS_REGISTRY["hm_aggregate"]
+    pre = {"retain_Q_A_Prob": {"agg_value": 0.5}, "retain_Q_A_ROUGE": {"agg_value": 0.5}, "retain_Truth_Ratio": {"agg_value": 0.5}}
+    traj_names = ("steps", "fixation_start", "fixation_end", "fixation_ratio")
+    retain_agg = {t: {"0": {"full": pre, "eos": pre}} for t in traj_names}
+    logits = torch.zeros(1, 2, 8)
+    batch_t = {"input_ids": torch.zeros(1, 2, dtype=torch.long), "attention_mask": torch.ones(1, 2, dtype=torch.long), "index": torch.tensor([0])}
+    for traj_name in traj_names:
+        for view in ("full", "eos"):
+            r = _call_metric_at_step(
+                metric, logits, batch_t, metric_config={}, sample_idx="0", step_index=0,
+                retain_agg_by_step=retain_agg, traj_name=traj_name, trajectory_view=view,
+            )
+            assert r["agg_value"] is not None
+            assert abs(r["agg_value"] - 0.5) < 1e-9
+
+
+def test_hm_aggregate_per_traj_step_missing_for_one_traj_returns_none():
+    """Per-traj: steps has step 0; fixation_start has no step 0 -> None for fixation_start step 0."""
+    metric = METRICS_REGISTRY["hm_aggregate"]
+    retain_agg = {
+        "steps": {"0": {"full": {"retain_Q_A_Prob": {"agg_value": 0.5}}, "eos": {"retain_Q_A_Prob": {"agg_value": 0.5}}}},
+        "fixation_start": {},
+    }
+    logits = torch.zeros(1, 2, 8)
+    batch_t = {"input_ids": torch.zeros(1, 2, dtype=torch.long), "attention_mask": torch.ones(1, 2, dtype=torch.long), "index": torch.tensor([0])}
+    r = _call_metric_at_step(
+        metric, logits, batch_t, metric_config={}, sample_idx="0", step_index=0,
+        retain_agg_by_step=retain_agg, traj_name="fixation_start", trajectory_view="full",
+    )
+    assert r["agg_value"] is None
