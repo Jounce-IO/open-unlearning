@@ -379,6 +379,7 @@ class TestCoalescedVsPerMetricResultShape:
         assert isinstance(result, dict)
         assert "trajectory_all" in result
         assert "agg_value" in result["trajectory_all"]
+        assert "trajectory_step_metadata" in result, "single display key report must include trajectory_step_metadata"
 
     def test_per_metric_no_display_names_uses_metric_name_as_key(self):
         """Per-metric call with no metric_display_names uses metric_name as the single key."""

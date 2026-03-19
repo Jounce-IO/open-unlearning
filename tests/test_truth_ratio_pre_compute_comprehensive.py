@@ -30,6 +30,74 @@ from evals.metrics import METRICS_REGISTRY
 
 
 # ---- Original OpenUnlearning contract: single dict for correct and wrong, same indices ----
+def test_truth_ratio_single_wrong_dict_exact_expected_closer_to_1_better():
+    """Invariant: TR = wrong/correct per index; closer_to_1_better = mean(min(tr, 1/(tr+eps))). Assert actual agg_value."""
+    if "truth_ratio" not in METRICS_REGISTRY:
+        pytest.skip("truth_ratio not registered")
+    metric = METRICS_REGISTRY["truth_ratio"]
+    correct_vbi = {"0": {"prob": 0.5, "avg_loss": -np.log(0.5)}, "1": {"prob": 0.4, "avg_loss": -np.log(0.4)}}
+    wrong_vbi = {"0": {"prob": 0.25, "avg_loss": -np.log(0.25)}, "1": {"prob": 0.2, "avg_loss": -np.log(0.2)}}
+    tr0 = 0.25 / 0.5
+    tr1 = 0.2 / 0.4
+    arr = np.array([tr0, tr1])
+    expected = float(np.mean(np.minimum(arr, 1 / (arr + 1e-10))))
+    result = metric._metric_fn(
+        model=None,
+        pre_compute={
+            "correct": {"value_by_index": correct_vbi},
+            "wrong": {"value_by_index": wrong_vbi},
+        },
+        aggregator="closer_to_1_better",
+    )
+    assert result["agg_value"] is not None
+    assert np.isclose(result["agg_value"], expected, rtol=1e-9)
+
+
+def test_truth_ratio_single_wrong_dict_exact_expected_true_better():
+    """Invariant: TR = wrong/correct; true_better = mean(max(0, 1 - tr)). Assert actual agg_value."""
+    if "truth_ratio" not in METRICS_REGISTRY:
+        pytest.skip("truth_ratio not registered")
+    metric = METRICS_REGISTRY["truth_ratio"]
+    correct_vbi = {"0": {"prob": 0.5, "avg_loss": -np.log(0.5)}, "1": {"prob": 0.4, "avg_loss": -np.log(0.4)}}
+    wrong_vbi = {"0": {"prob": 0.25, "avg_loss": -np.log(0.25)}, "1": {"prob": 0.2, "avg_loss": -np.log(0.2)}}
+    tr0 = 0.25 / 0.5
+    tr1 = 0.2 / 0.4
+    expected = float(np.mean(np.maximum(0, 1 - np.array([tr0, tr1]))))
+    result = metric._metric_fn(
+        model=None,
+        pre_compute={
+            "correct": {"value_by_index": correct_vbi},
+            "wrong": {"value_by_index": wrong_vbi},
+        },
+        aggregator="true_better",
+    )
+    assert result["agg_value"] is not None
+    assert np.isclose(result["agg_value"], expected, rtol=1e-9)
+
+
+def test_truth_ratio_single_wrong_dict_exact_expected_prob_mean():
+    """Invariant: prob_mean uses correct/(correct+wrong) per index (OpenUnlearning extent of knowledge), then mean(tr)."""
+    if "truth_ratio" not in METRICS_REGISTRY:
+        pytest.skip("truth_ratio not registered")
+    metric = METRICS_REGISTRY["truth_ratio"]
+    correct_vbi = {"0": {"prob": 0.5, "avg_loss": -np.log(0.5)}, "1": {"prob": 0.4, "avg_loss": -np.log(0.4)}}
+    wrong_vbi = {"0": {"prob": 0.25, "avg_loss": -np.log(0.25)}, "1": {"prob": 0.2, "avg_loss": -np.log(0.2)}}
+    pc, pw = 0.5, 0.25
+    tr0 = pc / (pc + pw)
+    tr1 = 0.4 / (0.4 + 0.2)
+    expected = float(np.mean([tr0, tr1]))
+    result = metric._metric_fn(
+        model=None,
+        pre_compute={
+            "correct": {"value_by_index": correct_vbi},
+            "wrong": {"value_by_index": wrong_vbi},
+        },
+        aggregator="prob_mean",
+    )
+    assert result["agg_value"] is not None
+    assert np.isclose(result["agg_value"], expected, rtol=1e-9)
+
+
 def test_truth_ratio_original_style_single_wrong_dict_same_indices():
     """Original locuslab/open-unlearning: pre_compute correct and wrong are single dicts with value_by_index; same keys."""
     if "truth_ratio" not in METRICS_REGISTRY:
@@ -48,6 +116,26 @@ def test_truth_ratio_original_style_single_wrong_dict_same_indices():
     )
     assert result["agg_value"] is not None
     assert "value_by_index" in result
+
+
+def test_truth_ratio_empty_filtered_indices_returns_nan():
+    """When no index has valid correct/wrong avg_loss, truth_ratio returns agg_value=nan (match upstream)."""
+    if "truth_ratio" not in METRICS_REGISTRY:
+        pytest.skip("truth_ratio not registered")
+    metric = METRICS_REGISTRY["truth_ratio"]
+    correct_vbi = {"0": {"prob": 0.5}, "1": {"prob": 0.4}}
+    wrong_vbi = {"0": {"prob": 0.25}, "1": {"prob": 0.2}}
+    result = metric._metric_fn(
+        model=None,
+        pre_compute={
+            "correct": {"value_by_index": correct_vbi},
+            "wrong": {"value_by_index": wrong_vbi},
+        },
+        aggregator="closer_to_1_better",
+    )
+    assert "agg_value" in result
+    assert np.isnan(result["agg_value"])
+    assert result["value_by_index"] == {}
 
 
 def test_truth_ratio_asserts_when_correct_and_wrong_indices_differ():

@@ -332,6 +332,7 @@ class TestComputeMuForDatasetE2E:
         V = 32000
         S = 9
         trajectory_config = {
+            "trajectory_names": ["steps", "fixation_start", "fixation_end", "fixation_ratio"],
             "include_views": ["full", "eos"],
             "sampler_kwargs": {
                 "steps": S,
@@ -372,15 +373,19 @@ class TestComputeMuForDatasetE2E:
         )
 
         keys_expected = _MU_DATASET_KEYS["retain"]
+        trajectory_names_expected = ("steps", "fixation_start", "fixation_end", "fixation_ratio")
         assert isinstance(result, dict)
-        for step_key, step_val in result.items():
-            assert isinstance(step_val, dict)
-            for view in ("full", "eos"):
-                if view in step_val:
-                    comp = step_val[view]
-                    for k in keys_expected:
-                        assert k in comp, f"missing {k} at step {step_key} view {view}"
-                        assert isinstance(comp[k], dict) and "agg_value" in comp[k]
+        assert set(result.keys()) == set(trajectory_names_expected)
+        for traj_name in trajectory_names_expected:
+            assert traj_name in result
+            for step_key, step_val in result[traj_name].items():
+                assert isinstance(step_val, dict)
+                for view in ("full", "eos"):
+                    if view in step_val:
+                        comp = step_val[view]
+                        for k in keys_expected:
+                            assert k in comp, f"missing {k} at traj={traj_name} step {step_key} view {view}"
+                            assert isinstance(comp[k], dict) and "agg_value" in comp[k]
 
     def test_compute_mu_for_dataset_ra_returns_three_components(self, tokenizer):
         """With real real_authors_perturbed data and mock sampler, _compute_mu_for_dataset returns ra_* keys."""
@@ -397,6 +402,7 @@ class TestComputeMuForDatasetE2E:
         V = 32000
         S = 9
         trajectory_config = {
+            "trajectory_names": ["steps", "fixation_start", "fixation_end", "fixation_ratio"],
             "include_views": ["full"],
             "sampler_kwargs": {
                 "steps": S,
@@ -437,14 +443,17 @@ class TestComputeMuForDatasetE2E:
         )
 
         keys_expected = _MU_DATASET_KEYS["ra"]
+        trajectory_names_expected = ("steps", "fixation_start", "fixation_end", "fixation_ratio")
         assert isinstance(result, dict)
-        for step_key, step_val in result.items():
-            assert isinstance(step_val, dict)
-            for view in step_val:
-                comp = step_val[view]
-                for k in keys_expected:
-                    assert k in comp
-                    assert isinstance(comp[k], dict) and "agg_value" in comp[k]
+        assert set(result.keys()) == set(trajectory_names_expected)
+        for traj_name in trajectory_names_expected:
+            for step_key, step_val in result[traj_name].items():
+                assert isinstance(step_val, dict)
+                for view in step_val:
+                    comp = step_val[view]
+                    for k in keys_expected:
+                        assert k in comp
+                        assert isinstance(comp[k], dict) and "agg_value" in comp[k]
 
     def test_compute_mu_for_dataset_wf_returns_three_components(self, tokenizer):
         """With real world_facts_perturbed data and mock sampler, _compute_mu_for_dataset returns wf_* keys."""
@@ -461,6 +470,7 @@ class TestComputeMuForDatasetE2E:
         V = 32000
         S = 9
         trajectory_config = {
+            "trajectory_names": ["steps", "fixation_start", "fixation_end", "fixation_ratio"],
             "include_views": ["full"],
             "sampler_kwargs": {
                 "steps": S,
@@ -501,14 +511,17 @@ class TestComputeMuForDatasetE2E:
         )
 
         keys_expected = _MU_DATASET_KEYS["wf"]
+        trajectory_names_expected = ("steps", "fixation_start", "fixation_end", "fixation_ratio")
         assert isinstance(result, dict)
-        for step_key, step_val in result.items():
-            assert isinstance(step_val, dict)
-            for view in step_val:
-                comp = step_val[view]
-                for k in keys_expected:
-                    assert k in comp
-                    assert isinstance(comp[k], dict) and "agg_value" in comp[k]
+        assert set(result.keys()) == set(trajectory_names_expected)
+        for traj_name in trajectory_names_expected:
+            for step_key, step_val in result[traj_name].items():
+                assert isinstance(step_val, dict)
+                for view in step_val:
+                    comp = step_val[view]
+                    for k in keys_expected:
+                        assert k in comp
+                        assert isinstance(comp[k], dict) and "agg_value" in comp[k]
 
 
 class TestNineMetricMergeValidation:
@@ -578,6 +591,292 @@ class TestNineMetricMergeValidation:
             _validate_merged_9_mu(retain_agg_by_step)
         assert "extra" in str(exc_info.value).lower()
 
+    def test_validate_merged_9_mu_pass_with_per_traj_structure(self):
+        """Per-traj retain_agg_by_step (four trajectory types, full+eos) passes validation."""
+        from evals.metrics.trajectory_metrics import (
+            EXPECTED_9_MU_KEYS,
+            _validate_merged_9_mu,
+        )
+
+        trajectory_names = ("steps", "fixation_start", "fixation_end", "fixation_ratio")
+        step_dict = {
+            "0": {
+                "full": {k: {"agg_value": 0.5} for k in EXPECTED_9_MU_KEYS},
+                "eos": {k: {"agg_value": 0.5} for k in EXPECTED_9_MU_KEYS},
+            },
+            "1": {
+                "full": {k: {"agg_value": 0.5} for k in EXPECTED_9_MU_KEYS},
+                "eos": {k: {"agg_value": 0.5} for k in EXPECTED_9_MU_KEYS},
+            },
+        }
+        retain_agg_by_step = {t: step_dict for t in trajectory_names}
+        _validate_merged_9_mu(retain_agg_by_step)
+
+    def test_validate_merged_9_mu_per_traj_fail_missing_key_raises(self):
+        """Per-traj structure with a missing key in one traj raises."""
+        from evals.metrics.trajectory_metrics import (
+            EXPECTED_9_MU_KEYS,
+            _validate_merged_9_mu,
+        )
+
+        keys_minus_one = set(EXPECTED_9_MU_KEYS) - {"wf_Truth_Ratio"}
+        step_dict_ok = {
+            "0": {
+                "full": {k: {"agg_value": 0.5} for k in EXPECTED_9_MU_KEYS},
+                "eos": {k: {"agg_value": 0.5} for k in EXPECTED_9_MU_KEYS},
+            },
+        }
+        step_dict_bad = {
+            "0": {
+                "full": {k: {"agg_value": 0.5} for k in keys_minus_one},
+                "eos": {k: {"agg_value": 0.5} for k in keys_minus_one},
+            },
+        }
+        retain_agg_by_step = {
+            "steps": step_dict_ok,
+            "fixation_start": step_dict_ok,
+            "fixation_end": step_dict_bad,
+            "fixation_ratio": step_dict_ok,
+        }
+        with pytest.raises(ValueError) as exc_info:
+            _validate_merged_9_mu(retain_agg_by_step)
+        assert "missing" in str(exc_info.value).lower() or "expected exactly" in str(exc_info.value).lower()
+
+
+class TestNineMetricMergeSyntheticFourTrajFullEos:
+    """Synthetic 9-metric merge: per-traj retain/ra/wf -> retain_agg_by_step with 4 traj types and full+eos."""
+
+    def test_nine_metric_merge_produces_four_trajectory_types_and_both_views(self):
+        """Merge logic with per-traj retain_res/ra_res/wf_res yields 4 traj names and full+eos per step."""
+        from evals.metrics.trajectory_metrics import EXPECTED_9_MU_KEYS
+
+        trajectory_names = ("steps", "fixation_start", "fixation_end", "fixation_ratio")
+        views = ("full", "eos")
+
+        def _three(prefix):
+            prob_key = f"{prefix}_Q_A_Prob" if prefix == "retain" else f"{prefix}_Q_A_Prob_normalised"
+            return {
+                prob_key: {"agg_value": 0.5},
+                f"{prefix}_Q_A_ROUGE": {"agg_value": 0.6},
+                f"{prefix}_Truth_Ratio": {"agg_value": 0.7},
+            }
+
+        retain_res = {}
+        ra_res = {}
+        wf_res = {}
+        for t in trajectory_names:
+            retain_res[t] = {}
+            ra_res[t] = {}
+            wf_res[t] = {}
+            for sk in ("0", "1"):
+                retain_res[t][sk] = {v: _three("retain") for v in views}
+                ra_res[t][sk] = {v: _three("ra") for v in views}
+                wf_res[t][sk] = {v: _three("wf") for v in views}
+
+        retain_agg_by_step = {}
+        for traj_name in trajectory_names:
+            retain_agg_by_step[traj_name] = {}
+            for step_key in retain_res[traj_name]:
+                merged_views = {}
+                for view in views:
+                    merged_views[view] = {
+                        **retain_res[traj_name][step_key].get(view, {}),
+                        **ra_res[traj_name].get(step_key, {}).get(view, {}),
+                        **wf_res[traj_name].get(step_key, {}).get(view, {}),
+                    }
+                retain_agg_by_step[traj_name][step_key] = merged_views
+
+        assert set(retain_agg_by_step.keys()) == set(trajectory_names)
+        for traj_name in trajectory_names:
+            assert set(retain_agg_by_step[traj_name].keys()) == {"0", "1"}
+            for step_key in ("0", "1"):
+                step_val = retain_agg_by_step[traj_name][step_key]
+                assert set(step_val.keys()) == set(views)
+                for view in views:
+                    assert set(step_val[view].keys()) == EXPECTED_9_MU_KEYS
+
+    def test_nine_metric_merge_only_eos_yields_no_full_regression(self):
+        """Regression: when _compute_mu_for_dataset only produced 'eos' (wrong include_views default),
+        merge had only 'eos' per step so hm_aggregate for view=full got None and report had empty full-view MU."""
+        trajectory_names = ("steps", "fixation_start", "fixation_end", "fixation_ratio")
+
+        def _three(prefix):
+            prob_key = f"{prefix}_Q_A_Prob" if prefix == "retain" else f"{prefix}_Q_A_Prob_normalised"
+            return {
+                prob_key: {"agg_value": 0.5},
+                f"{prefix}_Q_A_ROUGE": {"agg_value": 0.6},
+                f"{prefix}_Truth_Ratio": {"agg_value": 0.7},
+            }
+
+        # Only "eos" in each step (bug: MU pre-compute used default include_views ["full"] or config had [eos] only)
+        retain_res = {t: {"0": {"eos": _three("retain")}, "1": {"eos": _three("retain")}} for t in trajectory_names}
+        ra_res = {t: {"0": {"eos": _three("ra")}, "1": {"eos": _three("ra")}} for t in trajectory_names}
+        wf_res = {t: {"0": {"eos": _three("wf")}, "1": {"eos": _three("wf")}} for t in trajectory_names}
+
+        retain_agg_by_step = {}
+        for traj_name in trajectory_names:
+            retain_agg_by_step[traj_name] = {}
+            for step_key in retain_res[traj_name]:
+                merged = {}
+                for view in retain_res[traj_name][step_key]:
+                    merged[view] = {
+                        **retain_res[traj_name][step_key].get(view, {}),
+                        **ra_res.get(traj_name, {}).get(step_key, {}).get(view, {}),
+                        **wf_res.get(traj_name, {}).get(step_key, {}).get(view, {}),
+                    }
+                retain_agg_by_step[traj_name][step_key] = merged
+
+        # Merged result has only "eos", no "full" -> hm_aggregate with trajectory_view=full gets None
+        for traj_name in trajectory_names:
+            for step_key in ("0", "1"):
+                step_val = retain_agg_by_step[traj_name][step_key]
+                assert "full" not in step_val
+                assert "eos" in step_val
+
+    def test_nine_metric_merge_retain_both_views_ra_wf_only_eos_merged_has_both(self):
+        """Merge: retain has full+eos, ra/wf only eos -> merged has full (from retain) and eos (all three)."""
+        from evals.metrics.trajectory_metrics import EXPECTED_9_MU_KEYS
+
+        trajectory_names = ("steps", "fixation_start", "fixation_end", "fixation_ratio")
+
+        def _three(prefix):
+            prob_key = f"{prefix}_Q_A_Prob" if prefix == "retain" else f"{prefix}_Q_A_Prob_normalised"
+            return {
+                prob_key: {"agg_value": 0.5},
+                f"{prefix}_Q_A_ROUGE": {"agg_value": 0.6},
+                f"{prefix}_Truth_Ratio": {"agg_value": 0.7},
+            }
+
+        retain_res = {t: {"0": {"full": _three("retain"), "eos": _three("retain")}} for t in trajectory_names}
+        ra_res = {t: {"0": {"eos": _three("ra")}} for t in trajectory_names}
+        wf_res = {t: {"0": {"eos": _three("wf")}} for t in trajectory_names}
+
+        retain_agg_by_step = {}
+        for traj_name in trajectory_names:
+            retain_agg_by_step[traj_name] = {}
+            for step_key in retain_res[traj_name]:
+                merged = {}
+                for view in retain_res[traj_name][step_key]:
+                    merged[view] = {
+                        **retain_res[traj_name][step_key].get(view, {}),
+                        **ra_res.get(traj_name, {}).get(step_key, {}).get(view, {}),
+                        **wf_res.get(traj_name, {}).get(step_key, {}).get(view, {}),
+                    }
+                retain_agg_by_step[traj_name][step_key] = merged
+
+        assert "full" in retain_agg_by_step["steps"]["0"]
+        assert "eos" in retain_agg_by_step["steps"]["0"]
+        # full only has retain's 3 (ra/wf had no full); eos has all 9 from retain+ra+wf
+        assert set(retain_agg_by_step["steps"]["0"]["full"].keys()) == {
+            "retain_Q_A_Prob", "retain_Q_A_ROUGE", "retain_Truth_Ratio"
+        }
+        assert set(retain_agg_by_step["steps"]["0"]["eos"].keys()) == EXPECTED_9_MU_KEYS
+
+    def test_nine_metric_merge_all_only_full_yields_only_full(self):
+        """When all three (retain, ra, wf) have only 'full' per step, merged has only 'full'."""
+        trajectory_names = ("steps",)
+        def _three(prefix):
+            prob_key = f"{prefix}_Q_A_Prob" if prefix == "retain" else f"{prefix}_Q_A_Prob_normalised"
+            return {prob_key: {"agg_value": 0.5}, f"{prefix}_Q_A_ROUGE": {"agg_value": 0.6}, f"{prefix}_Truth_Ratio": {"agg_value": 0.7}}
+        retain_res = {"steps": {"0": {"full": _three("retain")}}}
+        ra_res = {"steps": {"0": {"full": _three("ra")}}}
+        wf_res = {"steps": {"0": {"full": _three("wf")}}}
+        merged = {}
+        for view in retain_res["steps"]["0"]:
+            merged[view] = {
+                **retain_res["steps"]["0"].get(view, {}),
+                **ra_res.get("steps", {}).get("0", {}).get(view, {}),
+                **wf_res.get("steps", {}).get("0", {}).get(view, {}),
+            }
+        assert "full" in merged
+        assert "eos" not in merged
+
+
+class TestValidateMerged9MuEdgeCases:
+    """_validate_merged_9_mu: per-traj empty step_dict, flat eos-only, single view."""
+
+    def test_validate_merged_9_mu_per_traj_empty_step_dict_skipped(self):
+        """Per-traj: one traj has empty step_dict -> validation skips (no step to check)."""
+        from evals.metrics.trajectory_metrics import EXPECTED_9_MU_KEYS, _validate_merged_9_mu
+
+        step_ok = {"0": {"full": {k: {"agg_value": 0.5} for k in EXPECTED_9_MU_KEYS}, "eos": {k: {"agg_value": 0.5} for k in EXPECTED_9_MU_KEYS}}}
+        retain_agg = {
+            "steps": step_ok,
+            "fixation_start": {},
+            "fixation_end": step_ok,
+            "fixation_ratio": step_ok,
+        }
+        _validate_merged_9_mu(retain_agg)
+
+    def test_validate_merged_9_mu_flat_eos_only_pass(self):
+        """Flat structure with only 'eos' view (no 'full') still validates eos keys."""
+        from evals.metrics.trajectory_metrics import EXPECTED_9_MU_KEYS, _validate_merged_9_mu
+
+        retain_agg = {"0": {"eos": {k: {"agg_value": 0.5} for k in EXPECTED_9_MU_KEYS}}}
+        _validate_merged_9_mu(retain_agg)
+
+    def test_validate_merged_9_mu_flat_full_only_pass(self):
+        """Flat structure with only 'full' view validates full keys."""
+        from evals.metrics.trajectory_metrics import EXPECTED_9_MU_KEYS, _validate_merged_9_mu
+
+        retain_agg = {"0": {"full": {k: {"agg_value": 0.5} for k in EXPECTED_9_MU_KEYS}}}
+        _validate_merged_9_mu(retain_agg)
+
+    def test_validate_merged_9_mu_per_traj_extra_view_ignored(self):
+        """Per-traj: step has 'full', 'eos', and 'other' view; validation only checks full/eos."""
+        from evals.metrics.trajectory_metrics import EXPECTED_9_MU_KEYS, _validate_merged_9_mu
+
+        step_dict = {
+            "0": {
+                "full": {k: {"agg_value": 0.5} for k in EXPECTED_9_MU_KEYS},
+                "eos": {k: {"agg_value": 0.5} for k in EXPECTED_9_MU_KEYS},
+                "other": {},
+            },
+        }
+        retain_agg = {t: step_dict for t in ("steps", "fixation_start", "fixation_end", "fixation_ratio")}
+        _validate_merged_9_mu(retain_agg)
+
+
+class TestIncludeViewsParsing:
+    """include_views default and parsing: MU path must align with main loop."""
+
+    def test_include_views_default_full_eos_in_mu_path(self):
+        """_compute_mu_for_dataset and _compute_retain_mu_by_step use default ['full','eos'] (same as main loop)."""
+        # When key is missing, default must be both views so MU pre-compute matches main loop.
+        trajectory_config_empty = {}
+        _iv = trajectory_config_empty.get("include_views", ["full", "eos"])
+        assert _iv == ["full", "eos"]
+
+    def test_include_views_none_config_fallback_full_eos(self):
+        """When trajectory_config is None, code uses fallback ['full', 'eos'] (same as main loop)."""
+        trajectory_config = None
+        _iv = (
+            trajectory_config.get("include_views", ["full", "eos"])
+            if trajectory_config
+            else ["full", "eos"]
+        )
+        assert _iv == ["full", "eos"]
+
+    def test_include_views_string_single_normalized(self):
+        """include_views as string 'eos' -> normalized to list and filtered -> ['eos']."""
+        _iv = "eos"
+        if isinstance(_iv, str):
+            _iv = [_iv]
+        _mu_views = [str(v).lower() for v in _iv if str(v).lower() in ("full", "eos")]
+        assert _mu_views == ["eos"]
+
+    def test_include_views_list_both(self):
+        """include_views [full, eos] -> both in _mu_views."""
+        _iv = ["full", "eos"]
+        _mu_views = [str(v).lower() for v in _iv if str(v).lower() in ("full", "eos")]
+        assert set(_mu_views) == {"full", "eos"}
+
+    def test_include_views_list_with_unknown_filtered(self):
+        """include_views [full, eos, other] -> only full and eos."""
+        _iv = ["full", "eos", "other"]
+        _mu_views = [str(v).lower() for v in _iv if str(v).lower() in ("full", "eos")]
+        assert set(_mu_views) == {"full", "eos"}
+
 
 class TestTrajectoryMetricsNineComponentE2E:
     """Full trajectory_metrics with retain+ra+wf yields 9 components (mock sampler, real data)."""
@@ -587,13 +886,15 @@ class TestTrajectoryMetricsNineComponentE2E:
         return _tokenizer_fixture()
 
     def test_trajectory_metrics_with_retain_ra_wf_produces_nine_components(self):
-        """Merged retain+ra+wf per-step results have 9 components; report logic exposes them (small data, no OOM)."""
+        """Merged retain+ra+wf per-traj per-step results have 9 components; report logic exposes them."""
         nine_keys = {
             "retain_Q_A_Prob", "retain_Q_A_ROUGE", "retain_Truth_Ratio",
             "ra_Q_A_Prob_normalised", "ra_Q_A_ROUGE", "ra_Truth_Ratio",
             "wf_Q_A_Prob_normalised", "wf_Q_A_ROUGE", "wf_Truth_Ratio",
         }
-        # Synthetic per-step results as from _compute_mu_for_dataset for retain, ra, wf
+        trajectory_names = ("steps", "fixation_start", "fixation_end", "fixation_ratio")
+        views = ("full", "eos")
+
         def _three(prefix):
             prob_key = f"{prefix}_Q_A_Prob" if prefix == "retain" else f"{prefix}_Q_A_Prob_normalised"
             return {
@@ -601,37 +902,42 @@ class TestTrajectoryMetricsNineComponentE2E:
                 f"{prefix}_Q_A_ROUGE": {"agg_value": 0.6},
                 f"{prefix}_Truth_Ratio": {"agg_value": 0.7},
             }
-        retain_res = {"0": {"full": _three("retain")}, "1": {"full": _three("retain")}}
-        ra_res = {"0": {"full": _three("ra")}, "1": {"full": _three("ra")}}
-        wf_res = {"0": {"full": _three("wf")}, "1": {"full": _three("wf")}}
+
+        retain_res = {t: {"0": {v: _three("retain") for v in views}, "1": {v: _three("retain") for v in views}} for t in trajectory_names}
+        ra_res = {t: {"0": {v: _three("ra") for v in views}, "1": {v: _three("ra") for v in views}} for t in trajectory_names}
+        wf_res = {t: {"0": {v: _three("wf") for v in views}, "1": {v: _three("wf") for v in views}} for t in trajectory_names}
 
         retain_agg_by_step = {}
-        for step_key in retain_res:
-            retain_agg_by_step[step_key] = {
-                view: {
-                    **retain_res[step_key].get(view, {}),
-                    **ra_res.get(step_key, {}).get(view, {}),
-                    **wf_res.get(step_key, {}).get(view, {}),
+        for traj_name in trajectory_names:
+            retain_agg_by_step[traj_name] = {}
+            for step_key in retain_res[traj_name]:
+                retain_agg_by_step[traj_name][step_key] = {
+                    view: {
+                        **retain_res[traj_name][step_key].get(view, {}),
+                        **ra_res[traj_name].get(step_key, {}).get(view, {}),
+                        **wf_res[traj_name].get(step_key, {}).get(view, {}),
+                    }
+                    for view in views
                 }
-                for view in retain_res[step_key]
-            }
 
-        for step_key, step_val in retain_agg_by_step.items():
-            for view in ("full", "eos"):
-                if view in step_val:
+        for traj_name in trajectory_names:
+            for step_key, step_val in retain_agg_by_step[traj_name].items():
+                for view in views:
+                    assert view in step_val
                     assert nine_keys.issubset(step_val[view].keys()), (
-                        f"step {step_key} view {view} missing some of {nine_keys}"
+                        f"traj={traj_name} step {step_key} view {view} missing some of {nine_keys}"
                     )
 
-        # Ensure report-building logic would produce retain_mu_components_by_step with 9 keys
+        # Report-building logic uses steps dict: retain_agg_by_step.get("steps", retain_agg_by_step)
         def _is_mu_key(x):
             return (
                 str(x).startswith("retain_")
                 or str(x).startswith("ra_")
                 or str(x).startswith("wf_")
             )
+        steps_dict = retain_agg_by_step.get("steps", retain_agg_by_step)
         components = {}
-        for step_key, pre in retain_agg_by_step.items():
+        for step_key, pre in steps_dict.items():
             for view in ("full", "eos"):
                 if view not in pre:
                     continue

@@ -279,12 +279,12 @@ def truth_ratio(model, **kwargs):
             n_total,
         )
     if not filtered_indices:
+        # Match upstream: return NaN when no valid indices (no fallback value).
         # Trajectory eval: some steps/samples can have no valid probability (e.g. all-ignore, empty).
-        # Return None result so ks_test and downstream can continue instead of failing the batch.
         logger.warning(
-            "truth_ratio: no valid pre_compute (correct/wrong avg_loss) for any index; returning agg_value=None."
+            "truth_ratio: no valid pre_compute (correct/wrong avg_loss) for any index; returning agg_value=nan."
         )
-        return {"agg_value": None, "value_by_index": {}}
+        return {"agg_value": float(np.nan), "value_by_index": {}}
 
     correct_avg_losses = [
         correct_answer_results[idx]["avg_loss"] for idx in filtered_indices

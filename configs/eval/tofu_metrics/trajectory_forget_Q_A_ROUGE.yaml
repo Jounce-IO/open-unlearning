@@ -1,5 +1,10 @@
 # @package eval.tofu_trajectory.metrics.trajectory_forget_Q_A_ROUGE
 # Trajectory-wrapped forget_Q_A_ROUGE - same metric/dataset as regular, computed at each diffusion step
+#
+# max_new_tokens: 200 — aligned with upstream (default generation + forget ROUGE).
+# Upstream references:
+#   - https://github.com/locuslab/open-unlearning/blob/main/configs/generation/default.yaml
+#   - https://github.com/locuslab/open-unlearning/blob/main/configs/eval/tofu_metrics/forget_Q_A_ROUGE.yaml
 
 defaults:
   - ../../data/datasets@datasets: TOFU_QA_forget
@@ -17,7 +22,7 @@ trajectory_config:
   sampler_kwargs:
     steps: 16
     temperature: 0.0
-    max_new_tokens: 32
+    max_new_tokens: 200
 
 datasets:
   TOFU_QA_forget:
@@ -36,4 +41,4 @@ collators:
     args:
       padding_side: left
 generation_args:
-  max_new_tokens: 32
+  max_new_tokens: 200

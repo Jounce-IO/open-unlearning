@@ -79,7 +79,17 @@ metric_display_names:
   - trajectory_model_utility
   - trajectory_privleak
 
-# steps/max_new_tokens match locuslab/open-unlearning: https://github.com/locuslab/open-unlearning/blob/main/configs/generation/default.yaml
+# max_new_tokens: 200 — matches upstream TOFU generation default.
+# Upstream:
+#   - https://github.com/locuslab/open-unlearning/blob/main/configs/generation/default.yaml
+# Sub-metric configs (non-trajectory) for parity reference:
+#   - https://github.com/locuslab/open-unlearning/blob/main/configs/eval/tofu_metrics/forget_Q_A_Prob.yaml
+#   - https://github.com/locuslab/open-unlearning/blob/main/configs/eval/tofu_metrics/forget_Q_A_ROUGE.yaml
+#   - https://github.com/locuslab/open-unlearning/blob/main/configs/eval/tofu_metrics/extraction_strength.yaml
+#   - https://github.com/locuslab/open-unlearning/blob/main/configs/eval/tofu_metrics/forget_Truth_Ratio.yaml
+#   - https://github.com/locuslab/open-unlearning/blob/main/configs/eval/tofu_metrics/forget_quality.yaml
+#   - https://github.com/locuslab/open-unlearning/blob/main/configs/eval/tofu_metrics/model_utility.yaml
+#   - https://github.com/locuslab/open-unlearning/blob/main/configs/eval/tofu_metrics/privleak.yaml
 trajectory_config:
   # Sampler evaluation mode: unguided (no target), guided_native (same F, token=target), guided_skew (F by p(a_ell), token=target).
   evaluation_mode: unguided

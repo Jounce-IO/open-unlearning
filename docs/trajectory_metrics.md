@@ -420,6 +420,7 @@ R = R_full[:, max_prompt_len:max_prompt_len + generated_len, :]  # [V, L, S]
 ```
 
 Similarly for fixation steps and labels:
+
 ```python
 # Extract fixation steps for generated region
 F = fixation_steps[0][max_prompt_len:max_prompt_len + L]  # [L]
@@ -433,6 +434,10 @@ generated_input_ids = sample_input_ids[generation_start : generation_start + L] 
 ```
 
 With left-padded batches, using `prompt_lens[sample_idx]` alone as the slice start is **wrong** when `prompt_starts[sample_idx] > 0`: that index is in sequence-from-sampler space, not in batch labels space. Always use **generation_start** (content start + prompt length for full-convo, or content start for IGNORE-for-prompt) when slicing `labels` or aligned `input_ids`.
+
+### Text-based (ROUGE) path and logits shape
+
+The trajectory text-based handler (used for ROUGE in the 9-metric MU path) expects logits in **`[1, L, V]`** or **`[L, V]`** (sequence length L, vocab size V last). Callers must not pass `[V, L]`; the handler does not transpose. `_call_metric_at_step` normalizes 2D `[V, L]` from `_get_logits_at_step` to `[1, L, V]` before calling the metric or the generic text-based fallback. When the direct metric call fails and the fallback is used, logits are passed through as `[1, L, V]` (no transpose). At DEBUG log level, the handler logs short prompt/gen/gt snippets for the first and last step and a few samples per dataset to aid debugging.
 
 #### Label conventions and generation start
 
@@ -598,6 +603,27 @@ The number of trajectory steps **S** in a run is the length of `logits_history` 
 - Inferred ranges (with `trajectory_sample_interval=8`): **S=22** ⇒ effective generation length in (168, 176] tokens; **S=24** ⇒ (184, 192]; **S=25** ⇒ (192, 200].
 
 **Reference compatibility:** Step-matched metrics (e.g. `trajectory_privleak`, `trajectory_forget_quality`) look up the reference by step index. If the consuming run has more steps than the reference (e.g. 24 vs 22), the loader raises `RetainReferenceValidationError` for the missing steps. Use the same `trajectory_config.sampler_kwargs` (especially `max_new_tokens` and `trajectory_sample_interval`) when producing and consuming reference logs so that S matches.
+
+**Upstream-aligned `max_new_tokens`:** Each trajectory metric YAML under [`configs/eval/tofu_metrics/`](https://github.com/locuslab/open-unlearning/tree/main/configs/eval/tofu_metrics) and [`configs/eval/muse_metrics/`](https://github.com/locuslab/open-unlearning/tree/main/configs/eval/muse_metrics) includes comments linking to the matching [locuslab/open-unlearning](https://github.com/locuslab/open-unlearning) configs (e.g. TOFU **200** from [`configs/generation/default.yaml`](https://github.com/locuslab/open-unlearning/blob/main/configs/generation/default.yaml); MUSE knowmem ROUGE **32** vs verbmem **128**). Prefer those defaults when comparing to non-trajectory upstream runs.
+
+### Validating all metrics ran (DEBUG logs)
+
+With **`LOGLEVEL=DEBUG`**, trajectory aggregation emits one line per **view × trajectory type × metric**:
+
+- `TRAJECTORY_METRIC_COVERAGE view=full|eos traj=steps|fixation_* metric=... array_len=N finite_values=M`
+- **`array_len`**: number of trajectory steps in the aggregated series (should match across metrics for the same view×traj).
+- **`finite_values`**: how many steps have a non-NaN aggregate (should be `> 0` if the metric ran).
+- **`TRAJECTORY_MU_SUBMETRIC_COVERAGE`**: when **`hm_aggregate`** runs, first/last step list **retain MU** sub-keys (e.g. `retain_Q_A_Prob`, `retain_Q_A_ROUGE`, `retain_Truth_Ratio`) per view.
+- **`TRAJECTORY_STEP_META`**: `num_trajectory_steps` vs **probability** series length on **`steps`** traj (should show `lengths_match=True`).
+
+**Check pod logs after a run:**
+
+```bash
+kubectl logs job/<release-name> -n <namespace> 2>&1 | \
+  uv run python open-unlearning/scripts/validate_trajectory_metric_coverage_from_log.py
+```
+
+Override expected metrics/views/trajs if you used a subset (see `--help`). Add **`--require-mu`** to assert **hm_aggregate** retain sub-metrics were logged. Exit code **0** = all expected combinations present with data; **1** = missing/length mismatch; **2** = no coverage lines (DEBUG not enabled).
 
 **Note on `retain_mu_components_by_step`:** This field is built from a separate pass over the **retain** dataloader. The retain pass can yield a different S than the forget pass (e.g. 24 vs 22) if the first batch of each has different effective lengths or capture schedules. The canonical reference step count for compatibility is the one from `mia_min_k_by_step` / `forget_truth_ratio_by_step` (forget pass).
 
