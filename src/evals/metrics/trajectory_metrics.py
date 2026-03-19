@@ -2230,12 +2230,11 @@ def _call_metric_at_step(
                             "retain_agg_by_step stores per-view aggregates (no default)."
                         )
                     _inner = pre_compute_step.get(view)
-                    if not isinstance(_inner, dict) or not any(_is_mu_component_key(k) for k in _inner):
-                        raise ValueError(
-                            f"hm_aggregate: missing MU aggregate for view {view!r} "
-                            f"at step_index={step_index}"
-                        )
-                    metric_kwargs["pre_compute"] = _inner
+                    if isinstance(_inner, dict) and any(_is_mu_component_key(k) for k in _inner):
+                        metric_kwargs["pre_compute"] = _inner
+                    else:
+                        # Empty or no MU keys for this view/step: pass no pre_compute so hm_aggregate returns None
+                        metric_kwargs["pre_compute"] = {}
                 else:
                     metric_kwargs["pre_compute"] = pre_compute_step
 
@@ -3654,10 +3653,11 @@ def trajectory_metrics(model, **kwargs):
                                     from evals.metrics.base import RetainReferenceValidationError
                                     if isinstance(e, RetainReferenceValidationError):
                                         raise
-                                    logger.warning(
+                                    logger.error(
                                         f"Error computing {metric_name} at step {step} for {traj_name}: {e}",
                                         exc_info=True
                                     )
+                                    raise
                             # Release per-step tensors so baseline memory does not grow across steps (fixes GPU leak).
                             try:
                                 del batch_template_eos, logits

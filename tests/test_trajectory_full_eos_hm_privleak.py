@@ -1,6 +1,12 @@
 """Full vs eos trajectory semantics for hm_aggregate retain MU and privleak streaming."""
 
+import sys
+from pathlib import Path
+
 import torch
+
+_REPO_ROOT = Path(__file__).resolve().parent.parent
+sys.path.insert(0, str(_REPO_ROOT / "src"))
 
 from evals.metrics import METRICS_REGISTRY
 from evals.metrics.mia.min_k import MinKProbAttack
@@ -283,6 +289,99 @@ def test_hm_aggregate_returns_none_when_any_component_is_none():
         metric,
         logits,
         batch_t,
+        metric_config={},
+        sample_idx="0",
+        step_index=0,
+        retain_agg_by_step=retain_agg,
+        trajectory_view="full",
+    )
+    assert r["agg_value"] is None
+
+
+def test_hm_aggregate_empty_view_dict_returns_none_not_value_error():
+    """Reproduces bug: step has nested views but one view has empty dict (no MU keys). Must return agg_value=None, not raise ValueError."""
+    metric = METRICS_REGISTRY["hm_aggregate"]
+    # Step 13: "full" is empty (no samples contributed), "eos" has valid MU components
+    retain_agg = {
+        "13": {
+            "full": {},  # empty -> no MU keys
+            "eos": {
+                "retain_Q_A_Prob": {"agg_value": 0.5},
+                "retain_Q_A_ROUGE": {"agg_value": 0.5},
+                "retain_Truth_Ratio": {"agg_value": 0.5},
+            },
+        }
+    }
+    logits = torch.zeros(1, 2, 8)
+    batch_t = {
+        "input_ids": torch.zeros(1, 2, dtype=torch.long),
+        "attention_mask": torch.ones(1, 2, dtype=torch.long),
+        "index": torch.tensor([0]),
+    }
+    r = _call_metric_at_step(
+        metric=metric,
+        logits=logits,
+        batch_template=batch_t,
+        tokenizer=None,
+        metric_config={},
+        sample_idx="0",
+        step_index=13,
+        retain_agg_by_step=retain_agg,
+        trajectory_view="full",
+    )
+    assert r["agg_value"] is None
+
+
+def test_hm_aggregate_per_traj_empty_full_view_returns_none():
+    """Per-traj structure: one trajectory type has step with empty 'full' view; must return None for that view."""
+    metric = METRICS_REGISTRY["hm_aggregate"]
+    retain_agg = {
+        "steps": {"0": {"full": {"retain_Q_A_Prob": {"agg_value": 0.5}}, "eos": {"retain_Q_A_Prob": {"agg_value": 0.5}}}},
+        "fixation_start": {
+            "0": {"full": {}, "eos": {"retain_Q_A_Prob": {"agg_value": 0.5}}},
+        },
+    }
+    logits = torch.zeros(1, 2, 8)
+    batch_t = {
+        "input_ids": torch.zeros(1, 2, dtype=torch.long),
+        "attention_mask": torch.ones(1, 2, dtype=torch.long),
+        "index": torch.tensor([0]),
+    }
+    r = _call_metric_at_step(
+        metric=metric,
+        logits=logits,
+        batch_template=batch_t,
+        tokenizer=None,
+        metric_config={},
+        sample_idx="0",
+        step_index=0,
+        retain_agg_by_step=retain_agg,
+        traj_name="fixation_start",
+        trajectory_view="full",
+    )
+    assert r["agg_value"] is None
+
+
+def test_hm_aggregate_view_dict_with_non_mu_keys_returns_none():
+    """View dict exists but has no MU component keys (e.g. only 'other'); must return None, not raise."""
+    metric = METRICS_REGISTRY["hm_aggregate"]
+    retain_agg = {
+        "0": {
+            "full": {"other_key": 1},
+            "eos": {"retain_Q_A_Prob": {"agg_value": 0.5}, "retain_Q_A_ROUGE": {"agg_value": 0.5}},
+        },
+    }
+    logits = torch.zeros(1, 2, 8)
+    batch_t = {
+        "input_ids": torch.zeros(1, 2, dtype=torch.long),
+        "attention_mask": torch.ones(1, 2, dtype=torch.long),
+        "index": torch.tensor([0]),
+    }
+    r = _call_metric_at_step(
+        metric=metric,
+        logits=logits,
+        batch_template=batch_t,
+        tokenizer=None,
         metric_config={},
         sample_idx="0",
         step_index=0,
