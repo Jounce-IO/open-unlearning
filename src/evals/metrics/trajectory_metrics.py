@@ -822,6 +822,11 @@ def _compute_retain_mu_by_step(
     _mu_views = [str(v).lower() for v in _iv if str(v).lower() in ("full", "eos")]
     if not _mu_views:
         _mu_views = ["full", "eos"]
+    if logger.isEnabledFor(logging.DEBUG):
+        logger.debug(
+            "[MU retain path] resolved _mu_views=%s (from trajectory_config.include_views)",
+            _mu_views,
+        )
 
     def _empty_mu_pl() -> Dict[str, Dict[str, List[Any]]]:
         return {v: {"prob": [], "rouge": [], "tr": []} for v in _mu_views}
@@ -1208,6 +1213,12 @@ def _compute_mu_for_dataset(
     _mu_views = [str(v).lower() for v in _iv if str(v).lower() in ("full", "eos")]
     if not _mu_views:
         _mu_views = ["full", "eos"]
+    if logger.isEnabledFor(logging.DEBUG):
+        logger.debug(
+            "[MU %s] resolved _mu_views=%s (dataset MU pre-compute; must match main trajectory include_views)",
+            dataset_key,
+            _mu_views,
+        )
 
     def _empty_pl():
         return {"prob": [], "prob_wrong": [], "rouge": [], "tr": []}
@@ -1414,63 +1425,111 @@ def _compute_mu_for_dataset(
                         bt = batch_template if view_name == "full" else batch_template_eos
                         lg = logits if view_name == "full" else logits_eos
                         pl = per_step_lists[traj_name][step_idx][view_name]
-                    try:
-                        if has_dual:
-                            labels_correct_slice = bt.get("labels_correct")
-                            labels_wrong_slice = bt.get("labels_wrong")
-                            if isinstance(labels_wrong_slice, list):
-                                labels_wrong_slice = labels_wrong_slice[0] if labels_wrong_slice else None
-                            if labels_wrong_slice is not None and labels_correct_slice is not None:
-                                bt_correct = dict(bt)
-                                bt_correct["labels"] = (
-                                    labels_correct_slice
-                                    if not isinstance(labels_correct_slice, list)
-                                    else labels_correct_slice[0]
-                                )
-                                bt_wrong = dict(bt)
-                                bt_wrong["labels"] = labels_wrong_slice.unsqueeze(0) if labels_wrong_slice.dim() == 1 else labels_wrong_slice
-                                pc = _run_prob(bt_correct, lg, view_name)
-                                pw = _run_prob(bt_wrong, lg, view_name)
-                                if pc is not None and pw is not None:
-                                    norm = pc / (pc + pw + 1e-10)
-                                    # TR: TOFU definition = wrong/correct; non-trajectory uses true_better → mean(1 - TR).
-                                    tr_ratio = pw / (pc + 1e-10)
-                                    pl["tr"].append(tr_ratio)
-                                    if use_normalised_prob:
-                                        pl["prob"].append(norm)
-                                    else:
+                        if logger.isEnabledFor(logging.DEBUG) and (
+                            batch_idx == 0 and sample_idx == 0 and step_idx == 0
+                        ):
+                            logger.debug(
+                                "[MU %s] view_loop traj=%s step_idx=%s diffusion_step=%s view=%s "
+                                "logits_shape=%s L_eff_slice=%s pl_id=%s",
+                                dataset_key,
+                                traj_name,
+                                step_idx,
+                                step,
+                                view_name,
+                                tuple(lg.shape),
+                                L_eff_slice,
+                                id(pl),
+                            )
+                        try:
+                            if has_dual:
+                                labels_correct_slice = bt.get("labels_correct")
+                                labels_wrong_slice = bt.get("labels_wrong")
+                                if isinstance(labels_wrong_slice, list):
+                                    labels_wrong_slice = labels_wrong_slice[0] if labels_wrong_slice else None
+                                if labels_wrong_slice is not None and labels_correct_slice is not None:
+                                    bt_correct = dict(bt)
+                                    bt_correct["labels"] = (
+                                        labels_correct_slice
+                                        if not isinstance(labels_correct_slice, list)
+                                        else labels_correct_slice[0]
+                                    )
+                                    bt_wrong = dict(bt)
+                                    bt_wrong["labels"] = labels_wrong_slice.unsqueeze(0) if labels_wrong_slice.dim() == 1 else labels_wrong_slice
+                                    pc = _run_prob(bt_correct, lg, view_name)
+                                    pw = _run_prob(bt_wrong, lg, view_name)
+                                    if pc is not None and pw is not None:
+                                        norm = pc / (pc + pw + 1e-10)
+                                        # TR: TOFU definition = wrong/correct; non-trajectory uses true_better → mean(1 - TR).
+                                        tr_ratio = pw / (pc + 1e-10)
+                                        pl["tr"].append(tr_ratio)
+                                        if use_normalised_prob:
+                                            pl["prob"].append(norm)
+                                        else:
+                                            pl["prob"].append(pc)
+                                    elif pc is not None and not use_normalised_prob:
                                         pl["prob"].append(pc)
-                                elif pc is not None and not use_normalised_prob:
-                                    pl["prob"].append(pc)
+                                else:
+                                    pc = _run_prob(bt, lg, view_name)
+                                    if pc is not None:
+                                        pl["prob"].append(pc)
+                                        # Only append to pl["tr"] when we have a ratio; with dual but missing wrong, skip TR for this sample.
+                                        if not has_dual:
+                                            pl["tr"].append(pc)
                             else:
                                 pc = _run_prob(bt, lg, view_name)
                                 if pc is not None:
                                     pl["prob"].append(pc)
-                                    # Only append to pl["tr"] when we have a ratio; with dual but missing wrong, skip TR for this sample.
-                                    if not has_dual:
-                                        pl["tr"].append(pc)
-                        else:
-                            pc = _run_prob(bt, lg, view_name)
-                            if pc is not None:
-                                pl["prob"].append(pc)
-                                pl["tr"].append(pc)
-                        rv = _run_rouge(bt, lg, view_name)
-                        if rv is not None:
-                            pl["rouge"].append(rv)
-                    except Exception as e:
-                        if logger.isEnabledFor(logging.DEBUG):
-                            logger.debug(
-                                "MU %s %s step %s sample %s: %s",
-                                dataset_key,
-                                view_name,
-                                step,
-                                sample_idx,
-                                e,
-                            )
+                                    pl["tr"].append(pc)
+                            rv = _run_rouge(bt, lg, view_name)
+                            if rv is not None:
+                                pl["rouge"].append(rv)
+                            if logger.isEnabledFor(logging.DEBUG) and (
+                                batch_idx == 0 and sample_idx == 0 and step_idx == 0
+                            ):
+                                logger.debug(
+                                    "[MU %s] after_append traj=%s view=%s pl_lens prob=%s rouge=%s tr=%s",
+                                    dataset_key,
+                                    traj_name,
+                                    view_name,
+                                    len(pl["prob"]),
+                                    len(pl["rouge"]),
+                                    len(pl["tr"]),
+                                )
+                        except Exception as e:
+                            if logger.isEnabledFor(logging.DEBUG):
+                                logger.debug(
+                                    "[MU %s] metric_fail view=%s traj=%s diffusion_step=%s sample_idx=%s: %s",
+                                    dataset_key,
+                                    view_name,
+                                    traj_name,
+                                    step,
+                                    sample_idx,
+                                    e,
+                                )
 
         del R, F, out
         if torch.cuda.is_available():
             torch.cuda.empty_cache()
+
+    if logger.isEnabledFor(logging.DEBUG) and per_step_lists:
+        for _tn in trajectory_names:
+            _steps = per_step_lists.get(_tn) or {}
+            if not _steps:
+                logger.debug("[MU %s] pre_aggregate traj=%s: no steps in per_step_lists", dataset_key, _tn)
+                continue
+            _first_si = min(_steps.keys())
+            for _vn in _mu_views:
+                _pl = _steps[_first_si][_vn]
+                logger.debug(
+                    "[MU %s] pre_aggregate traj=%s step_idx=%s view=%s n_prob=%s n_rouge=%s n_tr=%s",
+                    dataset_key,
+                    _tn,
+                    _first_si,
+                    _vn,
+                    len(_pl["prob"]),
+                    len(_pl["rouge"]),
+                    len(_pl["tr"]),
+                )
 
     for traj_name in trajectory_names:
         result_by_step[traj_name] = {}
@@ -1497,6 +1556,23 @@ def _compute_mu_for_dataset(
                     step_entry[view] = pre
             if step_entry:
                 result_by_step[traj_name][str(step_idx)] = step_entry
+
+    if logger.isEnabledFor(logging.DEBUG):
+        for _tn in trajectory_names:
+            _rs = result_by_step.get(_tn) or {}
+            if not _rs:
+                logger.debug("[MU %s] post_aggregate traj=%s: empty result", dataset_key, _tn)
+                continue
+            _sk0 = min(_rs.keys(), key=lambda x: int(x))
+            _ent = _rs[_sk0]
+            logger.debug(
+                "[MU %s] post_aggregate traj=%s first_step_key=%s views=%s keys_per_view=%s",
+                dataset_key,
+                _tn,
+                _sk0,
+                list(_ent.keys()),
+                {v: sorted(_ent[v].keys()) for v in _ent if isinstance(_ent.get(v), dict)},
+            )
 
     n_steps = len(next(iter(result_by_step.values()), {})) if result_by_step else 0
     logger.info(
