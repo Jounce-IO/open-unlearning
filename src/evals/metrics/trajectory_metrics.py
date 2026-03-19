@@ -1074,22 +1074,47 @@ EXPECTED_9_MU_KEYS = frozenset(
 
 
 def _validate_merged_9_mu(retain_agg_by_step: dict) -> None:
-    """Raise ValueError if any step/view does not have exactly EXPECTED_9_MU_KEYS (for 9-metric path)."""
+    """Raise ValueError if any step/view does not have exactly EXPECTED_9_MU_KEYS (for 9-metric path).
+    Supports both flat {step_key: {view: {...}}} and per-traj {traj_name: {step_key: {view: {...}}}}.
+    """
     if not retain_agg_by_step:
         return
-    first_step = next(iter(retain_agg_by_step.values()))
-    for view in ("full", "eos"):
-        if view not in first_step:
-            continue
-        keys = set(first_step[view].keys())
-        if keys != EXPECTED_9_MU_KEYS:
-            missing = EXPECTED_9_MU_KEYS - keys
-            extra = keys - EXPECTED_9_MU_KEYS
-            raise ValueError(
-                "Trajectory MU 9-metric merge failed: expected exactly "
-                f"{EXPECTED_9_MU_KEYS!r}, got keys {keys!r}; "
-                f"missing={missing!r} extra={extra!r}"
-            )
+    _traj_names = ("steps", "fixation_start", "fixation_end", "fixation_ratio")
+    first_key = next(iter(retain_agg_by_step.keys()))
+    if first_key in _traj_names and isinstance(retain_agg_by_step[first_key], dict):
+        # Per-traj: validate each trajectory's step dict
+        for traj_name in retain_agg_by_step:
+            step_dict = retain_agg_by_step[traj_name]
+            if not step_dict:
+                continue
+            first_step = next(iter(step_dict.values()))
+            for view in ("full", "eos"):
+                if view not in first_step:
+                    continue
+                keys = set(first_step[view].keys())
+                if keys != EXPECTED_9_MU_KEYS:
+                    missing = EXPECTED_9_MU_KEYS - keys
+                    extra = keys - EXPECTED_9_MU_KEYS
+                    raise ValueError(
+                        "Trajectory MU 9-metric merge failed: expected exactly "
+                        f"{EXPECTED_9_MU_KEYS!r}, got keys {keys!r} for traj_name={traj_name!r} view={view!r}; "
+                        f"missing={missing!r} extra={extra!r}"
+                    )
+    else:
+        # Flat: original behavior
+        first_step = next(iter(retain_agg_by_step.values()))
+        for view in ("full", "eos"):
+            if view not in first_step:
+                continue
+            keys = set(first_step[view].keys())
+            if keys != EXPECTED_9_MU_KEYS:
+                missing = EXPECTED_9_MU_KEYS - keys
+                extra = keys - EXPECTED_9_MU_KEYS
+                raise ValueError(
+                    "Trajectory MU 9-metric merge failed: expected exactly "
+                    f"{EXPECTED_9_MU_KEYS!r}, got keys {keys!r}; "
+                    f"missing={missing!r} extra={extra!r}"
+                )
 
 
 def _compute_mu_for_dataset(
@@ -1106,10 +1131,10 @@ def _compute_mu_for_dataset(
     world_size: int,
     rank: int,
     **kwargs: Any,
-) -> Dict[str, Dict[str, Dict[str, Any]]]:
+) -> Dict[str, Dict[str, Dict[str, Dict[str, Any]]]]:
     """
-    Compute per-step, per-view aggregates for one MU dataset (retain, ra, or wf).
-    Returns {step_index: {view: {metric_key: {"agg_value": v}}}} with 3 keys per dataset.
+    Compute per-step, per-view aggregates for one MU dataset (retain, ra, or wf) for all trajectory types.
+    Returns {traj_name: {step_index: {view: {metric_key: {"agg_value": v}}}}} with 3 keys per dataset.
     For retain: retain_Q_A_Prob, retain_Q_A_ROUGE, retain_Truth_Ratio.
     For ra/wf: *_Q_A_Prob_normalised, *_Q_A_ROUGE, *_Truth_Ratio.
     Probability: retain = raw P(correct); ra/wf = normalised correct/(correct+wrong+1e-10).
@@ -1117,11 +1142,15 @@ def _compute_mu_for_dataset(
     """
     from evals.gpu_phase_logger import set_phase as gpu_set_phase
 
+    trajectory_names = (
+        list(trajectory_config.get("trajectory_names", ["steps", "fixation_start", "fixation_end", "fixation_ratio"]))
+        if trajectory_config
+        else ["steps"]
+    )
     key_prob, key_rouge, key_tr = _MU_DATASET_KEYS[dataset_key]
     use_normalised_prob = dataset_key in ("ra", "wf")
-    result_by_step = {}
+    result_by_step: Dict[str, Dict[str, Dict[str, Dict[str, Any]]]] = {}
     run_steps_to_use = None
-    traj_name = "steps"
     mu_sub_metrics = ("probability", "rouge", "truth_ratio")
     metric_objs = {}
     for name in mu_sub_metrics:
@@ -1179,9 +1208,12 @@ def _compute_mu_for_dataset(
     def _empty_pl():
         return {"prob": [], "prob_wrong": [], "rouge": [], "tr": []}
 
-    per_step_lists: Dict[int, Dict[str, Dict[str, List[Any]]]] = defaultdict(
-        lambda: {v: _empty_pl() for v in _mu_views}
-    )
+    def _empty_step_view():
+        return {v: _empty_pl() for v in _mu_views}
+
+    per_step_lists: Dict[str, Dict[int, Dict[str, Dict[str, List[Any]]]]] = {
+        t: defaultdict(_empty_step_view) for t in trajectory_names
+    }
     n_batches = len(dataloader)
     log_interval = max(1, n_batches // 10) if n_batches else 1
     logger.info(
@@ -1316,20 +1348,6 @@ def _compute_mu_for_dataset(
             }
 
             for step_idx, step in enumerate(steps_to_use):
-                logits = _get_logits_at_step(sample_traj, traj_name, step)
-                if logits.dim() == 2:
-                    logits = logits.transpose(0, 1).unsqueeze(0)
-                L_eff_slice = min(int(L_eff_b), L)
-                logits_eos = (
-                    logits[:, :L_eff_slice]
-                    if L_eff_slice < logits.shape[1]
-                    else logits
-                )
-                batch_template_eos = (
-                    _slice_batch_template_to_length(batch_template, L_eff_slice)
-                    if L_eff_slice < L
-                    else batch_template
-                )
                 prob_obj = metric_objs.get("probability")
                 rouge_obj = metric_objs.get("rouge")
                 cfg_prob = metric_objs.get("probability_config") or {}
@@ -1373,10 +1391,25 @@ def _compute_mu_for_dataset(
                     )
                     return _extract_metric_scalar(res)
 
-                for view_name in _mu_views:
-                    bt = batch_template if view_name == "full" else batch_template_eos
-                    lg = logits if view_name == "full" else logits_eos
-                    pl = per_step_lists[step_idx][view_name]
+                for traj_name in trajectory_names:
+                    logits = _get_logits_at_step(sample_traj, traj_name, step)
+                    if logits.dim() == 2:
+                        logits = logits.transpose(0, 1).unsqueeze(0)
+                    L_eff_slice = min(int(L_eff_b), L)
+                    logits_eos = (
+                        logits[:, :L_eff_slice]
+                        if L_eff_slice < logits.shape[1]
+                        else logits
+                    )
+                    batch_template_eos = (
+                        _slice_batch_template_to_length(batch_template, L_eff_slice)
+                        if L_eff_slice < L
+                        else batch_template
+                    )
+                    for view_name in _mu_views:
+                        bt = batch_template if view_name == "full" else batch_template_eos
+                        lg = logits if view_name == "full" else logits_eos
+                        pl = per_step_lists[traj_name][step_idx][view_name]
                     try:
                         if has_dual:
                             labels_correct_slice = bt.get("labels_correct")
@@ -1435,35 +1468,39 @@ def _compute_mu_for_dataset(
         if torch.cuda.is_available():
             torch.cuda.empty_cache()
 
-    for step_idx in sorted(per_step_lists.keys()):
-        step_entry = {}
-        for view in _mu_views:
-            pl = per_step_lists[step_idx][view]
-            agg_prob = float(np.mean(pl["prob"])) if pl["prob"] else None
-            agg_rouge = float(np.mean(pl["rouge"])) if pl["rouge"] else None
-            # TR: TOFU uses ratio wrong/correct; retain/ra/wf configs use aggregator true_better → mean(max(0, 1 - tr)).
-            agg_tr = (
-                float(np.mean(np.maximum(0, 1 - np.array(pl["tr"], dtype=np.float64))))
-                if pl["tr"]
-                else None
-            )
-            pre = {}
-            if agg_prob is not None:
-                pre[key_prob] = {"agg_value": agg_prob}
-            if agg_rouge is not None:
-                pre[key_rouge] = {"agg_value": agg_rouge}
-            if agg_tr is not None:
-                pre[key_tr] = {"agg_value": agg_tr}
-            if pre:
-                step_entry[view] = pre
-        if step_entry:
-            result_by_step[str(step_idx)] = step_entry
+    for traj_name in trajectory_names:
+        result_by_step[traj_name] = {}
+        for step_idx in sorted(per_step_lists[traj_name].keys()):
+            step_entry = {}
+            for view in _mu_views:
+                pl = per_step_lists[traj_name][step_idx][view]
+                agg_prob = float(np.mean(pl["prob"])) if pl["prob"] else None
+                agg_rouge = float(np.mean(pl["rouge"])) if pl["rouge"] else None
+                # TR: TOFU uses ratio wrong/correct; retain/ra/wf configs use aggregator true_better → mean(max(0, 1 - tr)).
+                agg_tr = (
+                    float(np.mean(np.maximum(0, 1 - np.array(pl["tr"], dtype=np.float64))))
+                    if pl["tr"]
+                    else None
+                )
+                pre = {}
+                if agg_prob is not None:
+                    pre[key_prob] = {"agg_value": agg_prob}
+                if agg_rouge is not None:
+                    pre[key_rouge] = {"agg_value": agg_rouge}
+                if agg_tr is not None:
+                    pre[key_tr] = {"agg_value": agg_tr}
+                if pre:
+                    step_entry[view] = pre
+            if step_entry:
+                result_by_step[traj_name][str(step_idx)] = step_entry
 
+    n_steps = len(next(iter(result_by_step.values()), {})) if result_by_step else 0
     logger.info(
-        "Trajectory MU: computed %s aggregates for dataset %s (%s steps)",
-        len(result_by_step),
+        "Trajectory MU: computed %s aggregates for dataset %s (%s trajectory types, %s steps)",
+        sum(len(v) for v in result_by_step.values()),
         dataset_key,
         len(result_by_step),
+        n_steps,
     )
     return result_by_step
 
@@ -2748,24 +2785,31 @@ def trajectory_metrics(model, **kwargs):
                     rank,
                     **_mu_kw,
                 )
-                for step_key in retain_res:
-                    merged = {}
-                    for view in retain_res[step_key]:
-                        merged[view] = {
-                            **retain_res[step_key][view],
-                            **ra_res.get(step_key, {}).get(view, {}),
-                            **wf_res.get(step_key, {}).get(view, {}),
-                        }
-                    retain_agg_by_step[step_key] = merged
+                for traj_name in retain_res:
+                    retain_agg_by_step[traj_name] = {}
+                    for step_key in retain_res[traj_name]:
+                        merged = {}
+                        for view in retain_res[traj_name][step_key]:
+                            merged[view] = {
+                                **retain_res[traj_name][step_key][view],
+                                **ra_res.get(traj_name, {}).get(step_key, {}).get(view, {}),
+                                **wf_res.get(traj_name, {}).get(step_key, {}).get(view, {}),
+                            }
+                        retain_agg_by_step[traj_name][step_key] = merged
                 _validate_merged_9_mu(retain_agg_by_step)
+                n_traj = len(retain_agg_by_step)
+                n_steps = len(next(iter(retain_agg_by_step.values()), {})) if retain_agg_by_step else 0
                 logger.info(
-                    "Trajectory MU: merged 9 components for %s steps (full and eos).",
-                    len(retain_agg_by_step),
+                    "Trajectory MU: merged 9 components for %s trajectory types, %s steps each (full and eos).",
+                    n_traj,
+                    n_steps,
                 )
-                # Log 9 values for one step/view as a sanity check (step 0, full).
+                # Log 9 values for one traj/step/view as a sanity check (steps, step 0, full).
                 if retain_agg_by_step:
-                    first_sk = next(iter(retain_agg_by_step.keys()))
-                    first_sv = retain_agg_by_step[first_sk]
+                    first_traj = next(iter(retain_agg_by_step.keys()))
+                    first_step_dict = retain_agg_by_step[first_traj]
+                    first_sk = next(iter(first_step_dict.keys()))
+                    first_sv = first_step_dict[first_sk]
                     if isinstance(first_sv, dict) and "full" in first_sv:
                         vals = {
                             k: v.get("agg_value")
@@ -2773,7 +2817,8 @@ def trajectory_metrics(model, **kwargs):
                             if isinstance(v, dict) and "agg_value" in v
                         }
                         logger.info(
-                            "Trajectory MU: 9 values (step %s, full) %s",
+                            "Trajectory MU: 9 values (traj=%s step %s, full) %s",
+                            first_traj,
                             first_sk,
                             vals,
                         )

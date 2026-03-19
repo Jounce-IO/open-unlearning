@@ -69,3 +69,49 @@ def test_hm_aggregate_two_components_expected_hmean():
     )
     assert r["agg_value"] is not None
     assert np.isclose(r["agg_value"], expected, rtol=1e-9)
+
+
+def test_hm_aggregate_merged_9_mu_expected_hmean_per_traj_view():
+    """Per-traj retain_agg_by_step: hm_aggregate yields expected hmean for each traj_name and view."""
+    import scipy.stats
+
+    from evals.metrics import METRICS_REGISTRY
+    from evals.metrics.trajectory_metrics import _call_metric_at_step
+    import torch
+
+    from evals.metrics.trajectory_metrics import EXPECTED_9_MU_KEYS
+
+    metric = METRICS_REGISTRY["hm_aggregate"]
+    trajectory_names = ("steps", "fixation_start", "fixation_end", "fixation_ratio")
+    values_9 = [0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8, 0.9]
+    pre = {k: {"agg_value": v} for k, v in zip(sorted(EXPECTED_9_MU_KEYS), values_9)}
+    expected_hmean = scipy.stats.hmean(values_9)
+
+    retain_agg_by_step = {}
+    for t in trajectory_names:
+        retain_agg_by_step[t] = {"0": {"full": pre, "eos": pre}}
+
+    logits = torch.zeros(1, 2, 8)
+    batch_t = {
+        "input_ids": torch.zeros(1, 2, dtype=torch.long),
+        "attention_mask": torch.ones(1, 2, dtype=torch.long),
+        "index": torch.tensor([0]),
+    }
+
+    for traj_name in trajectory_names:
+        for view in ("full", "eos"):
+            r = _call_metric_at_step(
+                metric,
+                logits,
+                batch_t,
+                metric_config={},
+                sample_idx="0",
+                step_index=0,
+                retain_agg_by_step=retain_agg_by_step,
+                trajectory_view=view,
+                traj_name=traj_name,
+            )
+            assert r["agg_value"] is not None
+            assert np.isclose(r["agg_value"], expected_hmean, rtol=1e-9), (
+                f"traj_name={traj_name} view={view}"
+            )
