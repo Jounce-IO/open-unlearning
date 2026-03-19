@@ -95,7 +95,9 @@ data:
 
 trainer:
   args:
-    warmup_epochs: 1.0
+    # Use warmup_ratio from trainer/finetune.yaml (same as dllm sft); epoch warmup would
+    # override via open-unlearning load_trainer_args and diverge from SFT schedules.
+    warmup_epochs: 0
     learning_rate: 1e-5
     weight_decay: 0.01
     num_train_epochs: 100
