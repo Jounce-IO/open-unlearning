@@ -51,7 +51,13 @@ metric_display_names:
   - trajectory_extraction_strength
   - trajectory_privleak
 
-# steps/max_new_tokens match locuslab/open-unlearning MUSE (e.g. forget_verbmem 128): https://github.com/locuslab/open-unlearning/tree/main/configs/eval/muse_metrics
+# max_new_tokens: 128 — single cap for coalesced run (verbmem / extraction_strength / privleak); knowmem ROUGE alone is 32 upstream.
+# Upstream references:
+#   - https://github.com/locuslab/open-unlearning/blob/main/configs/eval/muse_metrics/forget_knowmem_ROUGE.yaml
+#   - https://github.com/locuslab/open-unlearning/blob/main/configs/eval/muse_metrics/retain_knowmem_ROUGE.yaml
+#   - https://github.com/locuslab/open-unlearning/blob/main/configs/eval/muse_metrics/forget_verbmem_ROUGE.yaml
+#   - https://github.com/locuslab/open-unlearning/blob/main/configs/eval/muse_metrics/extraction_strength.yaml
+#   - https://github.com/locuslab/open-unlearning/blob/main/configs/eval/muse_metrics/privleak.yaml
 trajectory_config:
   logits_source: sampler
   return_logits: true

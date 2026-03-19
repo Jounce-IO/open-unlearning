@@ -2,6 +2,11 @@
 # Trajectory-wrapped model_utility - hm_aggregate of retain sub-metrics at each step
 # Uses retain-only sub-metrics (retain_Q_A_Prob, retain_Q_A_ROUGE, retain_Truth_Ratio)
 # Full 9-metric version requires multi-dataset trajectory support (ra_*, wf_* datasets)
+#
+# max_new_tokens (sampler): 200 — aligned with upstream TOFU generation default (retain ROUGE etc.).
+# Upstream references:
+#   - https://github.com/locuslab/open-unlearning/blob/main/configs/generation/default.yaml
+#   - https://github.com/locuslab/open-unlearning/blob/main/configs/eval/tofu_metrics/model_utility.yaml
 
 defaults:
   - .@pre_compute.retain_Q_A_Prob: retain_Q_A_Prob
@@ -22,7 +27,7 @@ trajectory_config:
   sampler_kwargs:
     steps: 16
     temperature: 0.0
-    max_new_tokens: 32
+    max_new_tokens: 200
 
 datasets:
   TOFU_QA_retain_eval:

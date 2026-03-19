@@ -12,10 +12,18 @@ from evals.metrics.base import unlearning_metric
 
 @unlearning_metric(name="hm_aggregate")
 def hm_aggregate(model, **kwargs):
+    """Harmonic mean of MU components. None is forbidden: if any component is None, return None (no silent drop)."""
     pre_compute = kwargs.get("pre_compute")
     if not pre_compute:
         return {"agg_value": None}
-    values = [result["agg_value"] for _, result in pre_compute.items() if isinstance(result, dict) and result.get("agg_value") is not None]
+    values = []
+    for _, result in pre_compute.items():
+        if not isinstance(result, dict):
+            continue
+        v = result.get("agg_value")
+        if v is None:
+            return {"agg_value": None}
+        values.append(v)
     if not values:
         return {"agg_value": None}
     return {"agg_value": sc.stats.hmean(values)}

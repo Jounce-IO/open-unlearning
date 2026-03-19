@@ -1,5 +1,8 @@
 # @package eval.muse_trajectory.metrics.trajectory_retain_knowmem_ROUGE
 # Trajectory-wrapped retain_knowmem_ROUGE - same metric/dataset as regular, computed at each diffusion step
+#
+# max_new_tokens: 32 — matches upstream retain knowmem ROUGE.
+# Upstream: https://github.com/locuslab/open-unlearning/blob/main/configs/eval/muse_metrics/retain_knowmem_ROUGE.yaml
 
 defaults:
   - ../../data/datasets@datasets: MUSE_retain_knowmem

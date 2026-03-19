@@ -79,7 +79,17 @@ metric_display_names:
   - trajectory_model_utility
   - trajectory_privleak
 
-# steps/max_new_tokens match locuslab/open-unlearning: https://github.com/locuslab/open-unlearning/blob/main/configs/generation/default.yaml
+# max_new_tokens: 200 — matches upstream TOFU generation default.
+# Upstream:
+#   - https://github.com/locuslab/open-unlearning/blob/main/configs/generation/default.yaml
+# Sub-metric configs (non-trajectory) for parity reference:
+#   - https://github.com/locuslab/open-unlearning/blob/main/configs/eval/tofu_metrics/forget_Q_A_Prob.yaml
+#   - https://github.com/locuslab/open-unlearning/blob/main/configs/eval/tofu_metrics/forget_Q_A_ROUGE.yaml
+#   - https://github.com/locuslab/open-unlearning/blob/main/configs/eval/tofu_metrics/extraction_strength.yaml
+#   - https://github.com/locuslab/open-unlearning/blob/main/configs/eval/tofu_metrics/forget_Truth_Ratio.yaml
+#   - https://github.com/locuslab/open-unlearning/blob/main/configs/eval/tofu_metrics/forget_quality.yaml
+#   - https://github.com/locuslab/open-unlearning/blob/main/configs/eval/tofu_metrics/model_utility.yaml
+#   - https://github.com/locuslab/open-unlearning/blob/main/configs/eval/tofu_metrics/privleak.yaml
 trajectory_config:
   # Sampler evaluation mode: unguided (no target), guided_native (same F, token=target), guided_skew (F by p(a_ell), token=target).
   evaluation_mode: unguided
@@ -126,19 +136,46 @@ datasets:
       question_key: ${eval.tofu_trajectory.question_key}
       answer_key: answer
       max_length: 512
-  # Retain set: used to compute trajectory_model_utility (hm_aggregate) per step from current model, not reference_logs
+  # Retain set: used to compute trajectory_model_utility (hm_aggregate) per step from current model, not reference_logs.
+  # Dual-answer so Truth Ratio uses correct vs wrong (paraphrased vs perturbed); required for full 9-metric MU.
   TOFU_QA_retain_eval:
     access_key: retain
-    handler: QADataset
+    handler: QAwithDualAnswersDataset
     args:
       hf_args:
         name: retain_perturbed
         split: train
         path: locuslab/TOFU
       question_key: ${eval.tofu_trajectory.question_key}
-      answer_key: answer
+      correct_answer_key: paraphrased_answer
+      wrong_answer_key: perturbed_answer
       max_length: 512
       predict_with_generate: true
+  # Real authors and world facts for full 9-metric trajectory MU (ra/wf × Prob, ROUGE, Truth Ratio).
+  TOFU_QA_ra_eval:
+    access_key: ra
+    handler: QAwithDualAnswersDataset
+    args:
+      hf_args:
+        name: real_authors_perturbed
+        split: train
+        path: locuslab/TOFU
+      question_key: ${eval.tofu_trajectory.question_key}
+      correct_answer_key: answer
+      wrong_answer_key: perturbed_answer
+      max_length: 512
+  TOFU_QA_wf_eval:
+    access_key: wf
+    handler: QAwithDualAnswersDataset
+    args:
+      hf_args:
+        name: world_facts_perturbed
+        split: train
+        path: locuslab/TOFU
+      question_key: ${eval.tofu_trajectory.question_key}
+      correct_answer_key: answer
+      wrong_answer_key: perturbed_answer
+      max_length: 512
 
 collators:
   DataCollatorForSupervisedDataset:

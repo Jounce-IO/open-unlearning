@@ -1,6 +1,11 @@
 # @package eval.tofu_trajectory.metrics.trajectory_privleak
 # Trajectory-wrapped privleak - mia_min_k at each step, compared to retain reference
 # Requires secondary dataset (holdout) support in trajectory_metrics
+#
+# max_new_tokens (sampler): 200 — aligned with upstream TOFU generation default.
+# Upstream references:
+#   - https://github.com/locuslab/open-unlearning/blob/main/configs/generation/default.yaml
+#   - https://github.com/locuslab/open-unlearning/blob/main/configs/eval/tofu_metrics/privleak.yaml
 
 defaults:
   - .@pre_compute.mia_min_k: mia_min_k
@@ -30,7 +35,7 @@ trajectory_config:
   sampler_kwargs:
     steps: 16
     temperature: 0.0
-    max_new_tokens: 32
+    max_new_tokens: 200
 
 ref_value: 0.5
 
