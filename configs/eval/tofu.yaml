@@ -28,5 +28,9 @@ overwrite: false
 forget_split: forget10
 holdout_split: holdout10
 retain_logs_path: null
-question_key: "question" # Specifies which key to use during forget and retain evaluations (e.g., "question" or "paraphrased_question")
+# Limit dataset size (train[:samples]); null = full. Same key as trajectory for Evaluator.evaluate parity.
+samples: null
+# When true, save value_by_index in logs for retain reference JSON (forget_quality / privleak consumers).
+retain_reference_mode: false
+question_key: "question" # Specifies which key to use during forget and retain evaluations (e.g. "question" or "paraphrased_question")
 batch_size: 32

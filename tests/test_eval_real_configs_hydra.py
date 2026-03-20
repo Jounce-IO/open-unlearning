@@ -142,6 +142,43 @@ class TestTofuRealConfigsHydra:
         ev = next(iter(evaluators.values()))
         assert str(ev.eval_cfg.get("retain_logs_path")) == str(ref_path)
 
+    def test_tofu_non_trajectory_samples_and_retain_reference_mode_compose(self) -> None:
+        """Standard eval=tofu accepts eval.tofu.samples and retain_reference_mode (dllm CLI parity)."""
+        cfg = _compose_eval([
+            "experiment=eval/tofu/default",
+            "model=LLaDA-8B-Instruct",
+            "task_name=test",
+            "eval=tofu",
+            "forget_split=forget10",
+            "holdout_split=holdout10",
+            "eval.tofu.samples=5",
+            "eval.tofu.retain_reference_mode=true",
+        ])
+        assert cfg.eval.tofu.samples == 5
+        assert cfg.eval.tofu.retain_reference_mode is True
+        evaluators = _get_evaluators_from_cfg(cfg)
+        ev = next(iter(evaluators.values()))
+        assert ev.name == "TOFU"
+        assert ev.eval_cfg.get("samples") == 5
+        assert ev.eval_cfg.get("retain_reference_mode") is True
+
+    def test_tofu_non_trajectory_retain_logs_path_via_global(self, tmp_path: Path) -> None:
+        """Experiment wires retain_logs_path into eval.tofu.retain_logs_path."""
+        ref_path = _canonical_retain_json_path(tmp_path)
+        cfg = _compose_eval([
+            "experiment=eval/tofu/default",
+            "model=LLaDA-8B-Instruct",
+            "task_name=test",
+            "eval=tofu",
+            "forget_split=forget10",
+            "holdout_split=holdout10",
+            f"retain_logs_path={ref_path}",
+        ])
+        assert str(cfg.eval.tofu.retain_logs_path) == str(ref_path)
+        evaluators = _get_evaluators_from_cfg(cfg)
+        ev = next(iter(evaluators.values()))
+        assert str(ev.eval_cfg.get("retain_logs_path")) == str(ref_path)
+
 
 class TestMuseRealConfigsHydra:
     """MUSE: real Hydra compose from open-unlearning configs + get_evaluators."""
@@ -192,5 +229,37 @@ class TestMuseRealConfigsHydra:
         ])
         evaluators = _get_evaluators_from_cfg(cfg)
         assert len(evaluators) >= 1
+        ev = next(iter(evaluators.values()))
+        assert str(ev.eval_cfg.get("retain_logs_path")) == str(ref_path)
+
+    def test_muse_non_trajectory_samples_retain_mode_compose(self) -> None:
+        cfg = _compose_eval([
+            "experiment=eval/muse/default",
+            "model=LLaDA-8B-Instruct",
+            "task_name=test",
+            "eval=muse",
+            "data_split=News",
+            "eval.muse.samples=3",
+            "eval.muse.retain_reference_mode=true",
+        ])
+        assert cfg.eval.muse.samples == 3
+        assert cfg.eval.muse.retain_reference_mode is True
+        evaluators = _get_evaluators_from_cfg(cfg)
+        ev = next(iter(evaluators.values()))
+        assert ev.name == "MUSE"
+        assert ev.eval_cfg.get("samples") == 3
+
+    def test_muse_non_trajectory_retain_logs_path_via_global(self, tmp_path: Path) -> None:
+        ref_path = _canonical_retain_json_path(tmp_path)
+        cfg = _compose_eval([
+            "experiment=eval/muse/default",
+            "model=LLaDA-8B-Instruct",
+            "task_name=test",
+            "eval=muse",
+            "data_split=Books",
+            f"retain_logs_path={ref_path}",
+        ])
+        assert str(cfg.eval.muse.retain_logs_path) == str(ref_path)
+        evaluators = _get_evaluators_from_cfg(cfg)
         ev = next(iter(evaluators.values()))
         assert str(ev.eval_cfg.get("retain_logs_path")) == str(ref_path)
