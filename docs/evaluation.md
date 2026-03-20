@@ -179,6 +179,8 @@ The metrics **privleak** and **forget_quality** compare the unlearned model to a
 
 3. **When retain_logs_path is None:** The evaluator logs a warning at the start of the run, at the start of evaluation, and when the metric runs. The run continues; privleak uses the default and forget_quality returns None.
 
+4. **YAML `reference_logs` shell (path null):** Standard (non-trajectory) metric YAMLs still declare `reference_logs.retain_model_logs.path: ${eval.tofu.retain_logs_path}` (or MUSE). When that resolves to null, the **Evaluator** does not pass that unresolved config into metrics — same rule as the coalesced trajectory path. Otherwise `ks_test` would treat `reference_logs` as “provided” and raise if `retain_ftr` is absent. **`retain_reference_mode`** affects **saved output** for a future reference file; it does not load retain JSON by itself.
+
 **Reference_logs loading and logs**
 
 The loader (`evals.metrics.base.UnlearningMetric.prepare_kwargs_evaluate_metric`) reads the JSON at `path` and fills `reference_logs` from the config’s `include` keys. For trajectory eval, only **mia_min_k** and **forget_truth_ratio** are requested (see `configs/eval/tofu_metrics/trajectory_all.yaml`). The loader also injects **retain_mia_by_step** and **retain_forget_tr_by_step** when present in the file (for step-matched privleak and forget_quality).

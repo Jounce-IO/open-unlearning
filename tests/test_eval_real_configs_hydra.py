@@ -179,6 +179,38 @@ class TestTofuRealConfigsHydra:
         ev = next(iter(evaluators.values()))
         assert str(ev.eval_cfg.get("retain_logs_path")) == str(ref_path)
 
+    def test_tofu_non_trajectory_forget_quality_interpolated_path_null_when_no_retain_logs(
+        self,
+    ) -> None:
+        r"""forget_quality YAML uses path: ${eval.tofu.retain_logs_path}; null when unset."""
+        cfg = _compose_eval([
+            "experiment=eval/tofu/default",
+            "model=LLaDA-8B-Instruct",
+            "task_name=test",
+            "eval=tofu",
+            "forget_split=forget10",
+            "holdout_split=holdout10",
+            "eval.tofu.retain_reference_mode=true",
+        ])
+        fq = cfg.eval.tofu.metrics.forget_quality
+        assert fq.reference_logs.retain_model_logs.path is None
+        evaluators = _get_evaluators_from_cfg(cfg)
+        ev = next(iter(evaluators.values()))
+        assert ev.eval_cfg.get("retain_reference_mode") is True
+
+    def test_tofu_non_trajectory_privleak_interpolated_path_null(self) -> None:
+        cfg = _compose_eval([
+            "experiment=eval/tofu/default",
+            "model=LLaDA-8B-Instruct",
+            "task_name=test",
+            "eval=tofu",
+            "forget_split=forget10",
+            "holdout_split=holdout10",
+        ])
+        pl = cfg.eval.tofu.metrics.privleak
+        assert pl.reference_logs.retain_model_logs.path is None
+        _get_evaluators_from_cfg(cfg)
+
 
 class TestMuseRealConfigsHydra:
     """MUSE: real Hydra compose from open-unlearning configs + get_evaluators."""

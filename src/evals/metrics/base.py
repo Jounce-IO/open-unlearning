@@ -324,7 +324,10 @@ class UnlearningMetric:
                 self.load_logs_from_file,
             )
         else:
-            reference_logs = reference_logs_cfgs
+            # Do not pass YAML shells (path null / missing) into metric fns; same as
+            # trajectory + Evaluator: ks_test/privleak treat any truthy reference_logs
+            # as "loaded reference" and validate retain slots.
+            reference_logs = {}
         if reference_logs:
             kwargs.update({"reference_logs": reference_logs})
 

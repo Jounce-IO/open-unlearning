@@ -10,6 +10,32 @@ from evals.metrics.privacy import log_retain_logs_path_none_if_needed
 logger = logging.getLogger("evaluator")
 
 
+def reference_logs_has_usable_retain_path(reference_logs_container) -> bool:
+    """Return True if ``retain_model_logs.path`` is set to a real filesystem path.
+
+    When Hydra resolves ``path: ${eval.tofu.retain_logs_path}`` and retain_logs_path is
+    null, the metric config still contains a ``reference_logs`` *shell* (path + include).
+    Passing that dict to ``ks_test`` / ``privleak`` makes them treat reference as
+    "provided" and validate ``retain_ftr`` / ``retain`` slots — and fail.
+
+    Trajectory coalesced evaluation already omits ``reference_logs`` unless the path is
+    usable; non-trajectory metrics use the same rule here and in
+    ``UnlearningMetric.prepare_kwargs_evaluate_metric``.
+    """
+    if reference_logs_container is None or not isinstance(reference_logs_container, dict):
+        return False
+    rml = reference_logs_container.get("retain_model_logs")
+    if not isinstance(rml, dict):
+        return False
+    path_val = rml.get("path")
+    if path_val is None:
+        return False
+    s = str(path_val).strip()
+    if not s or s.lower() in ("null", "none", ""):
+        return False
+    return True
+
+
 class Evaluator:
     def __init__(self, name, eval_cfg, **kwargs):
         self.name = name
@@ -312,9 +338,7 @@ class Evaluator:
                         # Only pass reference_logs when path is set (non-null). When path is null
                         # (e.g. retain_reference_mode run producing the reference), do not pass
                         # so the metric does not require step-matched reference data.
-                        rml = (ref_container or {}).get("retain_model_logs") or {}
-                        path_val = rml.get("path") if hasattr(rml, "get") else None
-                        if path_val and str(path_val).strip().lower() not in ("null", "none", ""):
+                        if reference_logs_has_usable_retain_path(ref_container):
                             merged_args["reference_logs"] = ref_container
                     except Exception:
                         ref_container = (
@@ -322,9 +346,18 @@ class Evaluator:
                             if hasattr(first_reference_logs, "items")
                             else first_reference_logs
                         )
-                        rml = (ref_container or {}).get("retain_model_logs") or {}
-                        path_val = rml.get("path") if hasattr(rml, "get") else None
-                        if path_val and str(path_val).strip().lower() not in ("null", "none", ""):
+                        # dict(OmegaConf) may not match nested shape expected by the helper; keep
+                        # legacy path-string check so coalesced eval still passes reference_logs.
+                        rml_fb = (ref_container or {}).get("retain_model_logs") or {}
+                        path_get = getattr(rml_fb, "get", None)
+                        path_fb = path_get("path") if path_get else None
+                        if path_fb and str(path_fb).strip().lower() not in (
+                            "null",
+                            "none",
+                            "",
+                        ):
+                            merged_args["reference_logs"] = ref_container
+                        elif reference_logs_has_usable_retain_path(ref_container):
                             merged_args["reference_logs"] = ref_container
             result = first_metric(
                 model,
@@ -403,6 +436,11 @@ class Evaluator:
                 metrics_args = {}
             if cached_reference_logs is not None and metrics_args.get("reference_logs"):
                 metrics_args["reference_logs"] = cached_reference_logs
+            elif metrics_args.get("reference_logs") is not None:
+                if not reference_logs_has_usable_retain_path(
+                    metrics_args.get("reference_logs")
+                ):
+                    metrics_args.pop("reference_logs", None)
             result = metric_fn(
                 model,
                 metric_name=metric_name,
