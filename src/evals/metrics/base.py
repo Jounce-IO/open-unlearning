@@ -169,6 +169,29 @@ def load_and_validate_reference(
     return result
 
 
+def _reference_logs_payload_is_evaluator_preloaded(container: Any) -> bool:
+    """True when ``reference_logs`` is already ``load_and_validate_reference`` output.
+
+    Evaluator merges cached retain JSON into ``metrics_args``; that shape has slot keys
+    (e.g. retain_ftr) under retain_model_logs and no ``path``. YAML shells without a
+    usable path must not match here (they have ``include`` / null path only).
+    """
+    if not isinstance(container, dict) or not container:
+        return False
+    rml = container.get("retain_model_logs")
+    if not isinstance(rml, dict) or not rml:
+        return False
+    if rml.get("path"):
+        return False
+    slot_keys = (
+        "retain_ftr",
+        "retain",
+        "retain_mia_by_step",
+        "retain_forget_tr_by_step",
+    )
+    return any(k in rml for k in slot_keys)
+
+
 def _extract_retain_agg_scalar(val: Any) -> Any:
     """Extract a single number from a retain metric value for privleak/rel_diff.
 
@@ -323,6 +346,8 @@ class UnlearningMetric:
                 reference_logs_cfgs,
                 self.load_logs_from_file,
             )
+        elif _reference_logs_payload_is_evaluator_preloaded(reference_logs_cfgs):
+            reference_logs = reference_logs_cfgs
         else:
             # Do not pass YAML shells (path null / missing) into metric fns; same as
             # trajectory + Evaluator: ks_test/privleak treat any truthy reference_logs

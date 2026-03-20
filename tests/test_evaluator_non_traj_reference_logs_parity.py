@@ -139,6 +139,35 @@ class TestPrepareKwargsOmitsShellReferenceLogs:
         rml = out["reference_logs"]["retain_model_logs"]
         assert rml.get("retain_ftr") is not None
 
+    def test_ks_test_prepare_kwargs_passes_evaluator_cached_payload(self) -> None:
+        """Evaluator injects load_and_validate_reference output (no path); must reach ks_test."""
+        from evals.metrics import METRICS_REGISTRY
+
+        metric = METRICS_REGISTRY["ks_test"]
+        forget_pre = {
+            "value_by_index": {"0": {"score": 0.3}},
+            "agg_value": 0.3,
+        }
+        cached = {
+            "retain_model_logs": {
+                "retain_ftr": {
+                    "value_by_index": {"0": {"score": 0.5}},
+                    "agg_value": 0.5,
+                },
+            }
+        }
+        out = metric.prepare_kwargs_evaluate_metric(
+            model=None,
+            metric_name="forget_quality",
+            cache={"forget_truth_ratio": forget_pre},
+            tokenizer=None,
+            template_args=None,
+            eval_cfg={},
+            pre_compute={"forget_truth_ratio": {"access_key": "forget"}},
+            reference_logs=cached,
+        )
+        assert out.get("reference_logs") == cached
+
 
 class TestNonTrajectoryEvaluatorReferenceLogsParity:
     """Evaluator per-metric loop: omit reference_logs when path is null (like trajectory)."""
