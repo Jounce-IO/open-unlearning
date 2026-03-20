@@ -554,8 +554,11 @@ def eval_text_similarity(model, tokenizer, batch, generation_args):
 
     attention_mask = batch["attention_mask"]
 
-    # convert to a simple dict from DictConfig
-    generation_args = OmegaConf.to_container(generation_args, resolve=True)
+    # Metric kwargs may be plain dicts after Evaluator's OmegaConf.to_container(metric_cfg).
+    if OmegaConf.is_config(generation_args):
+        generation_args = OmegaConf.to_container(generation_args, resolve=True)
+    else:
+        generation_args = dict(generation_args)
     stopwords = generation_args.pop("stopwords", None)
     if stopwords is not None:
         assert isinstance(stopwords, list)

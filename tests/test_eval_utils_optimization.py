@@ -311,3 +311,27 @@ class TestEvalTextSimilarityBatchDecode:
         # Expect 3 batch_decode calls: input_ids, tokens (labels), output slice
         assert tokenizer.batch_decode.called
         assert len(batch_decode_calls) >= 2  # at least input and one more batch
+
+    def test_accepts_plain_dict_generation_args(self):
+        """After Hydra compose + to_container(metric_cfg), generation_args is a dict (not DictConfig)."""
+        model = Mock()
+        model.device = torch.device("cpu")
+        model.generate = Mock(return_value=torch.randint(0, 100, (2, 20)))
+        tokenizer = Mock()
+        tokenizer.eos_token_id = 0
+        tokenizer.decode = Mock(return_value="")
+
+        def batch_decode_ret(x, **kw):
+            n = x.shape[0] if hasattr(x, "shape") else len(x)
+            return ["input"] * n
+
+        tokenizer.batch_decode = Mock(side_effect=batch_decode_ret)
+        batch = {
+            "input_ids": torch.randint(0, 10, (2, 5)),
+            "labels": torch.randint(0, 10, (2, 10)),
+            "attention_mask": torch.ones(2, 5),
+        }
+        gen_args = {"max_new_tokens": 5}
+        result = eval_text_similarity(model, tokenizer, batch, gen_args)
+        assert isinstance(result, list) and len(result) == 2
+        assert gen_args == {"max_new_tokens": 5}
