@@ -108,6 +108,15 @@ Some metrics are reported as both individual points and aggregated values (avera
 
 Other metrics like TOFU's Forget Quality (which is a single score computed over forget v/s retain distributions of Truth Ratio) and MUSE's PrivLeak (which is a single score computed over forget v/s holdout distributions of MIA attack values) aggregate the former metrics into a single score. They return a dictionary which contains `{"agg_value": ...}`.
 
+### Model utility (non-trajectory TOFU, `hm_aggregate`)
+
+The TOFU metric **`model_utility`** ([`configs/eval/tofu_metrics/model_utility.yaml`](../configs/eval/tofu_metrics/model_utility.yaml)) uses handler **`hm_aggregate`** ([`src/evals/metrics/utility.py`](../src/evals/metrics/utility.py)): the harmonic mean of **retain / real-authors / world-facts** sub-scores (`retain_*`, `ra_*`, `wf_*` prefixes in `pre_compute`). The saved JSON includes:
+
+- **`agg_value`**: harmonic mean over those components, or **`null`** if any component is missing/`null` (no silent drop).
+- **`retain_mu_components`**: flat map **component name → scalar** for the same MU legs used in the mean (typically **9** keys when retain + ra + wf are all present, or **3** retain-only if configured that way). This mirrors the **inner** per-step structure documented for trajectory runs as **`retain_mu_components_by_step`** ([trajectory_metrics.md](trajectory_metrics.md)); non-trajectory has no step dimension.
+
+Downstream report tools (e.g. dllm `generate_summary.py`) can emit one table row per entry in **`retain_mu_components`** for readability alongside the aggregate.
+
 ### Steps to create new metrics:
 
 #### 1. Implement a handler
