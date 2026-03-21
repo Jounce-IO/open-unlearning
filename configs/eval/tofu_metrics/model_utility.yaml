@@ -10,4 +10,5 @@ defaults:
   - .@pre_compute.wf_Q_A_ROUGE: wf_Q_A_ROUGE
   - .@pre_compute.wf_Truth_Ratio: wf_Truth_Ratio
 
+# hm_aggregate writes agg_value (harmonic mean) and retain_mu_components (flat MU legs) to results JSON.
 handler: hm_aggregate

@@ -1,6 +1,9 @@
+from __future__ import annotations
+
 import torch
 import numpy as np
 import scipy as sc
+from typing import Any
 from tqdm import tqdm
 import torch.nn.functional as F
 from torch.utils.data import DataLoader
@@ -10,23 +13,53 @@ from evals.metrics.utils import aggregate_to_1D
 from evals.metrics.base import unlearning_metric
 
 
+def _is_mu_component_key(name: Any) -> bool:
+    """Match trajectory_metrics / TOFU model_utility: retain_, ra_, wf_ prefixes."""
+    s = str(name)
+    return s.startswith("retain_") or s.startswith("ra_") or s.startswith("wf_")
+
+
 @unlearning_metric(name="hm_aggregate")
 def hm_aggregate(model, **kwargs):
-    """Harmonic mean of MU components. None is forbidden: if any component is None, return None (no silent drop)."""
+    """Harmonic mean of MU components. None is forbidden: if any component is None, return None (no silent drop).
+
+    For non-trajectory TOFU ``model_utility``, also returns ``retain_mu_components``: a flat map of
+    component name -> scalar (mirrors inner keys of trajectory ``retain_mu_components_by_step``).
+    """
     pre_compute = kwargs.get("pre_compute")
     if not pre_compute:
         return {"agg_value": None}
-    values = []
-    for _, result in pre_compute.items():
+
+    retain_mu_components: dict[str, Any] = {}
+    values: list[float] = []
+    for name, result in pre_compute.items():
+        if not _is_mu_component_key(name):
+            continue
         if not isinstance(result, dict):
             continue
         v = result.get("agg_value")
-        if v is None:
-            return {"agg_value": None}
-        values.append(v)
+        key = str(name)
+        if isinstance(v, (int, float, np.floating)):
+            fv = float(v)
+            retain_mu_components[key] = fv
+            values.append(fv)
+        elif v is None:
+            retain_mu_components[key] = None
+            return {"agg_value": None, "retain_mu_components": retain_mu_components}
+        else:
+            retain_mu_components[key] = v
+            return {"agg_value": None, "retain_mu_components": retain_mu_components}
+
     if not values:
-        return {"agg_value": None}
-    return {"agg_value": sc.stats.hmean(values)}
+        out: dict[str, Any] = {"agg_value": None}
+        if retain_mu_components:
+            out["retain_mu_components"] = retain_mu_components
+        return out
+    out = {
+        "agg_value": float(sc.stats.hmean(values)),
+        "retain_mu_components": retain_mu_components,
+    }
+    return out
 
 
 @unlearning_metric(name="classifier_prob")

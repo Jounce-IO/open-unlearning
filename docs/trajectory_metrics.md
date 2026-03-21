@@ -588,6 +588,8 @@ The `trajectory_metrics` function returns a dictionary following the standard me
 
 **`retain_mu_components_by_step`** (optional): Present when the evaluation uses the **retain** dataset and the metric list includes **hm_aggregate** (trajectory_model_utility). When **ra** and **wf** datasets are also configured (e.g. in `trajectory_all.yaml` with `access_key: ra` and `access_key: wf`), this field contains **9 components** per step/view: `retain_Q_A_Prob`, `retain_Q_A_ROUGE`, `retain_Truth_Ratio`, `ra_Q_A_Prob_normalised`, `ra_Q_A_ROUGE`, `ra_Truth_Ratio`, `wf_Q_A_Prob_normalised`, `wf_Q_A_ROUGE`, `wf_Truth_Ratio`—and **trajectory_model_utility** is the full TOFU MU (harmonic mean of 9). Otherwise (retain only), each step/view has **3 components** (retain only) and trajectory_model_utility is the harmonic mean of those three (retain-only subset). When `include_views` has both **full** and **eos**, each step maps to **`full`** and **`eos`** sub-objects. With a single view, the step may nest under that view key or match the legacy flat shape. If any component is 0 at a step for a view, the harmonic mean for that view is 0 at that step.
 
+**Non-trajectory parity:** On standard TOFU eval (`eval=tofu`), the same **`hm_aggregate`** handler stores a **flat** **`retain_mu_components`** map on the **`model_utility`** result (no step index, no `full`/`eos` nesting). See [evaluation.md — Model utility (non-trajectory TOFU)](evaluation.md#model-utility-non-trajectory-tofu-hm_aggregate).
+
 ### Step count (S) and reference compatibility
 
 The number of trajectory steps **S** in a run is the length of `logits_history` returned by the sampler for the **first batch**. All step-keyed structures in that run use the same S:
