@@ -5,6 +5,7 @@ import logging
 import numpy as np
 import torch
 from evals.metrics import get_metrics
+from evals.metrics.base import RetainReferenceValidationError, load_and_validate_reference
 from evals.metrics.privacy import log_retain_logs_path_none_if_needed
 
 logger = logging.getLogger("evaluator")
@@ -208,11 +209,16 @@ class Evaluator:
         logger.info(f"Evaluating {len(self.metrics)} metrics: {list(self.metrics.keys())}")
 
         # Load and validate reference once at start when any metric has reference_logs path (spec: validate before any evaluation).
+        # Merge retain_model_logs.include across metrics that share the same path: forget_quality loads
+        # forget_truth_ratio → retain_ftr; privleak loads mia_min_k → retain. Using only the first metric's
+        # include left privleak without the retain slot (RetainReferenceValidationError).
         cached_reference_logs = None
         try:
             from omegaconf import OmegaConf as _OmegaConf
         except ImportError:
             _OmegaConf = None
+        merged_ref_blocks: dict[str, dict] = {}
+
         for _mname in self.metrics:
             _mcfg = self.eval_cfg.metrics.get(_mname) if hasattr(self.eval_cfg.metrics, "get") else None
             if _mcfg is None:
@@ -231,14 +237,34 @@ class Evaluator:
                     _ref_dict = _OmegaConf.to_container(_ref_cfg, resolve=True)
                 except Exception:
                     _ref_dict = dict(_ref_cfg)
-            if _ref_dict:
-                for _rn, _rc in _ref_dict.items():
-                    if isinstance(_rc, dict) and _rc.get("path"):
-                        from evals.metrics.base import load_and_validate_reference
-                        cached_reference_logs = load_and_validate_reference(_ref_dict, self.load_logs_from_file)
-                        break
-            if cached_reference_logs is not None:
-                break
+            if not _ref_dict or not reference_logs_has_usable_retain_path(_ref_dict):
+                continue
+            for _rn, _rc in _ref_dict.items():
+                if not isinstance(_rc, dict) or not _rc.get("path"):
+                    continue
+                path = _rc.get("path")
+                inc = dict(_rc.get("include") or {})
+                existing = merged_ref_blocks.get(_rn)
+                if existing is None:
+                    merged_ref_blocks[_rn] = {"path": path, "include": inc}
+                else:
+                    if existing["path"] != path:
+                        raise RetainReferenceValidationError(
+                            f"Metrics disagree on retain reference path for {_rn!r}: "
+                            f"{existing['path']!r} vs {path!r}"
+                        )
+                    m_inc = existing["include"]
+                    for ik, iv in inc.items():
+                        if ik in m_inc and m_inc[ik] != iv:
+                            raise RetainReferenceValidationError(
+                                f"Metrics disagree on reference_logs {_rn}.include[{ik!r}]"
+                            )
+                        m_inc[ik] = iv
+
+        if merged_ref_blocks:
+            cached_reference_logs = load_and_validate_reference(
+                merged_ref_blocks, self.load_logs_from_file
+            )
 
         # Coalesced trajectory: one call to trajectory_metrics with all metrics (one sampler pass).
         coalesce = self.eval_cfg.get("coalesce_trajectory_metrics", False)
