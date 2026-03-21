@@ -271,3 +271,75 @@ class TestNonTrajectoryEvaluatorReferenceLogsParity:
         assert "reference_logs" in call_kw
         rml = call_kw["reference_logs"]["retain_model_logs"]
         assert rml.get("retain_ftr") is not None
+
+
+class TestEvaluatorMergesRetainReferenceIncludes:
+    """Cached retain reference must union include keys across metrics (FQ + privleak)."""
+
+    def test_load_and_validate_receives_merged_include(
+        self, tmp_path: Path
+    ) -> None:
+        from evals import get_evaluators
+
+        ref_path = _canonical_retain_json_path(tmp_path)
+        fq_cfg = {
+            "handler": "ks_test",
+            "pre_compute": {"forget_truth_ratio": {"access_key": "forget"}},
+            "reference_logs": {
+                "retain_model_logs": {
+                    "path": str(ref_path),
+                    "include": {"forget_truth_ratio": {"access_key": "retain_ftr"}},
+                },
+            },
+        }
+        pl_cfg = {
+            "handler": "privleak",
+            "pre_compute": {"mia_min_k": {"access_key": "forget"}},
+            "reference_logs": {
+                "retain_model_logs": {
+                    "path": str(ref_path),
+                    "include": {"mia_min_k": {"access_key": "retain"}},
+                },
+            },
+        }
+        eval_cfg = OmegaConf.create(
+            {
+                "handler": "TOFUEvaluator",
+                "output_dir": str(tmp_path / "merge-ref"),
+                "overwrite": True,
+                "retain_logs_path": str(ref_path),
+                "samples": 2,
+                "metrics": {"forget_quality": fq_cfg, "privleak": pl_cfg},
+            }
+        )
+        mock_fq = Mock(return_value={"agg_value": 0.5})
+        mock_pl = Mock(return_value={"agg_value": 1.0})
+        load_data = {
+            "mia_min_k": {"agg_value": 0.1},
+            "forget_truth_ratio": {
+                "value_by_index": {"0": {"score": 0.5}},
+                "agg_value": 0.5,
+            },
+        }
+
+        with patch("evals.base.get_metrics") as get_metrics_mock:
+            get_metrics_mock.return_value = {
+                "forget_quality": mock_fq,
+                "privleak": mock_pl,
+            }
+            evaluators = get_evaluators({"tofu": eval_cfg})
+        ev = evaluators["tofu"]
+        mock_model = MagicMock()
+        with (
+            patch.object(ev, "load_logs_from_file", return_value=load_data),
+            patch.object(ev, "save_logs"),
+            patch.object(ev, "prepare_model", return_value=mock_model),
+        ):
+            ev.evaluate(mock_model)
+
+        for mock_metric in (mock_fq, mock_pl):
+            call_kw = mock_metric.call_args[1]
+            assert "reference_logs" in call_kw
+            rml = call_kw["reference_logs"]["retain_model_logs"]
+            assert rml.get("retain_ftr") is not None
+            assert rml.get("retain") is not None
