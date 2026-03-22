@@ -420,6 +420,24 @@ def exact_memorization(model, **kwargs):
 
 @unlearning_metric(name="extraction_strength")
 def extraction_strength(model, **kwargs):
+    use_generalized = kwargs.get("use_generalized_sequence_probability", True)
+    if use_generalized:
+        _dma_cls = None
+        try:
+            from dllm.integrations.open_unlearning_adapter import (
+                DiffusionModelAdapter,
+            )
+
+            _dma_cls = DiffusionModelAdapter
+        except ImportError:
+            pass
+        if _dma_cls is not None and isinstance(model, _dma_cls):
+            raise ValueError(
+                "Non-trajectory extraction_strength does not implement generalized "
+                "(fixation-based) ES; use handler trajectory_metrics for dLLM ES, or set "
+                "use_generalized_sequence_probability=false to run the legacy prefix-match "
+                "heuristic (AR-oriented; not dLLM-native)."
+            )
     data = kwargs["data"]
     collator = kwargs["collators"]
     batch_size = kwargs["batch_size"]

@@ -13,12 +13,13 @@ or their geometric mean; they are agnostic to model type or alignment.
 from __future__ import annotations
 
 import logging
-from typing import Any, Optional, Protocol
+from typing import Any, Dict, List, Optional, Protocol
 
 import numpy as np
 import torch
 
 from data.utils import IGNORE_INDEX
+from evals.metrics.utils import _tensor_to_list_of_floats
 
 logger = logging.getLogger("evaluator")
 
@@ -298,6 +299,43 @@ def extraction_strength_from_fixation(
             best_t = t
             break
     return float(1.0 - (best_t / S))
+
+
+def compute_prob_from_fixation_logits(
+    fixation_logits: torch.Tensor,
+    labels: torch.Tensor,
+    device: torch.device,
+    ignore_index: int = IGNORE_INDEX,
+) -> List[Dict[str, float]]:
+    """Per-sample ``prob`` / ``avg_loss`` from batch fixation logits (trajectory step helper).
+
+    Shared by trajectory ``_call_metric_at_step`` (probability) and tests. Uses shifted
+    logits/labels CE (same as legacy batch path) so results align with
+    ``FixationStepWiseScoreProvider`` when the first label position is ignored (standard LM).
+    """
+    with torch.no_grad():
+        fixation_logits = fixation_logits.to(device)
+        labels = labels.to(device)
+        t_fl = fixation_logits.shape[1]
+        t_lab = labels.shape[1]
+        t = min(t_fl, t_lab)
+        fixation_logits = fixation_logits[:, :t, :].contiguous()
+        labels = labels[:, :t].contiguous()
+        shifted_logits = fixation_logits[..., :-1, :].contiguous()
+        shifted_labels = labels[..., 1:].contiguous()
+        if shifted_logits.dtype in (torch.bfloat16, torch.float16):
+            shifted_logits = shifted_logits.float()
+        loss_fn = torch.nn.CrossEntropyLoss(ignore_index=ignore_index, reduction="none")
+        losses = loss_fn(shifted_logits.transpose(-1, -2), shifted_labels).sum(dim=-1)
+        num_token_gt = (shifted_labels != ignore_index).sum(dim=-1).clamp(min=1)
+        avg_losses = losses / num_token_gt
+        normalized_probs = torch.exp(-avg_losses)
+        avg_losses_list = _tensor_to_list_of_floats(avg_losses)
+        normalized_probs_list = _tensor_to_list_of_floats(normalized_probs)
+        return [
+            {"prob": prob, "avg_loss": avg_loss}
+            for prob, avg_loss in zip(normalized_probs_list, avg_losses_list)
+        ]
 
 
 def diffusion_fixation_logits_for_probability(

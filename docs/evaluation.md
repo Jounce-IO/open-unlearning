@@ -108,6 +108,18 @@ Some metrics are reported as both individual points and aggregated values (avera
 
 Other metrics like TOFU's Forget Quality (which is a single score computed over forget v/s retain distributions of Truth Ratio) and MUSE's PrivLeak (which is a single score computed over forget v/s holdout distributions of MIA attack values) aggregate the former metrics into a single score. They return a dictionary which contains `{"agg_value": ...}`.
 
+### Generalized sequence probability (non-trajectory defaults)
+
+**Default:** `eval.tofu` and `eval.muse` set `use_generalized_sequence_probability: true` with `logit_alignment: causal`, aligned with trajectory `trajectory_config` defaults. The `probability` handler then uses the step-wise score path (AR: `ARStepWiseScoreProvider`, matching causal CE; diffusion: fixation logits from the adapter) unless overridden.
+
+**Explicit non-generalized (legacy):** Set `use_generalized_sequence_probability: false` at eval or per-metric YAML; `probability` then uses `evaluate_probability` (classic causal next-token CE only). See snippet [`configs/eval/snippets/legacy_generalized_sequence_probability_off.yaml`](../configs/eval/snippets/legacy_generalized_sequence_probability_off.yaml).
+
+**Composed metrics:** `truth_ratio` and other metrics that depend on `pre_compute` `probability` inherit the same merged flag via `prepare_kwargs_evaluate_metric`. ROUGE and text-similarity metrics do not use sequence-probability generalized mode (`not_applicable` in debug logs). Non-trajectory **`extraction_strength`** does not implement generalized fixation-based ES: with a `DiffusionModelAdapter` and generalized left **true**, evaluation raises a clear error (use `trajectory_metrics` for dLLM ES, or set the flag **false** for the legacy prefix heuristic).
+
+**Logging:** At eval start, **INFO** logs `eval_path`, evaluator name, and resolved `use_generalized_sequence_probability`. **DEBUG** logs per top-level metric and nested `pre_compute` probability rows (`handler`, `generalized`). Trajectory runs emit `TRAJECTORY_SUBMETRIC_GENERALIZED` alongside `TRAJECTORY_METRIC_COVERAGE`.
+
+**Parity check:** [`tests/test_traj_non_traj_definition_parity.py`](../tests/test_traj_non_traj_definition_parity.py) asserts fixation-logit batch scores match the `FixationStepWiseScoreProvider` path when label positions align with the shifted-CE convention (first label position ignored).
+
 ### Model utility (non-trajectory TOFU, `hm_aggregate`)
 
 The TOFU metric **`model_utility`** ([`configs/eval/tofu_metrics/model_utility.yaml`](../configs/eval/tofu_metrics/model_utility.yaml)) uses handler **`hm_aggregate`** ([`src/evals/metrics/utility.py`](../src/evals/metrics/utility.py)): the harmonic mean of **retain / real-authors / world-facts** sub-scores (`retain_*`, `ra_*`, `wf_*` prefixes in `pre_compute`). The saved JSON includes:

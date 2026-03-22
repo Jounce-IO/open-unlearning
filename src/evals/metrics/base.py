@@ -8,6 +8,7 @@ import torch
 from data import get_datasets, get_collators
 
 logger = logging.getLogger("metrics")
+_eval_logger = logging.getLogger("evaluator")
 
 
 def resolve_use_generalized_sequence_probability(
@@ -355,6 +356,20 @@ class UnlearningMetric:
                 ):
                     cfg_d["logit_alignment"] = kwargs["logit_alignment"]
                 pre_metric_kwargs.update(cfg_d)
+                _phandler = cfg_d.get("handler")
+                _pug = resolve_use_generalized_sequence_probability(
+                    kwargs.get("eval_cfg"), cfg_d
+                )
+                _gen_pre = (
+                    str(_pug) if _phandler == "probability" else "not_applicable"
+                )
+                _eval_logger.debug(
+                    "pre_compute_metric parent=%s pre_compute_key=%s handler=%s generalized=%s",
+                    metric_name,
+                    pre_metric_name,
+                    _phandler,
+                    _gen_pre,
+                )
                 _t0 = time.perf_counter()
                 _results = pre_metric.evaluate(
                     model, pre_metric_name, cache=cache, **pre_metric_kwargs
