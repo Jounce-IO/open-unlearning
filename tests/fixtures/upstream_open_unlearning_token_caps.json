@@ -1,0 +1,7 @@
+{
+  "description": "Frozen max_new_tokens scalars from locuslab/open-unlearning for drift checks. Regenerate when intentionally changing fork defaults; compare GitHub raw YAML at a pinned commit.",
+  "reference": "https://github.com/locuslab/open-unlearning — verify configs/generation/default.yaml on main or a pinned SHA",
+  "paths": {
+    "configs/generation/default.yaml": [200]
+  }
+}

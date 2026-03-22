@@ -29,6 +29,10 @@ def mia_loss(model, **kwargs):
         data=kwargs["data"],
         collator=kwargs["collators"],
         batch_size=kwargs["batch_size"],
+        use_generalized_sequence_probability=kwargs.get(
+            "use_generalized_sequence_probability", True
+        ),
+        logit_alignment=kwargs.get("logit_alignment", "causal"),
     )
 
 
@@ -85,6 +89,10 @@ def mia_zlib(model, **kwargs):
         collator=kwargs["collators"],
         batch_size=kwargs["batch_size"],
         tokenizer=kwargs.get("tokenizer"),
+        use_generalized_sequence_probability=kwargs.get(
+            "use_generalized_sequence_probability", True
+        ),
+        logit_alignment=kwargs.get("logit_alignment", "causal"),
     )
 
 
@@ -105,4 +113,8 @@ def mia_reference(model, **kwargs):
         collator=kwargs["collators"],
         batch_size=kwargs["batch_size"],
         reference_model=reference_model,
+        use_generalized_sequence_probability=kwargs.get(
+            "use_generalized_sequence_probability", True
+        ),
+        logit_alignment=kwargs.get("logit_alignment", "causal"),
     )

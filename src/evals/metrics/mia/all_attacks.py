@@ -31,7 +31,8 @@ class Attack:
 
     def setup(self, **kwargs):
         """Setup attack-specific parameters."""
-        pass
+        self._use_generalized = kwargs.get("use_generalized_sequence_probability", True)
+        self._logit_alignment = kwargs.get("logit_alignment", "causal")
 
     def compute_batch_values(self, batch):
         """Process a batch through model to get needed statistics."""

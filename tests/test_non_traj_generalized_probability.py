@@ -13,6 +13,7 @@ REPO_ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(REPO_ROOT / "src"))
 
 from evals.metrics.memorization import probability  # noqa: E402
+from evals.metrics.utils import evaluate_probability, evaluate_probability_unified  # noqa: E402
 
 
 class _TinyAR(nn.Module):
@@ -45,8 +46,6 @@ def test_generalized_ar_model_uses_provider_path() -> None:
     labels[:, :2] = -100
     batch = {"input_ids": input_ids, "labels": labels}
 
-    from evals.metrics.utils import evaluate_probability
-
     direct = evaluate_probability(model, batch)
     from evals.metrics.step_wise_score import (
         ARStepWiseScoreProvider,
@@ -58,5 +57,26 @@ def test_generalized_ar_model_uses_provider_path() -> None:
     )
     assert len(direct) == len(via)
     for a, b in zip(direct, via, strict=True):
+        assert a["prob"] is not None and b["prob"] is not None
+        assert abs(a["prob"] - b["prob"]) < 1e-5
+
+
+def test_evaluate_probability_unified_ar_matches_evaluate_probability() -> None:
+    model = _TinyAR()
+    model.eval()
+    bsz, seq = 2, 6
+    input_ids = torch.randint(0, 32, (bsz, seq))
+    labels = input_ids.clone()
+    labels[:, :2] = -100
+    batch = {"input_ids": input_ids, "labels": labels}
+    direct = evaluate_probability(model, batch)
+    uni = evaluate_probability_unified(
+        model,
+        batch,
+        use_generalized_sequence_probability=True,
+        logit_alignment="causal",
+    )
+    assert len(direct) == len(uni)
+    for a, b in zip(direct, uni, strict=True):
         assert a["prob"] is not None and b["prob"] is not None
         assert abs(a["prob"] - b["prob"]) < 1e-5

@@ -1,9 +1,13 @@
 # @package eval.muse_trajectory
-# MUSE trajectory mode - single-pass (trajectory_all) for all 5 sub-metrics
+# MUSE trajectory: two coalesced passes (upstream token budgets).
+# - trajectory_muse_knowmem: forget/retain knowmem ROUGE @ max_new_tokens=32
+# - trajectory_muse_verbmem: verbmem ROUGE, extraction_strength, privleak @ 128
+# Upstream refs: https://github.com/locuslab/open-unlearning/tree/main/configs/eval/muse_metrics
 
 defaults:
   - muse_metrics:
-    - trajectory_all
+    - trajectory_muse_knowmem
+    - trajectory_muse_verbmem
 
 handler: MUSEEvaluator
 output_dir: ${paths.output_dir}

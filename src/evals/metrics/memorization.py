@@ -18,7 +18,9 @@ from evals.metrics.step_wise_score import (
     ARStepWiseScoreProvider,
     FixationStepWiseScoreProvider,
     diffusion_fixation_logits_for_probability,
+    evaluate_probability_confidence_ordered_from_fixation_logits,
     evaluate_probability_via_provider,
+    extraction_strength_from_fixation,
 )
 
 # Supress the info messages logged while calculating rouge using rouge_scorer
@@ -60,6 +62,31 @@ def _diffusion_generalized_probability_batch(model, batch, **fn_args):
         provider,
         fixation_logits,
         {**batch, "labels": labels},
+        ignore_index=IGNORE_INDEX,
+    )
+
+
+def _diffusion_confidence_ordered_batch(model, batch, **fn_args):
+    """Confidence-ordered probability from sampler fixation logits (DiffusionModelAdapter)."""
+    labels = batch["labels"]
+    if isinstance(labels, torch.Tensor) and labels.dim() == 3:
+        raise ValueError(
+            "Generalized diffusion confidence_ordered with 3D labels is not supported; "
+            "set use_generalized_sequence_probability=false."
+        )
+    batch = _batch_to_device(batch, model.device)
+    labels = batch["labels"]
+    if isinstance(labels, torch.Tensor):
+        labels = labels.to(model.device)
+    input_ids = batch["input_ids"]
+    attention_mask = batch.get("attention_mask")
+    fixation_logits = diffusion_fixation_logits_for_probability(
+        model, input_ids, attention_mask, labels, IGNORE_INDEX
+    )
+    return evaluate_probability_confidence_ordered_from_fixation_logits(
+        fixation_logits,
+        labels,
+        logit_alignment=fn_args.get("logit_alignment", "causal"),
         ignore_index=IGNORE_INDEX,
     )
 
@@ -147,8 +174,41 @@ def probability_confidence_ordered(model, **kwargs):
     data = kwargs["data"]
     collator = kwargs["collators"]
     batch_size = kwargs["batch_size"]
+    use_generalized = kwargs.get("use_generalized_sequence_probability", True)
 
     dataloader = DataLoader(data, batch_size=batch_size, collate_fn=collator)
+
+    if use_generalized:
+        _dma_cls = None
+        try:
+            from dllm.integrations.open_unlearning_adapter import (
+                DiffusionModelAdapter,
+            )
+
+            _dma_cls = DiffusionModelAdapter
+        except ImportError:
+            _dma_cls = None
+        if _dma_cls is not None and isinstance(model, _dma_cls):
+            fun_args = {"logit_alignment": kwargs.get("logit_alignment", "causal")}
+            scores_by_index = run_batchwise_evals(
+                model,
+                dataloader,
+                _diffusion_confidence_ordered_batch,
+                fun_args,
+                "Calculating confidence-ordered probability",
+            )
+            prob_values = np.array(
+                [
+                    evals["prob"]
+                    for evals in scores_by_index.values()
+                    if evals["prob"] is not None
+                ]
+            )
+            prob_values = aggregate_to_1D(prob_values)
+            return {
+                "agg_value": np.mean(prob_values),
+                "value_by_index": scores_by_index,
+            }
 
     fun_args = {}
     scores_by_index = run_batchwise_evals(
@@ -418,9 +478,39 @@ def exact_memorization(model, **kwargs):
     return {"agg_value": np.mean(em_values), "value_by_index": scores_by_index}
 
 
+def _diffusion_extraction_strength_batch(model, batch, **fn_args):
+    """Fixation-based extraction strength for DiffusionModelAdapter (matches trajectory ES)."""
+    batch = _batch_to_device(batch, model.device)
+    labels = batch["labels"]
+    input_ids = batch["input_ids"]
+    attention_mask = batch.get("attention_mask")
+    fl, F, S = model.fixation_logits_and_steps_from_sampler(
+        input_ids, attention_mask, labels, IGNORE_INDEX
+    )
+    logit_alignment = fn_args.get("logit_alignment", "causal")
+    es_batch = []
+    for i in range(fl.shape[0]):
+        lab = labels[i]
+        es = extraction_strength_from_fixation(
+            fl[i],
+            lab,
+            F[i],
+            S,
+            logit_alignment,
+            IGNORE_INDEX,
+        )
+        es_batch.append({"score": es})
+    return es_batch
+
+
 @unlearning_metric(name="extraction_strength")
 def extraction_strength(model, **kwargs):
     use_generalized = kwargs.get("use_generalized_sequence_probability", True)
+    data = kwargs["data"]
+    collator = kwargs["collators"]
+    batch_size = kwargs["batch_size"]
+    dataloader = DataLoader(data, batch_size=batch_size, collate_fn=collator)
+
     if use_generalized:
         _dma_cls = None
         try:
@@ -432,16 +522,23 @@ def extraction_strength(model, **kwargs):
         except ImportError:
             pass
         if _dma_cls is not None and isinstance(model, _dma_cls):
-            raise ValueError(
-                "Non-trajectory extraction_strength does not implement generalized "
-                "(fixation-based) ES; use handler trajectory_metrics for dLLM ES, or set "
-                "use_generalized_sequence_probability=false to run the legacy prefix-match "
-                "heuristic (AR-oriented; not dLLM-native)."
+            fun_args = {"logit_alignment": kwargs.get("logit_alignment", "causal")}
+            scores_by_index = run_batchwise_evals(
+                model,
+                dataloader,
+                _diffusion_extraction_strength_batch,
+                fun_args,
+                "Calculating ES",
             )
-    data = kwargs["data"]
-    collator = kwargs["collators"]
-    batch_size = kwargs["batch_size"]
-    dataloader = DataLoader(data, batch_size=batch_size, collate_fn=collator)
+            es_values = np.array(
+                [
+                    evals["score"]
+                    for evals in scores_by_index.values()
+                    if evals["score"] is not None
+                ]
+            )
+            es_values = aggregate_to_1D(es_values)
+            return {"agg_value": np.mean(es_values), "value_by_index": scores_by_index}
 
     def _extraction_strength(model, batch):
         log_probs_batch, labels_batch = tokenwise_vocab_logprobs(

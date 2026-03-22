@@ -70,13 +70,7 @@ $$
 
 For **diffusion language models (dLLMs)**, tokens are not generated in causal order; the model predicts (and “fixes”) positions bidirectionally, often **setting the top-confidence labels first**. The **confidence-ordered forget probability** is the forget-probability analogue defined by ordering positions by the model’s **confidence in the true label** at each position, then aggregating in that order.
 
-**Confidence (per position).** For a single example $i$ with input $\mathbf{x}_i$ and labels $\mathbf{y}_i$, let $T_i$ be the set of labeled (non-ignored) positions. At each position $t \in T_i$, the model (in one forward pass) produces a distribution over the vocabulary. The **confidence** for the true label $y_{i,t}$ at position $t$ is
-
-$$
-c_{i,t} = p_\theta(y_{i,t} \mid \mathbf{x}_i, \mathbf{y}_i),
-$$
-
-i.e. the probability the model assigns to the correct token at $t$. For a bidirectional/diffusion model this uses full-sequence context (no causal masking).
+**Confidence (per position).** For a single example $i$ with input $\mathbf{x}_i$ and labels $\mathbf{y}_i$, let $T_i$ be the set of labeled (non-ignored) positions. At each position $t \in T_i$, we take the probability of the true label from the **scoring distribution** used for generalized metrics: for AR models this is the usual next-token head from one forward pass; for diffusion with generalized mode, it is the distribution from **fixation logits** at the causal index rule (`logit_alignment`, same as `FixationStepWiseScoreProvider`).
 
 **Confidence ordering.** Sort the labeled positions by confidence (descending): $t_{(1)}, t_{(2)}, \ldots, t_{(n)}$ so that
 
@@ -114,7 +108,15 @@ Other metrics like TOFU's Forget Quality (which is a single score computed over 
 
 **Explicit non-generalized (legacy):** Set `use_generalized_sequence_probability: false` at eval or per-metric YAML; `probability` then uses `evaluate_probability` (classic causal next-token CE only). See snippet [`configs/eval/snippets/legacy_generalized_sequence_probability_off.yaml`](../configs/eval/snippets/legacy_generalized_sequence_probability_off.yaml).
 
-**Composed metrics:** `truth_ratio` and other metrics that depend on `pre_compute` `probability` inherit the same merged flag via `prepare_kwargs_evaluate_metric`. ROUGE and text-similarity metrics do not use sequence-probability generalized mode (`not_applicable` in debug logs). Non-trajectory **`extraction_strength`** does not implement generalized fixation-based ES: with a `DiffusionModelAdapter` and generalized left **true**, evaluation raises a clear error (use `trajectory_metrics` for dLLM ES, or set the flag **false** for the legacy prefix heuristic).
+**Composed metrics:** `truth_ratio` and other metrics that depend on `pre_compute` `probability` inherit the same merged flag via `prepare_kwargs_evaluate_metric`. ROUGE and text-similarity metrics do not use sequence-probability generalized mode (`not_applicable` in debug logs).
+
+**Trajectory vs non-trajectory (diffusion).** Generalized sequence probability in `trajectory_metrics` uses the same fixation logits layout as non-traj: `_get_logits_at_step` output is passed through `trajectory_step_logits_to_prob_batch` (transpose to `[1, L, V]` only) and then `compute_prob_from_fixation_logits`, matching `FixationStepWiseScoreProvider` on `build_fixation_logits_from_R_F` for **`fixation_start` at the final diffusion index `S-1`** (full and `eos` views). The **`steps`** trajectory slice at `S-1` is **not** the same object as one-shot fixation probability (it uses a uniform diffusion index per position). **`mia_loss`**, **`mia_zlib`**, and **`mia_reference`** use `evaluate_probability_unified` so generalized diffusion uses the same fixation path as `probability`.
+
+**MUSE trajectory token budgets (`eval=muse_trajectory`).** The default loads two Hydra metric nodes so sampler `max_new_tokens` matches [locuslab/open-unlearning](https://github.com/locuslab/open-unlearning) non-traj YAMLs: [`trajectory_muse_knowmem.yaml`](../configs/eval/muse_metrics/trajectory_muse_knowmem.yaml) uses **32** (same as [forget_knowmem_ROUGE.yaml](https://github.com/locuslab/open-unlearning/blob/main/configs/eval/muse_metrics/forget_knowmem_ROUGE.yaml)); [`trajectory_muse_verbmem.yaml`](../configs/eval/muse_metrics/trajectory_muse_verbmem.yaml) uses **128** (same as [forget_verbmem_ROUGE.yaml](https://github.com/locuslab/open-unlearning/blob/main/configs/eval/muse_metrics/forget_verbmem_ROUGE.yaml) and the default generation cap for metrics that omit `generation_args`). **TOFU** trajectory remains a single coalesced [`trajectory_all.yaml`](../configs/eval/tofu_metrics/trajectory_all.yaml) at **200** ([generation/default.yaml](https://github.com/locuslab/open-unlearning/blob/main/configs/generation/default.yaml)).
+
+**Non-trajectory `extraction_strength` (diffusion).** With `DiffusionModelAdapter` and generalized **true**, ES uses `fixation_logits_and_steps_from_sampler` on the adapter and `extraction_strength_from_fixation` (same fixation definition as trajectory). The legacy prefix heuristic remains when generalized is **false** (AR-oriented).
+
+**`probability_confidence_ordered` (diffusion).** With `DiffusionModelAdapter` and generalized **true**, confidences are taken from sampler fixation logits with the same `logit_alignment` as `FixationStepWiseScoreProvider`; otherwise one forward pass + causal logits (AR-style) is used.
 
 **Logging:** At eval start, **INFO** logs `eval_path`, evaluator name, and resolved `use_generalized_sequence_probability`. **DEBUG** logs per top-level metric and nested `pre_compute` probability rows (`handler`, `generalized`). Trajectory runs emit `TRAJECTORY_SUBMETRIC_GENERALIZED` alongside `TRAJECTORY_METRIC_COVERAGE`.
 

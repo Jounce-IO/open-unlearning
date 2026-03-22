@@ -338,6 +338,61 @@ def compute_prob_from_fixation_logits(
         ]
 
 
+def trajectory_step_logits_to_prob_batch(logits_vl: torch.Tensor) -> torch.Tensor:
+    """Convert trajectory step logits ``[V, L]`` to batch ``[1, L, V]`` for sequence probability.
+
+    Use with ``compute_prob_from_fixation_logits`` on fixation-aligned rows so results match
+    ``FixationStepWiseScoreProvider`` / non-traj generalized probability (no extra row shuffle).
+    """
+    return logits_vl.t().unsqueeze(0)
+
+
+def evaluate_probability_confidence_ordered_from_fixation_logits(
+    fixation_logits: torch.Tensor,
+    labels: torch.Tensor,
+    *,
+    logit_alignment: str = "causal",
+    ignore_index: int = IGNORE_INDEX,
+) -> List[Dict[str, Any]]:
+    """Confidence-ordered sequence probability from fixation logits ``[B, L, V]`` (dLLM).
+
+    For each sample, collects per-position probability of the target token using the same
+    index rule as ``FixationStepWiseScoreProvider``, sorts descending, geometric mean.
+    """
+    fixation_logits = fixation_logits.float()
+    log_probs = torch.nn.functional.log_softmax(fixation_logits, dim=-1)
+    B, L, V = fixation_logits.shape
+    results: List[Dict[str, Any]] = []
+    for b in range(B):
+        pos_probs: list[float] = []
+        for ell in range(L):
+            if labels[b, ell].item() == ignore_index:
+                continue
+            logit_idx = max(0, ell - 1) if logit_alignment == "causal" else ell
+            y = int(labels[b, ell].item())
+            if y < 0 or y >= V:
+                continue
+            lp = log_probs[b, logit_idx, y].item()
+            pos_probs.append(float(np.exp(lp)))
+        if not pos_probs:
+            logger.info(
+                "confidence_ordered (fixation): no valid target positions for sample %s",
+                b,
+            )
+            results.append({"prob": None, "avg_loss": None})
+            continue
+        pos_arr = np.array(pos_probs, dtype=np.float64)
+        pos_probs_sorted = np.sort(pos_arr)[::-1]
+        geom_mean = float(np.exp(np.mean(np.log(pos_probs_sorted + 1e-12))))
+        avg_loss = float(-np.log(geom_mean + 1e-12))
+        results.append({
+            "prob": geom_mean,
+            "avg_loss": avg_loss,
+            "confidence_ordered_probs": pos_probs_sorted.tolist(),
+        })
+    return results
+
+
 def diffusion_fixation_logits_for_probability(
     model: Any,
     input_ids: torch.Tensor,
@@ -348,7 +403,8 @@ def diffusion_fixation_logits_for_probability(
     """Sampler-based fixation logits [B, T, V] for non-traj generalized probability (dLLM).
 
     Delegates to ``DiffusionModelAdapter._fixation_logits_from_sampler`` so scoring matches
-    trajectory generalized semantics without running the full ``trajectory_metrics`` loop.
+    trajectory generalized probability (``trajectory_step_logits_to_prob_batch`` +
+    ``compute_prob_from_fixation_logits``) without running the full ``trajectory_metrics`` loop.
     """
     try:
         from dllm.integrations.open_unlearning_adapter import (

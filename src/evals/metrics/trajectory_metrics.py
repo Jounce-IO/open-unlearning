@@ -40,6 +40,7 @@ from evals.metrics.step_wise_score import (
     compute_prob_from_fixation_logits as _compute_prob_from_fixation_logits,
     sequence_probability_from_scores,
     extraction_strength_from_fixation,
+    trajectory_step_logits_to_prob_batch,
 )
 from evals.metrics.trajectory_utils import (
     trajectories_from_logits,
@@ -3549,13 +3550,11 @@ def trajectory_metrics(model, **kwargs):
                                 ).device
                                 labels_full = generated_labels.to(device=device, dtype=torch.long)
                                 for i, step in enumerate(steps_to_use):
-                                    logits_step = _get_logits_at_step(
-                                        sample_traj, traj_name, step
-                                    ).t()  # [L, V]
-                                    # AR convention: logits[t] predicts label[t+1]
-                                    logits_step = torch.cat(
-                                        [logits_step[:1, :], logits_step[:-1, :]], dim=0
-                                    ).unsqueeze(0)  # [1, L, V]
+                                    logits_step = trajectory_step_logits_to_prob_batch(
+                                        _get_logits_at_step(
+                                            sample_traj, traj_name, step
+                                        )
+                                    )
                                     for view in include_views:
                                         if view == "full":
                                             logits_v = logits_step
@@ -3589,13 +3588,11 @@ def trajectory_metrics(model, **kwargs):
                                 ).device
                                 labels_full = generated_labels.to(device=device, dtype=torch.long)
                                 for i, step in enumerate(steps_to_use):
-                                    logits_step = _get_logits_at_step(
-                                        sample_traj, traj_name, step
-                                    ).t()  # [L, V]
-                                    # AR convention: logits[t] predicts label[t+1]
-                                    logits_step = torch.cat(
-                                        [logits_step[:1, :], logits_step[:-1, :]], dim=0
-                                    ).unsqueeze(0)  # [1, L, V]
+                                    logits_step = trajectory_step_logits_to_prob_batch(
+                                        _get_logits_at_step(
+                                            sample_traj, traj_name, step
+                                        )
+                                    )
                                     for view in include_views:
                                         if view == "full":
                                             logits_v = logits_step
