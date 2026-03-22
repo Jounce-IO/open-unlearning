@@ -137,6 +137,26 @@ class FinetuneTrainer(Trainer):
     def __init__(self, evaluators=None, template_args=None, *args, **kwargs):
         self.evaluators = evaluators
         self.template_args = template_args
+        self.four_way_rouge = kwargs.pop("four_way_rouge", True)
+        self.four_way_rouge_remasking = kwargs.pop("four_way_rouge_remasking", None)
+        _gen = kwargs.pop("four_way_rouge_generation_args", None) or {}
+        if hasattr(_gen, "keys") and not isinstance(_gen, dict):
+            try:
+                from omegaconf import OmegaConf
+
+                if OmegaConf.is_config(_gen):
+                    _gen = OmegaConf.to_container(_gen, resolve=True)
+            except Exception:
+                pass
+            _gen = dict(_gen) if isinstance(_gen, dict) else {}
+        self.four_way_rouge_generation_args = dict(_gen)
+        _skip = kwargs.pop("four_way_rouge_skip_splits", None) or ()
+        self.four_way_rouge_skip_splits = frozenset(_skip)
+        _only = kwargs.pop("four_way_rouge_splits", None)
+        self.four_way_rouge_splits = frozenset(_only) if _only is not None else None
+        self.four_way_rouge_tokens_per_step = int(
+            kwargs.pop("four_way_rouge_tokens_per_step", 4) or 4
+        )
         super().__init__(*args, **kwargs)
 
     def evaluate(
@@ -237,6 +257,12 @@ class FinetuneTrainer(Trainer):
         except Exception:
             pass
 
+        four_way_rouge = getattr(self, "four_way_rouge", True)
+        four_way_skip = frozenset(getattr(self, "four_way_rouge_skip_splits", ()) or ())
+        four_way_only = getattr(self, "four_way_rouge_splits", None)
+        if four_way_only is not None:
+            four_way_only = frozenset(four_way_only)
+
         for name, dataset in eval_dataset.items():
             if dataset is None or len(dataset) == 0:
                 continue
@@ -246,7 +272,13 @@ class FinetuneTrainer(Trainer):
             method_n = 0
             ce_loss_sum = 0.0
             ce_n = 0
+            r1_sum, rlf_sum, rlr_sum, r_n = 0.0, 0.0, 0.0, 0
             self.model.eval()
+            do_rouge = (
+                four_way_rouge
+                and name not in four_way_skip
+                and (four_way_only is None or name in four_way_only)
+            )
             for batch in dataloader:
                 batch = self._prepare_inputs(batch)
                 with torch.no_grad():
@@ -273,9 +305,71 @@ class FinetuneTrainer(Trainer):
                                 ce_n += batch["input_ids"].size(0)
                         except Exception:
                             pass
+                    if do_rouge:
+                        try:
+                            from dllm.four_way_rouge import (
+                                aggregate_four_way_rouge_batch_scores,
+                                four_way_rouge_scores_for_batch,
+                            )
+
+                            tok = getattr(self, "tokenizer", None) or getattr(
+                                self.model, "tokenizer", None
+                            )
+                            if tok is None:
+                                raise RuntimeError("tokenizer required for four-way ROUGE")
+                            gen_args = dict(
+                                getattr(self, "four_way_rouge_generation_args", None)
+                                or {}
+                            )
+                            if hasattr(self.model, "adapter_config"):
+                                ac = self.model.adapter_config
+                                gen_args.setdefault(
+                                    "max_new_tokens", getattr(ac, "max_new_tokens", 128)
+                                )
+                                gen_args.setdefault(
+                                    "tokens_per_step", getattr(ac, "tokens_per_step", 4)
+                                )
+                            rem = getattr(self, "four_way_rouge_remasking", None)
+                            if rem is None and hasattr(self.model, "adapter_config"):
+                                rem = self.model.adapter_config.remasking
+                            if rem is None:
+                                rem = "low_confidence"
+                            tps = int(
+                                getattr(self, "four_way_rouge_tokens_per_step", 4) or 4
+                            )
+                            scores = four_way_rouge_scores_for_batch(
+                                self.model,
+                                tok,
+                                batch,
+                                generation_args=gen_args,
+                                remasking=rem,
+                                tokens_per_step=max(1, tps),
+                            )
+                            a, b, c, cnt = aggregate_four_way_rouge_batch_scores(scores)
+                            r1_sum += a
+                            rlf_sum += b
+                            rlr_sum += c
+                            r_n += cnt
+                        except Exception as e:
+                            logger.warning(
+                                "Four-way eval: ROUGE failed for split %s: %s (%s)",
+                                name,
+                                e,
+                                type(e).__name__,
+                                exc_info=True,
+                            )
             # All-reduce so multi-GPU runs get correct global averages and a single log.
             stats = torch.tensor(
-                [method_loss_sum, float(method_n), ce_loss_sum, float(ce_n)],
+                [
+                    method_loss_sum,
+                    float(method_n),
+                    ce_loss_sum,
+                    float(ce_n),
+                    r1_sum,
+                    rlf_sum,
+                    rlr_sum,
+                    float(r_n),
+                ],
                 device=device,
                 dtype=torch.float64,
             )
@@ -285,6 +379,10 @@ class FinetuneTrainer(Trainer):
             method_n = int(round(stats[1].item()))
             ce_loss_sum = stats[2].item()
             ce_n = int(round(stats[3].item()))
+            r1_sum = stats[4].item()
+            rlf_sum = stats[5].item()
+            rlr_sum = stats[6].item()
+            r_n = int(round(stats[7].item()))
             if method_n > 0:
                 eval_metrics[f"{metric_key_prefix}_{name}_loss"] = method_loss_sum / method_n
             if ce_n > 0:
@@ -293,6 +391,14 @@ class FinetuneTrainer(Trainer):
                 logger.warning(
                     "Four-way eval: CE loss not computed for %s (ce_n=0); only method loss logged for this split.",
                     name,
+                )
+            if r_n > 0:
+                eval_metrics[f"{metric_key_prefix}_{name}_rouge1_recall"] = (
+                    r1_sum / r_n
+                )
+                eval_metrics[f"{metric_key_prefix}_{name}_rougeL_f1"] = rlf_sum / r_n
+                eval_metrics[f"{metric_key_prefix}_{name}_rougeL_recall"] = (
+                    rlr_sum / r_n
                 )
             num_samples += len(dataset)
         if eval_metrics and self.is_world_process_zero():

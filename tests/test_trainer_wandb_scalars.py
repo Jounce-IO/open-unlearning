@@ -124,3 +124,35 @@ def test_four_way_validation_eight_keys_method_and_ce():
     assert len(out) == 8
     for v in out.values():
         assert isinstance(v, float)
+
+
+def test_four_way_validation_includes_rouge_scalars_when_present():
+    """Four-way validation with ROUGE: 8 loss keys plus per-split ROUGE aggregates pass through."""
+    metrics = {
+        "eval_forget_loss": 1.2,
+        "eval_forget_loss_ce": 1.15,
+        "eval_retain_loss": 0.9,
+        "eval_retain_loss_ce": 0.88,
+        "eval_holdout_loss": 1.0,
+        "eval_holdout_loss_ce": 0.98,
+        "eval_utility_loss": 1.1,
+        "eval_utility_loss_ce": 1.05,
+        "eval_forget_rouge1_recall": 0.11,
+        "eval_forget_rougeL_f1": 0.22,
+        "eval_forget_rougeL_recall": 0.33,
+        "eval_retain_rouge1_recall": 0.44,
+        "eval_retain_rougeL_f1": 0.55,
+        "eval_retain_rougeL_recall": 0.66,
+        "eval_holdout_rouge1_recall": 0.1,
+        "eval_holdout_rougeL_f1": 0.2,
+        "eval_holdout_rougeL_recall": 0.3,
+        "eval_utility_rouge1_recall": 0.4,
+        "eval_utility_rougeL_f1": 0.5,
+        "eval_utility_rougeL_recall": 0.6,
+    }
+    out = _scalar_metrics_for_wandb(metrics)
+    assert len(out) == 20
+    assert out["eval_forget_rougeL_recall"] == 0.33
+    assert out["eval_utility_rouge1_recall"] == 0.4
+    for v in out.values():
+        assert isinstance(v, float)

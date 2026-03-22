@@ -2,6 +2,7 @@
 
 import sys
 from pathlib import Path
+from unittest import mock
 
 import torch
 from torch.utils.data import Dataset
@@ -10,17 +11,20 @@ from transformers import TrainingArguments
 repo_root = Path(__file__).parent.parent
 sys.path.insert(0, str(repo_root / "src"))
 
-from trainer.base import FinetuneTrainer, _scalar_metrics_for_wandb
+from trainer.base import FinetuneTrainer
 
 
 class _TinyDataset(Dataset):
     def __init__(self, length=4, seq_len=8, vocab_size=64):
         self.length = length
+        input_ids = torch.randint(1, vocab_size, (length, seq_len))
+        labels = input_ids.clone()
+        labels[:, :2] = -100
         self.data = {
-            "input_ids": torch.randint(1, vocab_size, (length, seq_len)),
-            "labels": torch.randint(1, vocab_size, (length, seq_len)),
+            "input_ids": input_ids,
+            "labels": labels,
+            "attention_mask": torch.ones(length, seq_len, dtype=torch.long),
         }
-        self.data["labels"][:, :2] = -100
 
     def __len__(self):
         return self.length
@@ -50,20 +54,34 @@ def test_four_way_evaluate_returns_method_and_ce_keys_when_available():
         per_device_eval_batch_size=2,
         report_to="none",
     )
-    trainer = FinetuneTrainer(
-        model=model,
-        args=args,
-        train_dataset=_TinyDataset(2, 8, 64),
-        eval_dataset=eval_dict,
-        tokenizer=tokenizer,
-    )
-    result = trainer.evaluate(eval_dataset=eval_dict, metric_key_prefix="eval")
+    def _fake_rouge_scores(model, tok, batch, **kwargs):
+        bsz = batch["input_ids"].shape[0]
+        return [
+            {"rouge1_recall": 0.1, "rougeL_f1": 0.2, "rougeL_recall": 0.3}
+            for _ in range(bsz)
+        ]
+
+    with mock.patch(
+        "dllm.four_way_rouge.four_way_rouge_scores_for_batch",
+        side_effect=_fake_rouge_scores,
+    ):
+        trainer = FinetuneTrainer(
+            model=model,
+            args=args,
+            train_dataset=_TinyDataset(2, 8, 64),
+            eval_dataset=eval_dict,
+            tokenizer=tokenizer,
+            four_way_rouge_generation_args={"max_new_tokens": 4},
+        )
+        result = trainer.evaluate(eval_dataset=eval_dict, metric_key_prefix="eval")
     # Four-way path returns EvalLoopOutput to match parent Trainer.evaluate()
     metrics = result.metrics
     assert "eval_forget_loss" in metrics
     assert "eval_retain_loss" in metrics
     assert isinstance(metrics["eval_forget_loss"], (int, float))
     assert isinstance(metrics["eval_retain_loss"], (int, float))
+    assert metrics["eval_forget_rougeL_recall"] == 0.3
+    assert metrics["eval_retain_rouge1_recall"] == 0.1
     # _ce keys may be present when dllm + DiffusionModelAdapter are available
     for k, v in metrics.items():
         assert isinstance(v, (int, float)), k
