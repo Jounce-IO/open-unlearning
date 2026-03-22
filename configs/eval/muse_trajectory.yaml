@@ -12,3 +12,5 @@ samples: null  # Limit dataset size; set via CLI (eval.muse_trajectory.samples=N
 overwrite: false
 data_split: News
 retain_logs_path: null
+use_generalized_sequence_probability: true
+logit_alignment: causal

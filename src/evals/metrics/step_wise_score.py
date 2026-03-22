@@ -298,3 +298,34 @@ def extraction_strength_from_fixation(
             best_t = t
             break
     return float(1.0 - (best_t / S))
+
+
+def diffusion_fixation_logits_for_probability(
+    model: Any,
+    input_ids: torch.Tensor,
+    attention_mask: Optional[torch.Tensor],
+    labels: torch.Tensor,
+    ignore_index: int,
+) -> torch.Tensor:
+    """Sampler-based fixation logits [B, T, V] for non-traj generalized probability (dLLM).
+
+    Delegates to ``DiffusionModelAdapter._fixation_logits_from_sampler`` so scoring matches
+    trajectory generalized semantics without running the full ``trajectory_metrics`` loop.
+    """
+    try:
+        from dllm.integrations.open_unlearning_adapter import (
+            DiffusionModelAdapter,
+        )
+    except ImportError as exc:
+        raise ImportError(
+            "non-trajectory generalized sequence probability for diffusion models requires "
+            "dllm.integrations.open_unlearning_adapter.DiffusionModelAdapter"
+        ) from exc
+    if not isinstance(model, DiffusionModelAdapter):
+        raise TypeError(
+            "use_generalized_sequence_probability=True with diffusion sampling requires "
+            f"DiffusionModelAdapter, got {type(model).__name__}"
+        )
+    return model._fixation_logits_from_sampler(
+        input_ids, attention_mask, labels, ignore_index
+    )

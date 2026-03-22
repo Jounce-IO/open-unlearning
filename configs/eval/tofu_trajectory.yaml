@@ -19,3 +19,6 @@ retain_logs_path: null
 retain_reference_mode: false
 question_key: "question"
 batch_size: 32
+# Log parity with non-traj eval; trajectory metrics read trajectory_config.use_generalized_sequence_probability
+use_generalized_sequence_probability: true
+logit_alignment: causal

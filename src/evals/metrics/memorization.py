@@ -3,6 +3,7 @@ import torch
 import numpy as np
 from torch.utils.data import DataLoader
 
+from data.utils import IGNORE_INDEX
 from evals.metrics.utils import (
     aggregate_to_1D,
     evaluate_probability,
@@ -10,10 +11,13 @@ from evals.metrics.utils import (
     eval_text_similarity,
     run_batchwise_evals,
     tokenwise_vocab_logprobs,
+    _batch_to_device,
 )
 from evals.metrics.base import unlearning_metric
 from evals.metrics.step_wise_score import (
     ARStepWiseScoreProvider,
+    FixationStepWiseScoreProvider,
+    diffusion_fixation_logits_for_probability,
     evaluate_probability_via_provider,
 )
 
@@ -33,6 +37,33 @@ def _probability_batch_fn_ar_provider(model, batch, **fn_args):
     return evaluate_probability_via_provider(provider, model, batch, **kwargs_provider)
 
 
+def _diffusion_generalized_probability_batch(model, batch, **fn_args):
+    """Generalized sequence probability for DiffusionModelAdapter (fixation logits from sampler)."""
+    labels_field = fn_args.get("labels_field")
+    logit_alignment = fn_args.get("logit_alignment", "causal")
+    labels = batch[labels_field] if labels_field else batch["labels"]
+    if isinstance(labels, torch.Tensor) and labels.dim() == 3:
+        raise ValueError(
+            "Generalized diffusion probability with 3D labels (multi-option) is not supported; "
+            "set use_generalized_sequence_probability=false or use step_wise_score_provider=ar."
+        )
+    batch = _batch_to_device(batch, model.device)
+    if isinstance(labels, torch.Tensor):
+        labels = labels.to(model.device)
+    input_ids = batch["input_ids"]
+    attention_mask = batch.get("attention_mask")
+    fixation_logits = diffusion_fixation_logits_for_probability(
+        model, input_ids, attention_mask, labels, IGNORE_INDEX
+    )
+    provider = FixationStepWiseScoreProvider(logit_alignment=logit_alignment)
+    return evaluate_probability_via_provider(
+        provider,
+        fixation_logits,
+        {**batch, "labels": labels},
+        ignore_index=IGNORE_INDEX,
+    )
+
+
 @unlearning_metric(name="probability")
 def probability(model, **kwargs):
     """Compute the probabilities by data points and report aggregated average.
@@ -49,6 +80,7 @@ def probability(model, **kwargs):
     batch_size = kwargs["batch_size"]
     use_ar_provider = kwargs.get("step_wise_score_provider") == "ar"
     labels_field = kwargs.get("labels_field")
+    use_generalized = kwargs.get("use_generalized_sequence_probability", True)
 
     dataloader = DataLoader(data, batch_size=batch_size, collate_fn=collator)
 
@@ -56,6 +88,29 @@ def probability(model, **kwargs):
         provider = ARStepWiseScoreProvider()
         fun_args = {"step_wise_score_provider_instance": provider}
         batch_eval_fn = _probability_batch_fn_ar_provider
+    elif use_generalized:
+        fun_args = {
+            "labels_field": labels_field,
+            "logit_alignment": kwargs.get("logit_alignment", "causal"),
+        }
+        _dma_cls = None
+        try:
+            from dllm.integrations.open_unlearning_adapter import (
+                DiffusionModelAdapter,
+            )
+
+            _dma_cls = DiffusionModelAdapter
+        except ImportError:
+            _dma_cls = None
+        if _dma_cls is not None and isinstance(model, _dma_cls):
+            batch_eval_fn = _diffusion_generalized_probability_batch
+        else:
+            provider = ARStepWiseScoreProvider()
+            fun_args = {
+                **fun_args,
+                "step_wise_score_provider_instance": provider,
+            }
+            batch_eval_fn = _probability_batch_fn_ar_provider
     else:
         fun_args = {"labels_field": labels_field} if labels_field else {}
         batch_eval_fn = evaluate_probability

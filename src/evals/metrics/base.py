@@ -10,6 +10,19 @@ from data import get_datasets, get_collators
 logger = logging.getLogger("metrics")
 
 
+def resolve_use_generalized_sequence_probability(
+    eval_cfg: Any, metric_kwargs_flat: Dict[str, Any]
+) -> bool:
+    """Metric YAML overrides eval package; default True (matches trajectory defaults)."""
+    if metric_kwargs_flat.get("use_generalized_sequence_probability") is not None:
+        return bool(metric_kwargs_flat["use_generalized_sequence_probability"])
+    if eval_cfg is not None and callable(getattr(eval_cfg, "get", None)):
+        v = eval_cfg.get("use_generalized_sequence_probability")
+        if v is not None:
+            return bool(v)
+    return True
+
+
 class RetainReferenceValidationError(ValueError):
     """Raised when a retain reference file is provided but invalid or non-canonical."""
 
@@ -300,6 +313,16 @@ class UnlearningMetric:
             collators = self.get_collators(collator_cfgs=collator_cfgs, **kwargs)
             kwargs.update({"collators": collators})
 
+        resolved_gen = resolve_use_generalized_sequence_probability(
+            kwargs.get("eval_cfg"), kwargs
+        )
+        kwargs["use_generalized_sequence_probability"] = resolved_gen
+        _evc = kwargs.get("eval_cfg")
+        if _evc is not None and callable(getattr(_evc, "get", None)):
+            _la = _evc.get("logit_alignment")
+            if _la is not None and kwargs.get("logit_alignment") is None:
+                kwargs["logit_alignment"] = _la
+
         # Evaluate precompute and load results
         pre_compute_cfgs = kwargs.pop("pre_compute", {})
         pre_metric_results = {}
@@ -317,7 +340,21 @@ class UnlearningMetric:
                     f"No pre_compute metric of name {pre_metric_name}"
                 )
                 pre_metric_kwargs = kwargs.copy()
-                pre_metric_kwargs.update(**pre_metric_cfg)
+                from omegaconf import OmegaConf
+
+                cfg_d = (
+                    OmegaConf.to_container(pre_metric_cfg, resolve=True)
+                    if OmegaConf.is_config(pre_metric_cfg)
+                    else dict(pre_metric_cfg)
+                )
+                if "use_generalized_sequence_probability" not in cfg_d:
+                    cfg_d["use_generalized_sequence_probability"] = resolved_gen
+                if (
+                    "logit_alignment" not in cfg_d
+                    and kwargs.get("logit_alignment") is not None
+                ):
+                    cfg_d["logit_alignment"] = kwargs["logit_alignment"]
+                pre_metric_kwargs.update(cfg_d)
                 _t0 = time.perf_counter()
                 _results = pre_metric.evaluate(
                     model, pre_metric_name, cache=cache, **pre_metric_kwargs

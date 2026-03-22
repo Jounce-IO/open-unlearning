@@ -5,7 +5,11 @@ import logging
 import numpy as np
 import torch
 from evals.metrics import get_metrics
-from evals.metrics.base import RetainReferenceValidationError, load_and_validate_reference
+from evals.metrics.base import (
+    RetainReferenceValidationError,
+    load_and_validate_reference,
+    resolve_use_generalized_sequence_probability,
+)
 from evals.metrics.privacy import log_retain_logs_path_none_if_needed
 
 logger = logging.getLogger("evaluator")
@@ -207,6 +211,25 @@ class Evaluator:
         )
         logger.info(f"Evaluations will be saved to: {logs_file_path}")
         logger.info(f"Evaluating {len(self.metrics)} metrics: {list(self.metrics.keys())}")
+
+        _metrics_cfg_lo = self.eval_cfg.metrics
+        _handlers_lo = []
+        for _mn in self.metrics:
+            _mc = _metrics_cfg_lo.get(_mn) if hasattr(_metrics_cfg_lo, "get") else None
+            _handlers_lo.append(
+                _mc.get("handler") if _mc is not None and hasattr(_mc, "get") else None
+            )
+        _all_traj_lo = len(self.metrics) >= 1 and all(
+            h == "trajectory_metrics" for h in _handlers_lo if h is not None
+        )
+        _path_lo = "trajectory" if _all_traj_lo else "non_trajectory"
+        _ugg = self.eval_cfg.get("use_generalized_sequence_probability", True)
+        logger.info(
+            "eval_start eval_path=%s evaluator=%s use_generalized_sequence_probability=%s",
+            _path_lo,
+            self.name,
+            _ugg,
+        )
 
         # Load and validate reference once at start when any metric has reference_logs path (spec: validate before any evaluation).
         # Merge retain_model_logs.include across metrics that share the same path: forget_quality loads
@@ -467,6 +490,21 @@ class Evaluator:
                     metrics_args.get("reference_logs")
                 ):
                     metrics_args.pop("reference_logs", None)
+            _mh = metrics_args.get("handler")
+            _mgen = resolve_use_generalized_sequence_probability(
+                self.eval_cfg, metrics_args
+            )
+            _gen_label = (
+                str(_mgen)
+                if _mh == "probability"
+                else "not_applicable"
+            )
+            logger.debug(
+                "metric=%s handler=%s generalized=%s",
+                metric_name,
+                _mh,
+                _gen_label,
+            )
             result = metric_fn(
                 model,
                 metric_name=metric_name,
