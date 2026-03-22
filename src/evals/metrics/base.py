@@ -2,7 +2,7 @@ import os
 import json
 import logging
 import time
-from typing import Callable, Any, Dict
+from typing import Any, Callable, Dict
 
 import torch
 from data import get_datasets, get_collators
@@ -22,6 +22,130 @@ def resolve_use_generalized_sequence_probability(
         if v is not None:
             return bool(v)
     return True
+
+
+# Handlers where resolved use_generalized_sequence_probability affects sequence-prob semantics.
+GENERALIZED_SEQ_PROB_ACTIVE_HANDLERS = frozenset(
+    {
+        "probability",
+        "probability_confidence_ordered",
+        "extraction_strength",
+        "mia_loss",
+        "mia_zlib",
+        "mia_reference",
+    }
+)
+
+# MIA metrics that ignore the flag (tokenwise / grad path).
+GENERALIZED_SEQ_PROB_UNUSED_MIA_HANDLERS = frozenset(
+    {
+        "mia_min_k",
+        "mia_min_k_plus_plus",
+        "mia_gradnorm",
+    }
+)
+
+# Composed metrics: flag applies to pre_compute probability children, not this node's own code path.
+GENERALIZED_SEQ_PROB_INDIRECT_HANDLERS = frozenset({"truth_ratio"})
+
+
+def log_generalized_sequence_probability_for_eval_metric(
+    metric_name: str,
+    handler: Any,
+    eval_cfg: Any,
+    metrics_args: Dict[str, Any],
+) -> None:
+    """INFO: whether generalized sequence probability applies for this top-level metric."""
+    h = handler if isinstance(handler, str) and handler else None
+    if not h:
+        _eval_logger.info(
+            "metric=%s generalized_sequence_probability=n/a (no handler in config)",
+            metric_name,
+        )
+        return
+    resolved = resolve_use_generalized_sequence_probability(eval_cfg, metrics_args)
+    if h in GENERALIZED_SEQ_PROB_ACTIVE_HANDLERS:
+        _eval_logger.info(
+            "metric=%s handler=%s generalized_sequence_probability=%s",
+            metric_name,
+            h,
+            resolved,
+        )
+    elif h in GENERALIZED_SEQ_PROB_UNUSED_MIA_HANDLERS:
+        _eval_logger.info(
+            "metric=%s handler=%s generalized_sequence_probability=n/a "
+            "(MIA tokenwise/grad path; flag not applied)",
+            metric_name,
+            h,
+        )
+    elif h in GENERALIZED_SEQ_PROB_INDIRECT_HANDLERS:
+        _eval_logger.info(
+            "metric=%s handler=%s generalized_sequence_probability=indirect "
+            "(pre_compute probability; inherited_setting=%s)",
+            metric_name,
+            h,
+            resolved,
+        )
+    else:
+        _eval_logger.info(
+            "metric=%s handler=%s generalized_sequence_probability=n/a (not used by this metric)",
+            metric_name,
+            h,
+        )
+
+
+def log_generalized_sequence_probability_for_precompute(
+    parent_metric_name: str,
+    pre_compute_key: str,
+    handler: Any,
+    eval_cfg: Any,
+    cfg_d: Dict[str, Any],
+) -> None:
+    """INFO: generalized mode for a pre_compute sub-metric (e.g. truth_ratio → probability)."""
+    h = handler if isinstance(handler, str) and handler else None
+    if not h:
+        _eval_logger.info(
+            "pre_compute parent_metric=%s pre_compute_key=%s "
+            "generalized_sequence_probability=n/a (no handler)",
+            parent_metric_name,
+            pre_compute_key,
+        )
+        return
+    resolved = resolve_use_generalized_sequence_probability(eval_cfg, cfg_d)
+    if h in GENERALIZED_SEQ_PROB_ACTIVE_HANDLERS:
+        _eval_logger.info(
+            "pre_compute parent_metric=%s pre_compute_key=%s handler=%s "
+            "generalized_sequence_probability=%s",
+            parent_metric_name,
+            pre_compute_key,
+            h,
+            resolved,
+        )
+    elif h in GENERALIZED_SEQ_PROB_UNUSED_MIA_HANDLERS:
+        _eval_logger.info(
+            "pre_compute parent_metric=%s pre_compute_key=%s handler=%s "
+            "generalized_sequence_probability=n/a (MIA tokenwise/grad; flag not applied)",
+            parent_metric_name,
+            pre_compute_key,
+            h,
+        )
+    elif h in GENERALIZED_SEQ_PROB_INDIRECT_HANDLERS:
+        _eval_logger.info(
+            "pre_compute parent_metric=%s pre_compute_key=%s handler=%s "
+            "generalized_sequence_probability=indirect (nested pre_compute; inherited_setting=%s)",
+            parent_metric_name,
+            pre_compute_key,
+            h,
+            resolved,
+        )
+    else:
+        _eval_logger.info(
+            "pre_compute parent_metric=%s pre_compute_key=%s handler=%s "
+            "generalized_sequence_probability=n/a (not used by this handler)",
+            parent_metric_name,
+            pre_compute_key,
+            h,
+        )
 
 
 class RetainReferenceValidationError(ValueError):
@@ -357,18 +481,12 @@ class UnlearningMetric:
                     cfg_d["logit_alignment"] = kwargs["logit_alignment"]
                 pre_metric_kwargs.update(cfg_d)
                 _phandler = cfg_d.get("handler")
-                _pug = resolve_use_generalized_sequence_probability(
-                    kwargs.get("eval_cfg"), cfg_d
-                )
-                _gen_pre = (
-                    str(_pug) if _phandler == "probability" else "not_applicable"
-                )
-                _eval_logger.debug(
-                    "pre_compute_metric parent=%s pre_compute_key=%s handler=%s generalized=%s",
+                log_generalized_sequence_probability_for_precompute(
                     metric_name,
                     pre_metric_name,
                     _phandler,
-                    _gen_pre,
+                    kwargs.get("eval_cfg"),
+                    cfg_d,
                 )
                 _t0 = time.perf_counter()
                 _results = pre_metric.evaluate(

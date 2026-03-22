@@ -6,6 +6,7 @@ from omegaconf import DictConfig
 from trainer.utils import seed_everything
 from model import get_model
 from evals import get_evaluators
+from evals.lm_eval import LMEvalEvaluator
 from evals.metrics.privacy import log_retain_logs_path_none_if_needed
 from evals.gpu_phase_logger import set_phase as gpu_set_phase
 from evals.distributed import (
@@ -30,6 +31,44 @@ logging.basicConfig(
     force=True
 )
 logger = logging.getLogger(__name__)
+
+
+def log_open_unlearning_evaluator_modes(evaluators: dict) -> None:
+    """Log whether each evaluator uses trajectory_metrics or standard metrics (INFO)."""
+    for name, ev in evaluators.items():
+        if isinstance(ev, LMEvalEvaluator):
+            logger.info(
+                "=== OpenUnlearning evaluator %r: mode=lm_eval_harness (not TOFU/MUSE trajectory stack) ===",
+                name,
+            )
+            continue
+        mcfg = ev.eval_cfg.get("metrics")
+        handlers: list[str] = []
+        if mcfg is not None:
+            for _mn in mcfg:
+                mc = mcfg[_mn]
+                if mc is not None and hasattr(mc, "get"):
+                    h = mc.get("handler")
+                    if h is not None:
+                        handlers.append(h)
+        if handlers and all(h == "trajectory_metrics" for h in handlers):
+            logger.info(
+                "=== OpenUnlearning evaluator %r: mode=TRAJECTORY "
+                "(OpenUnlearning trajectory_metrics; per-step diffusion metrics) ===",
+                name,
+            )
+        elif handlers:
+            logger.info(
+                "=== OpenUnlearning evaluator %r: mode=NON_TRAJECTORY "
+                "(standard batch/scalar metrics; MDLM logs use [mdlm_diffusion_sampler] for any sampler call) ===",
+                name,
+            )
+        else:
+            logger.info(
+                "=== OpenUnlearning evaluator %r: mode=unknown (no metric handlers in config) ===",
+                name,
+            )
+
 
 # Enable verbose logging for HuggingFace
 os.environ.setdefault("TRANSFORMERS_VERBOSITY", "info")
@@ -80,6 +119,7 @@ def main(cfg: DictConfig):
         eval_cfgs = OmegaConf.create(eval_cfgs)
     logger.info("Getting evaluators...")
     evaluators = get_evaluators(eval_cfgs)
+    log_open_unlearning_evaluator_modes(evaluators)
     logger.info(f"Found {len(evaluators)} evaluator(s): {list(evaluators.keys())}")
     for evaluator_name, evaluator in evaluators.items():
         if hasattr(evaluator, "metrics"):

@@ -8,7 +8,7 @@ from evals.metrics import get_metrics
 from evals.metrics.base import (
     RetainReferenceValidationError,
     load_and_validate_reference,
-    resolve_use_generalized_sequence_probability,
+    log_generalized_sequence_probability_for_eval_metric,
 )
 from evals.metrics.privacy import log_retain_logs_path_none_if_needed
 
@@ -225,8 +225,8 @@ class Evaluator:
         _path_lo = "trajectory" if _all_traj_lo else "non_trajectory"
         _ugg = self.eval_cfg.get("use_generalized_sequence_probability", True)
         logger.info(
-            "eval_start eval_path=%s evaluator=%s use_generalized_sequence_probability=%s",
-            _path_lo,
+            "eval_start OpenUnlearning_stack=%s evaluator=%s use_generalized_sequence_probability=%s",
+            "TRAJECTORY (trajectory_metrics)" if _path_lo == "trajectory" else "NON_TRAJECTORY (standard metrics)",
             self.name,
             _ugg,
         )
@@ -491,19 +491,11 @@ class Evaluator:
                 ):
                     metrics_args.pop("reference_logs", None)
             _mh = metrics_args.get("handler")
-            _mgen = resolve_use_generalized_sequence_probability(
-                self.eval_cfg, metrics_args
-            )
-            _gen_label = (
-                str(_mgen)
-                if _mh == "probability"
-                else "not_applicable"
-            )
-            logger.debug(
-                "metric=%s handler=%s generalized=%s",
+            log_generalized_sequence_probability_for_eval_metric(
                 metric_name,
                 _mh,
-                _gen_label,
+                self.eval_cfg,
+                metrics_args,
             )
             result = metric_fn(
                 model,

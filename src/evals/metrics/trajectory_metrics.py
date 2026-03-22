@@ -92,8 +92,17 @@ def _trajectory_submetric_generalized_applied(
         "probability_confidence_ordered",
         "extraction_strength",
         "privleak",
+        "mia_loss",
+        "mia_zlib",
+        "mia_reference",
     ):
         return str(u)
+    if metric_name in (
+        "mia_min_k",
+        "mia_min_k_plus_plus",
+        "mia_gradnorm",
+    ):
+        return "not_applicable"
     return "not_applicable"
 
 
@@ -2615,6 +2624,22 @@ def trajectory_metrics(model, **kwargs):
         # Extract config
         metrics_config = kwargs.get("metrics", [])
         trajectory_config = kwargs.get("trajectory_config", {})
+        rank = kwargs.get("rank", 0)
+        if rank == 0:
+            tc = trajectory_config
+            if OmegaConf.is_config(tc):
+                _tc = OmegaConf.to_container(tc, resolve=True) or {}
+            elif isinstance(tc, dict):
+                _tc = tc
+            else:
+                _tc = {}
+            if not isinstance(_tc, dict):
+                _tc = {}
+            _traj_u = bool(_tc.get("use_generalized_sequence_probability", True))
+            logger.info(
+                "trajectory_metrics: trajectory_config.use_generalized_sequence_probability=%s",
+                _traj_u,
+            )
         metric_worker_pool_size = trajectory_config.get("metric_worker_pool_size", 4)
         executor = (
             ProcessPoolExecutor(max_workers=metric_worker_pool_size)
@@ -2628,7 +2653,6 @@ def trajectory_metrics(model, **kwargs):
         sort_by_length = kwargs.get("sort_by_length", False)
         tokenizer = kwargs.get("tokenizer")
         _ = kwargs.get("generation_args", {})  # generation_args, reserved
-        rank = kwargs.get("rank", 0)
         world_size = kwargs.get("world_size", 1)
         use_distributed_sampler = world_size > 1
 
