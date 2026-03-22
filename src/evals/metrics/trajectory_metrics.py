@@ -69,6 +69,17 @@ _trajectory_single_retain_warned: set = set()
 DEFAULT_TRAJECTORY_SAMPLE_INTERVAL = 8
 
 
+def _trajectory_metric_display_name(metric_name: str, loaded_metrics: Dict[str, Any]) -> str:
+    """Prefer metric config ``display_name`` when set (coalesced / Hydra); else logical key."""
+    info = loaded_metrics.get(metric_name) if isinstance(loaded_metrics, dict) else None
+    cfg = (info or {}).get("config") if isinstance(info, dict) else None
+    if isinstance(cfg, dict):
+        dn = cfg.get("display_name")
+        if dn is not None and str(dn).strip():
+            return str(dn)
+    return metric_name
+
+
 def _trajectory_submetric_generalized_applied(
     metric_name: str, trajectory_config: Dict[str, Any]
 ) -> str:
@@ -119,11 +130,13 @@ def _debug_log_trajectory_metric_coverage(
                         traj_name,
                         metric_name,
                     )
+                    _disp = _trajectory_metric_display_name(metric_name, loaded_metrics)
                     logger.debug(
-                        "TRAJECTORY_SUBMETRIC_GENERALIZED view=%s traj=%s metric=%s handler=%s generalized_applied=%s",
+                        "TRAJECTORY_SUBMETRIC_GENERALIZED view=%s traj=%s metric=%s display_name=%s handler=%s generalized_applied=%s",
                         view,
                         traj_name,
                         metric_name,
+                        _disp,
                         _handler,
                         _gen,
                     )
@@ -141,11 +154,13 @@ def _debug_log_trajectory_metric_coverage(
                     n,
                     n_fin,
                 )
+                _disp = _trajectory_metric_display_name(metric_name, loaded_metrics)
                 logger.debug(
-                    "TRAJECTORY_SUBMETRIC_GENERALIZED view=%s traj=%s metric=%s handler=%s generalized_applied=%s",
+                    "TRAJECTORY_SUBMETRIC_GENERALIZED view=%s traj=%s metric=%s display_name=%s handler=%s generalized_applied=%s",
                     view,
                     traj_name,
                     metric_name,
+                    _disp,
                     _handler,
                     _gen,
                 )
