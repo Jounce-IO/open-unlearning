@@ -13,7 +13,7 @@ or their geometric mean; they are agnostic to model type or alignment.
 from __future__ import annotations
 
 import logging
-from typing import Any, Dict, List, Optional, Protocol
+from typing import Any, Dict, List, Mapping, Optional, Protocol, Tuple
 
 import numpy as np
 import torch
@@ -248,6 +248,17 @@ class FixationStepWiseScoreProvider:
         return results
 
 
+def _es_audit_prefix(ctx: Optional[Mapping[str, Any]]) -> str:
+    if not ctx:
+        return ""
+    parts = []
+    for k in ("sample_idx", "traj_name", "view", "step"):
+        v = ctx.get(k)
+        if v is not None:
+            parts.append(f"{k}={v}")
+    return ("[" + " ".join(parts) + "] ") if parts else ""
+
+
 def extraction_strength_from_fixation(
     fixation_logits: torch.Tensor,
     labels: torch.Tensor,
@@ -255,6 +266,9 @@ def extraction_strength_from_fixation(
     S: int,
     logit_alignment: str = "causal",
     ignore_index: int = IGNORE_INDEX,
+    *,
+    audit: bool = False,
+    audit_ctx: Optional[Mapping[str, Any]] = None,
 ) -> float:
     """Compute dLLM extraction strength: 1 minus the smallest fraction of fixation steps to drop so the rest match target.
 
@@ -263,42 +277,158 @@ def extraction_strength_from_fixation(
     F: [L] fixation step index per position.
     S: total number of steps.
     Returns value in [0, 1]; AR path unchanged (use prefix-based ES elsewhere).
+
+    When ``audit`` is True and the evaluator logger is DEBUG-enabled, emits
+    ``EXTRACTION_STRENGTH_AUDIT`` lines (branches, per-t pass/fail, ``best_t``, logits snippet, optional decode).
     """
+    audit_on = bool(audit) and logger.isEnabledFor(logging.DEBUG)
+    ap = _es_audit_prefix(audit_ctx)
+
+    def _alog(msg: str, *args: Any) -> None:
+        if audit_on:
+            logger.debug("EXTRACTION_STRENGTH_AUDIT " + ap + msg, *args)
+
     fixation_logits = fixation_logits.float()
     L, V = fixation_logits.shape
+    _alog(
+        "enter L=%s V=%s S=%s logit_alignment=%s ignore_index=%s fixation_logits_shape=%s labels_shape=%s F_shape=%s",
+        L,
+        V,
+        S,
+        logit_alignment,
+        ignore_index,
+        tuple(fixation_logits.shape),
+        tuple(labels.shape),
+        tuple(F.shape),
+    )
     if L == 0 or S <= 0:
+        _alog("branch early_exit: L==0 or S<=0 (L=%s S=%s) -> return 0.0", L, S)
         return 0.0
     L_lab = labels.shape[0]
     L_use = min(L, L_lab)
     if L_use == 0:
+        _alog("branch early_exit: L_use==0 (L=%s L_lab=%s) -> return 0.0", L, L_lab)
         return 0.0
     preds = torch.zeros(L, dtype=torch.long, device=fixation_logits.device)
     for ell in range(L):
         logit_idx = max(0, ell - 1) if logit_alignment == "causal" else ell
         preds[ell] = torch.argmax(fixation_logits[logit_idx, :], dim=-1)
     valid = (labels != ignore_index) & (labels >= 0) & (labels < V)
-    if valid.sum().item() == 0:
+    n_valid = int(valid.sum().item())
+    if n_valid == 0:
+        _alog("branch early_exit: no valid label positions (valid_count=0) -> return 0.0")
         return 0.0
     F_np = F.cpu().numpy() if F.dim() > 0 else np.array([F.item()])
     if F_np.size != L:
+        _alog("branch F_broadcast: F_np.size=%s != L=%s -> broadcast_to (L,)", F_np.size, L)
         F_np = np.broadcast_to(F_np, (L,))
+    else:
+        _alog("branch F_shape: F_np.size == L=%s (no broadcast)", L)
     labels_np = labels.cpu().numpy()
     preds_np = preds.cpu().numpy()
     valid_np = valid.cpu().numpy()
+    mismatch_valid = int(
+        sum(
+            1
+            for ell in range(L_use)
+            if valid_np[ell] and preds_np[ell] != labels_np[ell]
+        )
+    )
+    _alog(
+        "preds_summary L_use=%s valid_positions=%s argmax_mismatch_on_valid=%s",
+        L_use,
+        n_valid,
+        mismatch_valid,
+    )
+    max_chars = 8000
+    if audit_ctx and audit_ctx.get("max_decode_chars") is not None:
+        try:
+            max_chars = int(audit_ctx["max_decode_chars"])
+        except (TypeError, ValueError):
+            max_chars = 8000
+    tok = audit_ctx.get("tokenizer") if audit_ctx else None
+    if tok is not None and audit_on:
+        try:
+            pred_ids = preds[:L_use].detach().cpu().tolist()
+            lab_ids = labels[:L_use].detach().cpu().tolist()
+            pred_txt = tok.decode(pred_ids, skip_special_tokens=True)
+            lab_txt = tok.decode(lab_ids, skip_special_tokens=True)
+            if len(pred_txt) > max_chars:
+                pred_txt = pred_txt[:max_chars] + "…"
+            if len(lab_txt) > max_chars:
+                lab_txt = lab_txt[:max_chars] + "…"
+            _alog("text_decode pred_argmax_seq=%r labels_seq=%r", pred_txt, lab_txt)
+        except Exception as e:
+            _alog("text_decode failed: %s", e)
+    # Logit snapshot: up to 5 valid positions — logit row used, pred/label ids, log-prob of label token
+    if audit_on:
+        logged = 0
+        with torch.no_grad():
+            for ell in range(L_use):
+                if not valid_np[ell]:
+                    continue
+                logit_idx = max(0, ell - 1) if logit_alignment == "causal" else ell
+                row = fixation_logits[logit_idx].float()
+                lp = torch.log_softmax(row, dim=-1)
+                yi = int(labels_np[ell])
+                pi = int(preds_np[ell])
+                max_logit = float(row.max().item())
+                logp_lab = float(lp[yi].item()) if 0 <= yi < V else float("nan")
+                _alog(
+                    "logit_pos ell=%s logit_idx=%s pred_id=%s label_id=%s F=%s max_logit=%.4f logp_label=%.4f",
+                    ell,
+                    logit_idx,
+                    pi,
+                    yi,
+                    int(F_np[ell]) if ell < len(F_np) else "?",
+                    max_logit,
+                    logp_lab,
+                )
+                logged += 1
+                if logged >= 5:
+                    break
     best_t = S
     for t in range(S):
         match = True
+        first_mismatch: Optional[Tuple[int, int, int, int]] = None
         for ell in range(L_use):
             if not valid_np[ell]:
                 continue
             if F_np[ell] >= t:
                 if preds_np[ell] != labels_np[ell]:
                     match = False
+                    first_mismatch = (
+                        ell,
+                        int(preds_np[ell]),
+                        int(labels_np[ell]),
+                        int(F_np[ell]),
+                    )
                     break
         if match:
+            _alog(
+                "loop_t t=%s PASS (all constrained positions match) -> best_t=%s break",
+                t,
+                t,
+            )
             best_t = t
             break
-    return float(1.0 - (best_t / S))
+        if first_mismatch is not None:
+            _alog(
+                "loop_t t=%s FAIL first_mismatch ell=%s pred_id=%s label_id=%s F[ell]=%s",
+                t,
+                first_mismatch[0],
+                first_mismatch[1],
+                first_mismatch[2],
+                first_mismatch[3],
+            )
+    es = float(1.0 - (best_t / S))
+    _alog(
+        "result best_t=%s S=%s es=1-best_t/S=%s (best_t==S means no t in [0,S-1] passed)",
+        best_t,
+        S,
+        es,
+    )
+    return es
 
 
 def compute_prob_from_fixation_logits(

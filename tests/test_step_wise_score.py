@@ -5,6 +5,8 @@ Tests for step-wise score provider (generalized unlearning metrics).
 - sequence_probability_from_scores and evaluate_probability_via_provider format.
 """
 
+import logging
+
 import pytest
 import torch
 from unittest.mock import Mock
@@ -278,6 +280,33 @@ class TestExtractionStrengthFromFixation:
             fixation_logits, labels, F, S, logit_alignment="causal"
         )
         assert 0 <= es <= 1
+
+    def test_audit_logs_branches_and_best_t(self, caplog):
+        """DEBUG audit: EXTRACTION_STRENGTH_AUDIT traces branches, loop_t, result."""
+        caplog.set_level(logging.DEBUG, logger="evaluator")
+        L, V, S = 3, 10, 4
+        fixation_logits = torch.zeros(L, V)
+        fixation_logits[0, 1] = 10.0
+        fixation_logits[1, 0] = 10.0
+        fixation_logits[2, 3] = 10.0
+        labels = torch.tensor([1, 2, 3])
+        F = torch.tensor([0, 1, 2])
+        es = extraction_strength_from_fixation(
+            fixation_logits,
+            labels,
+            F,
+            S,
+            logit_alignment="same_position",
+            audit=True,
+            audit_ctx={"sample_idx": "0", "step": 7, "traj_name": "steps", "view": "full"},
+        )
+        assert abs(es - 0.5) < 1e-5
+        joined = "\n".join(r.message for r in caplog.records)
+        assert "EXTRACTION_STRENGTH_AUDIT" in joined
+        assert "enter L=" in joined
+        assert "loop_t t=0 FAIL" in joined
+        assert "loop_t t=2 PASS" in joined
+        assert "result best_t=2" in joined
 
 
 def test_trajectory_step_logits_to_prob_batch_shape() -> None:

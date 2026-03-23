@@ -60,6 +60,7 @@ from evals.metrics.trajectory_audit import (
     log_pre_compute_probability,
     log_retain_reference_resolution,
     mu_trajectory_audit_runtime,
+    trajectory_config_as_dict,
 )
 from evals.metrics.mia.utils import get_attacker, MIAStreamingAccumulator
 from evals.gpu_phase_logger import set_phase as gpu_set_phase
@@ -2115,6 +2116,59 @@ def _compute_pre_compute_metrics_at_step(
     return pre_compute_results
 
 
+def _debug_log_rouge_trajectory_batched(
+    *,
+    dataset_key: Any,
+    traj_name: str,
+    view: str,
+    steps_to_use: list,
+    dataset_index_str: str,
+    batch_sample_idx: int,
+    gen_texts: list,
+    rouge_scores: list,
+    rouge_type: str,
+    ground_truth_str: str,
+    prompt_snippet: str,
+) -> None:
+    """DEBUG: every diffusion step for batched trajectory ROUGE (first row in batch only)."""
+    if not logger.isEnabledFor(logging.DEBUG):
+        return
+    if batch_sample_idx != 0:
+        return
+    for i, step in enumerate(steps_to_use):
+        if i >= len(rouge_scores):
+            break
+        rd = rouge_scores[i]
+        if not isinstance(rd, dict) or rouge_type not in rd:
+            continue
+        score = rd[rouge_type]
+        gen_t = gen_texts[i] if i < len(gen_texts) else ""
+        ml = 120
+        gs = (gen_t or "")[:ml] + ("..." if len(gen_t or "") > ml else "")
+        gts = (ground_truth_str or "")[:ml] + (
+            "..." if len(ground_truth_str or "") > ml else ""
+        )
+        ps = (prompt_snippet or "")[:ml] + (
+            "..." if len(prompt_snippet or "") > ml else ""
+        )
+        logger.debug(
+            "ROUGE trajectory batched dataset_key=%s traj=%s view=%s step_index=%s step=%s "
+            "dataset_index=%s batch_sample=%s rouge_type=%s score=%s prompt=%r gen=%r gt=%r",
+            dataset_key,
+            traj_name,
+            view,
+            i,
+            step,
+            dataset_index_str,
+            batch_sample_idx,
+            rouge_type,
+            score,
+            ps,
+            gs,
+            gts,
+        )
+
+
 def _handle_text_based_metric(logits, tokenizer, sample_labels, sample_input_ids, sample_prompt_len, metric_name, metric_config, **kwargs):
     """
     Generic handler for text-based metrics that require model.generate().
@@ -2162,19 +2216,12 @@ def _handle_text_based_metric(logits, tokenizer, sample_labels, sample_input_ids
     if use_rouge_only:
         from evals.metrics.utils import eval_rouge_recall_batch
 
-        # DEBUG-only: log prompt/gen/gt for first and last step, sample 0 and 1 (once in a few samples per trajectory).
+        # DEBUG-only: per-step prompt/gen/gt for dataset index 0 (hm_aggregate / per-step ROUGE path).
         if logger.isEnabledFor(logging.DEBUG):
             _step_index = kwargs.get("step_index")
-            _last_step_index = kwargs.get("last_step_index")
             _sidx = kwargs.get("sample_idx")
-            _first_step = _step_index == 0 or (_step_index is not None and _step_index == 0)
-            _is_last_step = (
-                _step_index is not None
-                and _last_step_index is not None
-                and _step_index == _last_step_index
-            )
-            _log_sample = _sidx in (0, "0", 1, "1")
-            if (_first_step or _is_last_step) and _log_sample:
+            _log_sample = _sidx in (0, "0")
+            if _log_sample:
                 _max_len = 100
                 _gen_snippet = (gen_text or "")[:_max_len] + ("..." if len(gen_text or "") > _max_len else "")
                 _gt_snippet = (ground_truth or "")[:_max_len] + ("..." if len(ground_truth or "") > _max_len else "")
@@ -2569,8 +2616,27 @@ def _call_metric_at_step(
                 fixation_logits = build_fixation_logits_from_R_F(R, F).squeeze(0)
             logit_alignment = trajectory_config.get("logit_alignment", "causal")
             F_sq = F.squeeze(0) if F.dim() > 1 else F
+            es_audit = bool(_audit_rt) and logger.isEnabledFor(logging.DEBUG)
+            es_ctx = None
+            if es_audit:
+                tc_d = trajectory_config_as_dict(trajectory_config)
+                es_ctx = {
+                    "sample_idx": sample_idx,
+                    "step": report_step,
+                    "traj_name": kwargs.get("traj_name"),
+                    "view": kwargs.get("trajectory_audit_view"),
+                    "tokenizer": tokenizer,
+                    "max_decode_chars": int(tc_d.get("trajectory_audit_max_decode_chars", 8000)),
+                }
             es_val = extraction_strength_from_fixation(
-                fixation_logits, lab, F_sq, S_val, logit_alignment, IGNORE_INDEX
+                fixation_logits,
+                lab,
+                F_sq,
+                S_val,
+                logit_alignment,
+                IGNORE_INDEX,
+                audit=es_audit,
+                audit_ctx=es_ctx,
             )
             return _audit_wrap([{"score": es_val}], es_branch="fixation_fast_path")
 
@@ -3718,9 +3784,35 @@ def trajectory_metrics(model, **kwargs):
                                         use_stemmer=True,
                                         scorer=rouge_scorer_instance,
                                     )
+                                    _pl0 = (
+                                        int(sample_prompt_len.item())
+                                        if hasattr(sample_prompt_len, "item")
+                                        else int(sample_prompt_len)
+                                    )
+                                    _pdec = (
+                                        tokenizer.decode(
+                                            sample_input_ids[:_pl0].tolist(),
+                                            skip_special_tokens=True,
+                                        )
+                                        if _pl0 > 0
+                                        else ""
+                                    )
                                     for metric_name in rouge_metrics_in_run:
                                         metric_cfg = loaded_metrics[metric_name]["config"]
                                         rouge_type = metric_cfg.get("rouge_type") or kwargs.get("rouge_type", "rougeL_f1")
+                                        _debug_log_rouge_trajectory_batched(
+                                            dataset_key=_key,
+                                            traj_name=traj_name,
+                                            view=view,
+                                            steps_to_use=steps_to_use,
+                                            dataset_index_str=idx_str,
+                                            batch_sample_idx=sample_idx,
+                                            gen_texts=gen_texts,
+                                            rouge_scores=rouge_scores,
+                                            rouge_type=rouge_type,
+                                            ground_truth_str=ground_truth_str,
+                                            prompt_snippet=_pdec,
+                                        )
                                         for i, step in enumerate(steps_to_use):
                                             if i < len(rouge_scores) and isinstance(rouge_scores[i], dict) and rouge_type in rouge_scores[i]:
                                                 step_values_by_view[view][traj_name][step][metric_name].append(rouge_scores[i][rouge_type])
@@ -3733,8 +3825,33 @@ def trajectory_metrics(model, **kwargs):
                                         [ground_truth_str] * len(steps_to_use),
                                         True,
                                     )
+                                    _pl0 = (
+                                        int(sample_prompt_len.item())
+                                        if hasattr(sample_prompt_len, "item")
+                                        else int(sample_prompt_len)
+                                    )
+                                    _pdec = (
+                                        tokenizer.decode(
+                                            sample_input_ids[:_pl0].tolist(),
+                                            skip_special_tokens=True,
+                                        )
+                                        if _pl0 > 0
+                                        else ""
+                                    )
                                     rouge_futures_this_sample.append(
-                                        (future, traj_name, rouge_metrics_in_run, steps_to_use, view)
+                                        (
+                                            future,
+                                            traj_name,
+                                            rouge_metrics_in_run,
+                                            steps_to_use,
+                                            view,
+                                            idx_str,
+                                            sample_idx,
+                                            list(gen_texts),
+                                            ground_truth_str,
+                                            _pdec,
+                                            _key,
+                                        )
                                     )
 
                         if "probability" in metrics_to_run and generated_labels is not None:
@@ -3998,15 +4115,59 @@ def trajectory_metrics(model, **kwargs):
             )
             if executor is not None and all_rouge_futures:
                 for item in all_rouge_futures:
-                    if len(item) == 5:
+                    if len(item) == 11:
+                        (
+                            future,
+                            traj_name,
+                            rouge_metrics_in_run,
+                            steps_to_use,
+                            view,
+                            idx_str_f,
+                            sample_idx_f,
+                            gen_texts_f,
+                            ground_truth_f,
+                            prompt_dec_f,
+                            dk,
+                        ) = item
+                    elif len(item) == 5:
                         future, traj_name, rouge_metrics_in_run, steps_to_use, view = item
+                        idx_str_f, sample_idx_f, gen_texts_f, ground_truth_f, prompt_dec_f, dk = (
+                            "",
+                            -1,
+                            [],
+                            "",
+                            "",
+                            None,
+                        )
                     else:
                         future, traj_name, rouge_metrics_in_run, steps_to_use = item
                         view = "full"
+                        idx_str_f, sample_idx_f, gen_texts_f, ground_truth_f, prompt_dec_f, dk = (
+                            "",
+                            -1,
+                            [],
+                            "",
+                            "",
+                            None,
+                        )
                     rouge_scores = future.result()
                     for metric_name in rouge_metrics_in_run:
                         metric_cfg = loaded_metrics[metric_name]["config"]
                         rouge_type = metric_cfg.get("rouge_type") or kwargs.get("rouge_type", "rougeL_f1")
+                        if len(item) == 11:
+                            _debug_log_rouge_trajectory_batched(
+                                dataset_key=dk,
+                                traj_name=traj_name,
+                                view=view,
+                                steps_to_use=steps_to_use,
+                                dataset_index_str=idx_str_f,
+                                batch_sample_idx=sample_idx_f,
+                                gen_texts=gen_texts_f,
+                                rouge_scores=rouge_scores,
+                                rouge_type=rouge_type,
+                                ground_truth_str=ground_truth_f,
+                                prompt_snippet=prompt_dec_f,
+                            )
                         for i, step in enumerate(steps_to_use):
                             if i < len(rouge_scores) and isinstance(rouge_scores[i], dict) and rouge_type in rouge_scores[i]:
                                 step_values_by_view[view][traj_name][step][metric_name].append(rouge_scores[i][rouge_type])
