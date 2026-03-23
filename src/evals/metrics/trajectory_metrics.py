@@ -53,6 +53,14 @@ from evals.metrics.trajectory_adapters import (
     LogitModelWrapper,
     DualLogitModelWrapper,
 )
+from evals.metrics.trajectory_audit import (
+    forget_trajectory_audit_runtime,
+    log_metric_audit,
+    log_mu_components_snapshot,
+    log_pre_compute_probability,
+    log_retain_reference_resolution,
+    mu_trajectory_audit_runtime,
+)
 from evals.metrics.mia.utils import get_attacker, MIAStreamingAccumulator
 from evals.gpu_phase_logger import set_phase as gpu_set_phase
 from evals.guardrails import (
@@ -1656,6 +1664,7 @@ def _compute_pre_compute_metrics_at_step(
     pre_compute_results = {}
     # Normalize so truth_ratio always sees same key type (str) for correct vs wrong value_by_index.
     idx_key = str(sample_idx)
+    _t_audit = bool(kwargs.get("trajectory_audit_runtime", False))
 
     for pre_metric_name, pre_metric_cfg in pre_compute_config.items():
         # Get access key (defaults to metric name)
@@ -1720,6 +1729,15 @@ def _compute_pre_compute_metrics_at_step(
                             "agg_value": None,
                             "value_by_index": {idx_key: {"prob": None, "avg_loss": None}},
                         }
+                    log_pre_compute_probability(
+                        access_key=access_key,
+                        handler_name="probability",
+                        sample_idx=idx_key,
+                        step=step,
+                        labels_field=labels_field,
+                        agg_prob=None,
+                        trajectory_audit_runtime=_t_audit,
+                    )
                     continue
                 logit_alignment = trajectory_config.get("logit_alignment", "causal")
                 provider = FixationStepWiseScoreProvider(logit_alignment=logit_alignment)
@@ -1754,6 +1772,18 @@ def _compute_pre_compute_metrics_at_step(
                                 "value_by_index": {idx_key: {"prob": None, "avg_loss": None}},
                             })
                     pre_compute_results[access_key] = wrong_results
+                    log_pre_compute_probability(
+                        access_key=access_key,
+                        handler_name="probability",
+                        sample_idx=idx_key,
+                        step=step,
+                        labels_field=labels_field,
+                        agg_prob=[
+                            x.get("agg_value") if isinstance(x, dict) else None
+                            for x in wrong_results
+                        ],
+                        trajectory_audit_runtime=_t_audit,
+                    )
                 elif lab is not None:
                     lab = lab.squeeze(0) if lab.dim() > 1 else lab
                     _ = (lab != IGNORE_INDEX).sum().item()  # num_non_ignore, reserved
@@ -1788,6 +1818,17 @@ def _compute_pre_compute_metrics_at_step(
                             "value_by_index": {idx_key: {"prob": None, "avg_loss": None}},
                         }
                     pre_compute_results[access_key] = pre_result
+                    log_pre_compute_probability(
+                        access_key=access_key,
+                        handler_name="probability",
+                        sample_idx=idx_key,
+                        step=step,
+                        labels_field=labels_field,
+                        agg_prob=pre_result.get("agg_value")
+                        if isinstance(pre_result, dict)
+                        else None,
+                        trajectory_audit_runtime=_t_audit,
+                    )
                 else:
                     logger.info(
                         "pre_compute probability (generalized): labels missing "
@@ -1801,6 +1842,17 @@ def _compute_pre_compute_metrics_at_step(
                         "value_by_index": {idx_key: {"prob": None, "avg_loss": None}},
                     }
                     pre_compute_results[access_key] = pre_result
+                    log_pre_compute_probability(
+                        access_key=access_key,
+                        handler_name="probability",
+                        sample_idx=idx_key,
+                        step=step,
+                        labels_field=labels_field,
+                        agg_prob=pre_result.get("agg_value")
+                        if isinstance(pre_result, dict)
+                        else None,
+                        trajectory_audit_runtime=_t_audit,
+                    )
             except Exception as e:
                 logger.warning(
                     "pre_compute probability (generalized): exception — %s (sample_idx=%s, step=%s, labels_field=%s)",
@@ -1814,6 +1866,15 @@ def _compute_pre_compute_metrics_at_step(
                     "agg_value": None,
                     "value_by_index": {idx_key: {"prob": None, "avg_loss": None}},
                 }
+                log_pre_compute_probability(
+                    access_key=access_key,
+                    handler_name="probability",
+                    sample_idx=idx_key,
+                    step=step,
+                    labels_field=labels_field,
+                    agg_prob=None,
+                    trajectory_audit_runtime=_t_audit,
+                )
             continue
 
         # Compute pre-compute metric at this step
@@ -1825,7 +1886,12 @@ def _compute_pre_compute_metrics_at_step(
                 wrong_results = []
                 for lab_tensor in labels_val:
                     pre_bt = {**batch_template, "labels": lab_tensor}
-                    kwargs_clean = {k: v for k, v in kwargs.items() if k not in ("tokenizer", "model_wrapper_override")}
+                    kwargs_clean = {
+                        k: v
+                        for k, v in kwargs.items()
+                        if k not in ("tokenizer", "model_wrapper_override")
+                    }
+                    kwargs_clean["trajectory_audit_runtime"] = False
                     pre_result_k = _call_metric_at_step(
                         metric=pre_metric,
                         logits=logits,
@@ -1858,6 +1924,18 @@ def _compute_pre_compute_metrics_at_step(
                             pre_result_k["value_by_index"] = {idx_key: {"prob": None, "avg_loss": None}}
                     wrong_results.append(pre_result_k)
                 pre_compute_results[access_key] = wrong_results
+                log_pre_compute_probability(
+                    access_key=access_key,
+                    handler_name=handler_name,
+                    sample_idx=idx_key,
+                    step=step,
+                    labels_field=labels_field,
+                    agg_prob=[
+                        x.get("agg_value") if isinstance(x, dict) else None
+                        for x in wrong_results
+                    ],
+                    trajectory_audit_runtime=_t_audit,
+                )
                 continue
             pre_batch_template = batch_template
             if labels_field and labels_field in batch_template:
@@ -1867,7 +1945,12 @@ def _compute_pre_compute_metrics_at_step(
                 }
             # Call the pre-compute metric at this step
             # Remove tokenizer from kwargs if present to avoid duplicate argument
-            kwargs_clean = {k: v for k, v in kwargs.items() if k not in ("tokenizer", "model_wrapper_override")}
+            kwargs_clean = {
+                k: v
+                for k, v in kwargs.items()
+                if k not in ("tokenizer", "model_wrapper_override")
+            }
+            kwargs_clean["trajectory_audit_runtime"] = False
             pre_result = _call_metric_at_step(
                 metric=pre_metric,
                 logits=logits,
@@ -1901,6 +1984,18 @@ def _compute_pre_compute_metrics_at_step(
                         "agg_value": first.get("prob") if isinstance(first, dict) else first.get("avg_loss"),
                     })
                 pre_compute_results[access_key] = wrong_results
+                log_pre_compute_probability(
+                    access_key=access_key,
+                    handler_name=handler_name,
+                    sample_idx=idx_key,
+                    step=step,
+                    labels_field=labels_field,
+                    agg_prob=[
+                        x.get("agg_value") if isinstance(x, dict) else None
+                        for x in wrong_results
+                    ],
+                    trajectory_audit_runtime=_t_audit,
+                )
                 continue
 
             # Structure result in the format expected by main metrics
@@ -1991,6 +2086,17 @@ def _compute_pre_compute_metrics_at_step(
                 }
             
             pre_compute_results[access_key] = pre_result
+            log_pre_compute_probability(
+                access_key=access_key,
+                handler_name=handler_name,
+                sample_idx=idx_key,
+                step=step,
+                labels_field=labels_field,
+                agg_prob=pre_result.get("agg_value")
+                if isinstance(pre_result, dict)
+                else None,
+                trajectory_audit_runtime=_t_audit,
+            )
 
         except Exception as e:
             from evals.metrics.base import RetainReferenceValidationError
@@ -2365,6 +2471,26 @@ def _call_metric_at_step(
             elif metric.name == "ks_test" and retain_logs.get("retain_forget_tr_by_step"):
                 by_step = retain_logs["retain_forget_tr_by_step"]
                 step_retain = (by_step.get(step_str_by_val) if step_str_by_val else None) or (by_step.get(step_str_by_idx) if step_str_by_idx else None)
+        if bool(kwargs.get("trajectory_audit_runtime")) and logger.isEnabledFor(logging.DEBUG):
+            _by_audit: dict = {}
+            if retain_logs:
+                if metric.name == "privleak":
+                    _by_audit = retain_logs.get("retain_mia_by_step") or {}
+                elif metric.name == "ks_test":
+                    _by_audit = retain_logs.get("retain_forget_tr_by_step") or {}
+            _ks = sorted(
+                _by_audit.keys(),
+                key=lambda x: int(x) if str(x).isdigit() else 0,
+            )[:64]
+            log_retain_reference_resolution(
+                metric_name=metric.name,
+                step_val=step_val,
+                step_index=step_index,
+                step_str_by_val=step_str_by_val,
+                step_str_by_idx=step_str_by_idx,
+                by_step_keys_sample=[str(k) for k in _ks],
+                resolved=step_retain is not None,
+            )
         if step_retain is not None:
             ref_logs_step = copy.deepcopy(ref_logs)
             if "retain_model_logs" not in ref_logs_step:
@@ -2392,6 +2518,34 @@ def _call_metric_at_step(
     # their underlying batch functions instead. Map known metrics to their batch functions.
     metric_name = metric.name
 
+    _audit_rt = bool(kwargs.get("trajectory_audit_runtime", False))
+    _jpath = kwargs.get("trajectory_audit_jsonl_path")
+    _jsid = str(kwargs.get("trajectory_audit_jsonl_sample_id", "0"))
+
+    def _audit_wrap(result, *, es_branch=None):
+        if _audit_rt and logger.isEnabledFor(logging.DEBUG):
+            _hm_pc = metric_kwargs.get("pre_compute") if metric_name == "hm_aggregate" else None
+            _kw_audit = dict(kwargs)
+            _agg = metric_config.get("aggregator")
+            if _agg is not None:
+                _kw_audit["aggregator"] = _agg
+            log_metric_audit(
+                handler_metric_name=metric_name,
+                result=result,
+                logits=logits,
+                tokenizer=tokenizer,
+                sample_input_ids=sample_input_ids,
+                sample_prompt_len=sample_prompt_len,
+                sample_idx=sample_idx,
+                kwargs=_kw_audit,
+                pre_compute_results=pre_compute_results or None,
+                hm_pre_compute=_hm_pc if isinstance(_hm_pc, dict) else None,
+                es_branch=es_branch,
+                jsonl_path=_jpath,
+                jsonl_sample_id=_jsid,
+            )
+        return result
+
     trajectory_config = kwargs.get("trajectory_config")
     sample_traj = kwargs.get("sample_traj")
     if (
@@ -2418,7 +2572,7 @@ def _call_metric_at_step(
             es_val = extraction_strength_from_fixation(
                 fixation_logits, lab, F_sq, S_val, logit_alignment, IGNORE_INDEX
             )
-            return [{"score": es_val}]
+            return _audit_wrap([{"score": es_val}], es_branch="fixation_fast_path")
 
     def _exact_memorization_batch_fn(model, batch, **kwargs):
         """Compute exact memorization for a single batch."""
@@ -2481,7 +2635,7 @@ def _call_metric_at_step(
             result = _compute_prob_from_fixation_logits(
                 logits, labels_full, device, ignore_index=IGNORE_INDEX
             )
-            return result
+            return _audit_wrap(result)
     
     # Try using batch function if available
     if metric_name in batch_function_map:
@@ -2490,7 +2644,8 @@ def _call_metric_at_step(
             # Batch functions like evaluate_probability only accept (model, batch)
             # Don't pass any other kwargs
             result = batch_fn(model=model_wrapper, batch=batch)
-            return result
+            _es_br = "tokenwise_batch" if metric_name == "extraction_strength" else None
+            return _audit_wrap(result, es_branch=_es_br)
         except Exception as e:
             from evals.metrics.base import RetainReferenceValidationError
             if isinstance(e, RetainReferenceValidationError):
@@ -2504,7 +2659,7 @@ def _call_metric_at_step(
     # Try calling the metric function directly
     try:
         result = metric._metric_fn(**metric_kwargs)
-        return result
+        return _audit_wrap(result)
     except (KeyError, TypeError, AttributeError) as e:
         # Check if this is a text-based metric that needs generation
         error_msg = str(e).lower()
@@ -2537,7 +2692,7 @@ def _call_metric_at_step(
                     metric_config=metric_config,
                     **text_kw
                 )
-                return result
+                return _audit_wrap(result)
             except Exception as text_e:
                 logger.warning(
                     f"Error in generic text-based handler for {metric_name}: {text_e}. "
@@ -2572,7 +2727,7 @@ def _call_metric_at_step(
                     metric_config=metric_config,
                     **text_kw
                 )
-                return result
+                return _audit_wrap(result)
             except Exception as text_e:
                 logger.warning(
                     f"Error in generic text-based handler for {metric_name}: {text_e}",
@@ -2962,6 +3117,19 @@ def trajectory_metrics(model, **kwargs):
                 )
         if "hm_aggregate" in loaded_metrics and logger.isEnabledFor(logging.DEBUG):
             _debug_log_mu_submetric_coverage(retain_agg_by_step)
+        if (
+            "hm_aggregate" in loaded_metrics
+            and isinstance(data, dict)
+            and data.get("retain") is not None
+        ):
+            _n_mu_retain = len(data["retain"])
+            _mu_audit_on = mu_trajectory_audit_runtime(
+                trajectory_config, _n_mu_retain
+            )
+            log_mu_components_snapshot(
+                retain_agg_by_step=retain_agg_by_step,
+                trajectory_audit_mu=_mu_audit_on,
+            )
         kwargs["retain_agg_by_step"] = retain_agg_by_step
 
         # Log once when reference_logs was provided but step-matched data is missing (no fallback to aggregate).
@@ -3116,6 +3284,12 @@ def trajectory_metrics(model, **kwargs):
                 f"Trajectory forget dataset: {n_samples} samples, batch_size {batch_size}, "
                 f"expected batches: {expected_batches} (last batch index: {expected_batches - 1})"
             )
+            _audit_on, _audit_jpath, _audit_jsid = forget_trajectory_audit_runtime(
+                trajectory_config, n_samples
+            )
+            kwargs["trajectory_audit_runtime"] = _audit_on
+            kwargs["trajectory_audit_jsonl_path"] = _audit_jpath
+            kwargs["trajectory_audit_jsonl_sample_id"] = _audit_jsid
             if logger.isEnabledFor(logging.DEBUG):
                 _sampler_kw_preview = _trajectory_sampler_kwargs(trajectory_config)
                 _max_new = _sampler_kw_preview.get("max_new_tokens")
@@ -3691,6 +3865,11 @@ def trajectory_metrics(model, **kwargs):
                                         logits_view = logits[:, :L_eff_slice] if view == "eos" else logits
                                         kwargs_metric = dict(kwargs_clean)
                                         kwargs_metric["traj_name"] = traj_name
+                                        kwargs_metric["trajectory_audit_batch_idx"] = batch_idx
+                                        kwargs_metric["trajectory_audit_view"] = view
+                                        kwargs_metric["last_step_index"] = (
+                                            len(steps_to_use) - 1 if steps_to_use else None
+                                        )
                                         if metric_name == "hm_aggregate":
                                             kwargs_metric["trajectory_view"] = view
                                         result = _call_metric_at_step(
