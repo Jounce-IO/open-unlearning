@@ -1,0 +1,81 @@
+# @package eval.muse_trajectory.metrics.trajectory_muse_knowmem
+# Knowmem-only trajectory pass: max_new_tokens **32** (same as upstream non-traj ROUGE).
+# Co-bundled with `trajectory_muse_verbmem` from `muse_trajectory.yaml` so full MUSE traj
+# matches upstream caps without forcing knowmem onto verbmem's 128-token budget.
+#
+# Upstream (locuslab/open-unlearning):
+#   - https://github.com/locuslab/open-unlearning/blob/main/configs/generation/default.yaml
+#   - https://github.com/locuslab/open-unlearning/blob/main/configs/eval/muse_metrics/forget_knowmem_ROUGE.yaml
+#   - https://github.com/locuslab/open-unlearning/blob/main/configs/eval/muse_metrics/retain_knowmem_ROUGE.yaml
+
+defaults:
+  - ../../collator@collators: DataCollatorForSupervisedDatasetwithIndex
+
+handler: trajectory_metrics
+batch_size: 4
+sort_by_length: true
+include_metrics: null
+
+metrics:
+  forget_knowmem_rouge:
+    handler: rouge
+    dataset_key: forget_knowmem
+    rouge_type: rougeL_f1
+  retain_knowmem_rouge:
+    handler: rouge
+    dataset_key: retain_knowmem
+    rouge_type: rougeL_f1
+
+metric_display_names:
+  - trajectory_forget_knowmem_ROUGE
+  - trajectory_retain_knowmem_ROUGE
+
+trajectory_config:
+  logits_source: sampler
+  return_logits: true
+  return_fixation_steps: true
+  use_generalized_sequence_probability: true
+  include_views: [full, eos]
+  metric_worker_pool_size: 4
+  sampler_kwargs:
+    steps: 8 # ceil(32/4) with default tokens_per_step 4
+    temperature: 0.0
+    max_new_tokens: 32
+    trajectory_sample_interval: 8
+
+datasets:
+  forget_knowmem:
+    access_key: forget_knowmem
+    handler: QADataset
+    args:
+      hf_args:
+        path: muse-bench/MUSE-${eval.muse_trajectory.data_split}
+        name: knowmem
+        split: "forget_qa[:5]"
+      few_shot_dataset_hf_args:
+        path: muse-bench/MUSE-${eval.muse_trajectory.data_split}
+        name: knowmem
+        split: "forget_qa_icl"
+      predict_with_generate: true
+  retain_knowmem:
+    access_key: retain_knowmem
+    handler: QADataset
+    args:
+      hf_args:
+        path: muse-bench/MUSE-${eval.muse_trajectory.data_split}
+        name: knowmem
+        split: "retain_qa[:5]"
+      few_shot_dataset_hf_args:
+        path: muse-bench/MUSE-${eval.muse_trajectory.data_split}
+        name: knowmem
+        split: "retain_qa_icl"
+      predict_with_generate: true
+
+collators:
+  DataCollatorForSupervisedDataset:
+    args:
+      padding_side: left
+
+generation_args:
+  max_new_tokens: 32
+  stopwords: ["\n\n", "\nQuestion", "Question:"]

@@ -3,10 +3,8 @@
 # Computes metrics at each diffusion step across three trajectory types
 # Note: Using _global_ to allow this metric to work with any eval config (muse, trajectory_test, etc.)
 #
-# max_new_tokens (sampler): 128 — coalesced trajectory cap; matches upstream verbmem ROUGE (knowmem ROUGE alone is 32).
-# Upstream references:
-#   - https://github.com/locuslab/open-unlearning/blob/main/configs/eval/muse_metrics/forget_knowmem_ROUGE.yaml
-#   - https://github.com/locuslab/open-unlearning/blob/main/configs/eval/muse_metrics/forget_verbmem_ROUGE.yaml
+# max_new_tokens (sampler): 32 — dataset is knowmem; matches upstream forget_knowmem_ROUGE.
+# Upstream: https://github.com/locuslab/open-unlearning/blob/main/configs/eval/muse_metrics/forget_knowmem_ROUGE.yaml
 
 defaults:
   - ../../data/datasets@datasets: MUSE_forget_knowmem
@@ -22,9 +20,9 @@ trajectory_config:
   return_logits: true
   return_fixation_steps: true
   sampler_kwargs:
-    steps: 16
+    steps: 8
     temperature: 0.0
-    max_new_tokens: 128
+    max_new_tokens: 32
 # path uses ${data_split}; data_split set at root by experiment/CLI
 # split override via eval.metrics.trajectory_metrics.datasets.MUSE_forget_knowmem.args.hf_args.split
 datasets:
@@ -43,3 +41,7 @@ collators:
   DataCollatorForSupervisedDataset:
     args:
       padding_side: left  # For generation
+
+generation_args:
+  max_new_tokens: 32
+  stopwords: ["\n\n", "\nQuestion", "Question:"]

@@ -1,0 +1,6 @@
+# Snippet: explicit non-generalized ("legacy") sequence probability for non-trajectory evals.
+# Merge these keys into your `eval.tofu` / `eval.muse` package (or set via Hydra override).
+#
+# Effect: handler `probability` uses `evaluate_probability` (standard causal CE) instead of
+# the default generalized path (ARStepWiseScoreProvider for AR; fixation logits for DiffusionModelAdapter).
+use_generalized_sequence_probability: false

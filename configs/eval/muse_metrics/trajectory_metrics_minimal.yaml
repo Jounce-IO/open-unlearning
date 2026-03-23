@@ -1,10 +1,8 @@
 # @package eval.muse_trajectory.metrics.trajectory_metrics_minimal
 # Minimal trajectory metrics config - only ROUGE, 5 samples
 #
-# max_new_tokens (sampler): 128 — same rationale as trajectory_metrics.yaml (verbmem-aligned cap for coalesced runs).
-# Upstream references:
-#   - https://github.com/locuslab/open-unlearning/blob/main/configs/eval/muse_metrics/forget_knowmem_ROUGE.yaml
-#   - https://github.com/locuslab/open-unlearning/blob/main/configs/eval/muse_metrics/forget_verbmem_ROUGE.yaml
+# max_new_tokens (sampler): 32 — knowmem dataset; matches upstream forget_knowmem_ROUGE.
+# Upstream: https://github.com/locuslab/open-unlearning/blob/main/configs/eval/muse_metrics/forget_knowmem_ROUGE.yaml
 
 defaults:
   - ../../data/datasets@datasets: MUSE_forget_knowmem
@@ -22,9 +20,9 @@ trajectory_config:
   return_logits: true
   return_fixation_steps: true
   sampler_kwargs:
-    steps: 16  # Reduced for testing
+    steps: 8
     temperature: 0.0
-    max_new_tokens: 128
+    max_new_tokens: 32
 
 # path uses ${data_split} for News/Books; data_split is set at root by experiment/dllm eval
 # split must be in hf_args (QADataset passes hf_args to load_dataset); slice for samples
@@ -45,3 +43,7 @@ collators:
   DataCollatorForSupervisedDataset:
     args:
       padding_side: left
+
+generation_args:
+  max_new_tokens: 32
+  stopwords: ["\n\n", "\nQuestion", "Question:"]

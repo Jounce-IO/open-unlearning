@@ -10,6 +10,7 @@ Covers:
 
 from __future__ import annotations
 
+import math
 import sys
 from pathlib import Path
 
@@ -92,7 +93,7 @@ def test_non_generalized_3d_labels_wrong_structure():
 def test_non_generalized_3d_labels_wrong_tr_raises_when_no_valid_pre_compute():
     """
     With real TOFU-like 3D labels_wrong, pre_compute can end up with no valid avg_loss.
-    truth_ratio returns agg_value=None when no valid pre_compute so trajectory eval continues.
+    truth_ratio returns agg_value=nan when no valid pre_compute (upstream parity); value_by_index is empty.
     """
     from datasets import load_dataset
     from transformers import AutoTokenizer
@@ -143,13 +144,13 @@ def test_non_generalized_3d_labels_wrong_tr_raises_when_no_valid_pre_compute():
         sample_idx="0",
     )
     tr = METRICS_REGISTRY["truth_ratio"]
-    # No valid pre_compute (wrong has None avg_loss) → truth_ratio returns None so eval continues.
+    # No valid pre_compute (wrong has None avg_loss) → truth_ratio returns NaN agg_value.
     result = tr._metric_fn(
         model=None,
         pre_compute={"correct": results["correct"], "wrong": results["wrong"]},
         aggregator="closer_to_1_better",
     )
-    assert result["agg_value"] is None
+    assert math.isnan(result["agg_value"])
     assert result["value_by_index"] == {}
 
 
@@ -324,10 +325,10 @@ def test_generalized_correct_single_tensor_returns_valid():
     assert c["value_by_index"]["0"]["avg_loss"] is not None
 
 
-def test_generalized_L_zero_pre_compute_then_truth_ratio_returns_none():
+def test_generalized_L_zero_pre_compute_then_truth_ratio_returns_nan():
     """
     When L=0 we early-exit and set pre_compute to None for correct/wrong.
-    truth_ratio returns agg_value=None, value_by_index={} so trajectory eval can continue.
+    truth_ratio returns agg_value=nan and value_by_index={} (upstream parity).
     """
     from evals.metrics.trajectory_metrics import _compute_pre_compute_metrics_at_step
     from evals.metrics import METRICS_REGISTRY
@@ -376,5 +377,5 @@ def test_generalized_L_zero_pre_compute_then_truth_ratio_returns_none():
         pre_compute={"correct": results["correct"], "wrong": results["wrong"]},
         aggregator="closer_to_1_better",
     )
-    assert result["agg_value"] is None
+    assert math.isnan(result["agg_value"])
     assert result["value_by_index"] == {}

@@ -13,12 +13,13 @@ or their geometric mean; they are agnostic to model type or alignment.
 from __future__ import annotations
 
 import logging
-from typing import Any, Optional, Protocol
+from typing import Any, Dict, List, Optional, Protocol
 
 import numpy as np
 import torch
 
 from data.utils import IGNORE_INDEX
+from evals.metrics.utils import _tensor_to_list_of_floats
 
 logger = logging.getLogger("evaluator")
 
@@ -298,3 +299,127 @@ def extraction_strength_from_fixation(
             best_t = t
             break
     return float(1.0 - (best_t / S))
+
+
+def compute_prob_from_fixation_logits(
+    fixation_logits: torch.Tensor,
+    labels: torch.Tensor,
+    device: torch.device,
+    ignore_index: int = IGNORE_INDEX,
+) -> List[Dict[str, float]]:
+    """Per-sample ``prob`` / ``avg_loss`` from batch fixation logits (trajectory step helper).
+
+    Shared by trajectory ``_call_metric_at_step`` (probability) and tests. Uses shifted
+    logits/labels CE (same as legacy batch path) so results align with
+    ``FixationStepWiseScoreProvider`` when the first label position is ignored (standard LM).
+    """
+    with torch.no_grad():
+        fixation_logits = fixation_logits.to(device)
+        labels = labels.to(device)
+        t_fl = fixation_logits.shape[1]
+        t_lab = labels.shape[1]
+        t = min(t_fl, t_lab)
+        fixation_logits = fixation_logits[:, :t, :].contiguous()
+        labels = labels[:, :t].contiguous()
+        shifted_logits = fixation_logits[..., :-1, :].contiguous()
+        shifted_labels = labels[..., 1:].contiguous()
+        if shifted_logits.dtype in (torch.bfloat16, torch.float16):
+            shifted_logits = shifted_logits.float()
+        loss_fn = torch.nn.CrossEntropyLoss(ignore_index=ignore_index, reduction="none")
+        losses = loss_fn(shifted_logits.transpose(-1, -2), shifted_labels).sum(dim=-1)
+        num_token_gt = (shifted_labels != ignore_index).sum(dim=-1).clamp(min=1)
+        avg_losses = losses / num_token_gt
+        normalized_probs = torch.exp(-avg_losses)
+        avg_losses_list = _tensor_to_list_of_floats(avg_losses)
+        normalized_probs_list = _tensor_to_list_of_floats(normalized_probs)
+        return [
+            {"prob": prob, "avg_loss": avg_loss}
+            for prob, avg_loss in zip(normalized_probs_list, avg_losses_list)
+        ]
+
+
+def trajectory_step_logits_to_prob_batch(logits_vl: torch.Tensor) -> torch.Tensor:
+    """Convert trajectory step logits ``[V, L]`` to batch ``[1, L, V]`` for sequence probability.
+
+    Use with ``compute_prob_from_fixation_logits`` on fixation-aligned rows so results match
+    ``FixationStepWiseScoreProvider`` / non-traj generalized probability (no extra row shuffle).
+    """
+    return logits_vl.t().unsqueeze(0)
+
+
+def evaluate_probability_confidence_ordered_from_fixation_logits(
+    fixation_logits: torch.Tensor,
+    labels: torch.Tensor,
+    *,
+    logit_alignment: str = "causal",
+    ignore_index: int = IGNORE_INDEX,
+) -> List[Dict[str, Any]]:
+    """Confidence-ordered sequence probability from fixation logits ``[B, L, V]`` (dLLM).
+
+    For each sample, collects per-position probability of the target token using the same
+    index rule as ``FixationStepWiseScoreProvider``, sorts descending, geometric mean.
+    """
+    fixation_logits = fixation_logits.float()
+    log_probs = torch.nn.functional.log_softmax(fixation_logits, dim=-1)
+    B, L, V = fixation_logits.shape
+    results: List[Dict[str, Any]] = []
+    for b in range(B):
+        pos_probs: list[float] = []
+        for ell in range(L):
+            if labels[b, ell].item() == ignore_index:
+                continue
+            logit_idx = max(0, ell - 1) if logit_alignment == "causal" else ell
+            y = int(labels[b, ell].item())
+            if y < 0 or y >= V:
+                continue
+            lp = log_probs[b, logit_idx, y].item()
+            pos_probs.append(float(np.exp(lp)))
+        if not pos_probs:
+            logger.info(
+                "confidence_ordered (fixation): no valid target positions for sample %s",
+                b,
+            )
+            results.append({"prob": None, "avg_loss": None})
+            continue
+        pos_arr = np.array(pos_probs, dtype=np.float64)
+        pos_probs_sorted = np.sort(pos_arr)[::-1]
+        geom_mean = float(np.exp(np.mean(np.log(pos_probs_sorted + 1e-12))))
+        avg_loss = float(-np.log(geom_mean + 1e-12))
+        results.append({
+            "prob": geom_mean,
+            "avg_loss": avg_loss,
+            "confidence_ordered_probs": pos_probs_sorted.tolist(),
+        })
+    return results
+
+
+def diffusion_fixation_logits_for_probability(
+    model: Any,
+    input_ids: torch.Tensor,
+    attention_mask: Optional[torch.Tensor],
+    labels: torch.Tensor,
+    ignore_index: int,
+) -> torch.Tensor:
+    """Sampler-based fixation logits [B, T, V] for non-traj generalized probability (dLLM).
+
+    Delegates to ``DiffusionModelAdapter._fixation_logits_from_sampler`` so scoring matches
+    trajectory generalized probability (``trajectory_step_logits_to_prob_batch`` +
+    ``compute_prob_from_fixation_logits``) without running the full ``trajectory_metrics`` loop.
+    """
+    try:
+        from dllm.integrations.open_unlearning_adapter import (
+            DiffusionModelAdapter,
+        )
+    except ImportError as exc:
+        raise ImportError(
+            "non-trajectory generalized sequence probability for diffusion models requires "
+            "dllm.integrations.open_unlearning_adapter.DiffusionModelAdapter"
+        ) from exc
+    if not isinstance(model, DiffusionModelAdapter):
+        raise TypeError(
+            "use_generalized_sequence_probability=True with diffusion sampling requires "
+            f"DiffusionModelAdapter, got {type(model).__name__}"
+        )
+    return model._fixation_logits_from_sampler(
+        input_ids, attention_mask, labels, ignore_index
+    )

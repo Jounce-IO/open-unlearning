@@ -31,15 +31,16 @@ from evals.metrics.utils import (
     eval_rouge_recall_batch_worker,
     tokenwise_vocab_logprobs,
     IGNORE_INDEX,
-    _tensor_to_list_of_floats,
 )
 from rouge_score import rouge_scorer
 from evals.metrics.step_wise_score import (
     FixationStepWiseScoreProvider,
     build_effective_step_fixation_logits,
     build_fixation_logits_from_R_F,
+    compute_prob_from_fixation_logits as _compute_prob_from_fixation_logits,
     sequence_probability_from_scores,
     extraction_strength_from_fixation,
+    trajectory_step_logits_to_prob_batch,
 )
 from evals.metrics.trajectory_utils import (
     trajectories_from_logits,
@@ -69,11 +70,48 @@ _trajectory_single_retain_warned: set = set()
 DEFAULT_TRAJECTORY_SAMPLE_INTERVAL = 8
 
 
+def _trajectory_metric_display_name(metric_name: str, loaded_metrics: Dict[str, Any]) -> str:
+    """Prefer metric config ``display_name`` when set (coalesced / Hydra); else logical key."""
+    info = loaded_metrics.get(metric_name) if isinstance(loaded_metrics, dict) else None
+    cfg = (info or {}).get("config") if isinstance(info, dict) else None
+    if isinstance(cfg, dict):
+        dn = cfg.get("display_name")
+        if dn is not None and str(dn).strip():
+            return str(dn)
+    return metric_name
+
+
+def _trajectory_submetric_generalized_applied(
+    metric_name: str, trajectory_config: Dict[str, Any]
+) -> str:
+    """Contract metric-logging: generalized_applied for trajectory sub-metrics."""
+    u = bool(trajectory_config.get("use_generalized_sequence_probability", True))
+    if metric_name in (
+        "probability",
+        "truth_ratio",
+        "probability_confidence_ordered",
+        "extraction_strength",
+        "privleak",
+        "mia_loss",
+        "mia_zlib",
+        "mia_reference",
+    ):
+        return str(u)
+    if metric_name in (
+        "mia_min_k",
+        "mia_min_k_plus_plus",
+        "mia_gradnorm",
+    ):
+        return "not_applicable"
+    return "not_applicable"
+
+
 def _debug_log_trajectory_metric_coverage(
     agg_value_by_view: Dict[str, Any],
     loaded_metrics: Dict[str, Any],
     trajectory_names: List[str],
     include_views: List[str],
+    trajectory_config: Dict[str, Any],
 ) -> None:
     """Emit TRAJECTORY_METRIC_COVERAGE lines (grep/parse to verify all metrics ran)."""
     if not logger.isEnabledFor(logging.DEBUG):
@@ -84,6 +122,15 @@ def _debug_log_trajectory_metric_coverage(
             lengths: Dict[str, int] = {}
             finite: Dict[str, int] = {}
             for metric_name in metric_names:
+                _handler = (
+                    (loaded_metrics.get(metric_name) or {}).get("metric").name
+                    if isinstance(loaded_metrics.get(metric_name), dict)
+                    and (loaded_metrics.get(metric_name) or {}).get("metric") is not None
+                    else metric_name
+                )
+                _gen = _trajectory_submetric_generalized_applied(
+                    metric_name, trajectory_config
+                )
                 block = (agg_value_by_view.get(view) or {}).get(traj_name) or {}
                 arr = block.get(metric_name)
                 if arr is None:
@@ -92,6 +139,16 @@ def _debug_log_trajectory_metric_coverage(
                         view,
                         traj_name,
                         metric_name,
+                    )
+                    _disp = _trajectory_metric_display_name(metric_name, loaded_metrics)
+                    logger.debug(
+                        "TRAJECTORY_SUBMETRIC_GENERALIZED view=%s traj=%s metric=%s display_name=%s handler=%s generalized_applied=%s",
+                        view,
+                        traj_name,
+                        metric_name,
+                        _disp,
+                        _handler,
+                        _gen,
                     )
                     continue
                 a = np.asarray(arr, dtype=np.float64)
@@ -106,6 +163,16 @@ def _debug_log_trajectory_metric_coverage(
                     metric_name,
                     n,
                     n_fin,
+                )
+                _disp = _trajectory_metric_display_name(metric_name, loaded_metrics)
+                logger.debug(
+                    "TRAJECTORY_SUBMETRIC_GENERALIZED view=%s traj=%s metric=%s display_name=%s handler=%s generalized_applied=%s",
+                    view,
+                    traj_name,
+                    metric_name,
+                    _disp,
+                    _handler,
+                    _gen,
                 )
             pos_lens = {m: lengths[m] for m in lengths if lengths[m] > 0}
             if len(set(pos_lens.values())) > 1:
@@ -389,44 +456,6 @@ def should_run_gc(threshold: float = 0.9) -> bool:
     if total <= 0:
         return False
     return (torch.cuda.memory_allocated() / total) >= threshold
-
-
-def _compute_prob_from_fixation_logits(
-    fixation_logits: torch.Tensor,
-    labels: torch.Tensor,
-    device: torch.device,
-    ignore_index: int = IGNORE_INDEX,
-) -> List[Dict[str, float]]:
-    """Compute per-sample probability (exp(-avg_loss)) from fixation logits and labels.
-
-    Handles length mismatch (e.g. sampler returns shorter sequence than padded batch labels)
-    by trimming to min length so cross_entropy does not raise. Counts num_token_gt only
-    over used (non-ignore) positions. Uses no_grad to avoid retaining gradient buffers (OOM).
-    """
-    with torch.no_grad():
-        fixation_logits = fixation_logits.to(device)
-        labels = labels.to(device)
-        B, T_fl, V = fixation_logits.shape
-        T_lab = labels.shape[1]
-        T = min(T_fl, T_lab)
-        fixation_logits = fixation_logits[:, :T, :].contiguous()
-        labels = labels[:, :T].contiguous()
-        shifted_logits = fixation_logits[..., :-1, :].contiguous()
-        shifted_labels = labels[..., 1:].contiguous()
-        if shifted_logits.dtype in (torch.bfloat16, torch.float16):
-            shifted_logits = shifted_logits.float()
-        loss_fn = torch.nn.CrossEntropyLoss(ignore_index=ignore_index, reduction="none")
-        losses = loss_fn(shifted_logits.transpose(-1, -2), shifted_labels).sum(dim=-1)
-        num_token_gt = (shifted_labels != ignore_index).sum(dim=-1).clamp(min=1)
-        avg_losses = losses / num_token_gt
-        normalized_probs = torch.exp(-avg_losses)
-        # Single GPU→CPU transfer per tensor; release GPU tensors promptly
-        avg_losses_list = _tensor_to_list_of_floats(avg_losses)
-        normalized_probs_list = _tensor_to_list_of_floats(normalized_probs)
-        return [
-            {"prob": prob, "avg_loss": avg_loss}
-            for prob, avg_loss in zip(normalized_probs_list, avg_losses_list)
-        ]
 
 
 def _per_position_scores_from_R_F_batch(
@@ -2595,6 +2624,22 @@ def trajectory_metrics(model, **kwargs):
         # Extract config
         metrics_config = kwargs.get("metrics", [])
         trajectory_config = kwargs.get("trajectory_config", {})
+        rank = kwargs.get("rank", 0)
+        if rank == 0:
+            tc = trajectory_config
+            if OmegaConf.is_config(tc):
+                _tc = OmegaConf.to_container(tc, resolve=True) or {}
+            elif isinstance(tc, dict):
+                _tc = tc
+            else:
+                _tc = {}
+            if not isinstance(_tc, dict):
+                _tc = {}
+            _traj_u = bool(_tc.get("use_generalized_sequence_probability", True))
+            logger.info(
+                "trajectory_metrics: trajectory_config.use_generalized_sequence_probability=%s",
+                _traj_u,
+            )
         metric_worker_pool_size = trajectory_config.get("metric_worker_pool_size", 4)
         executor = (
             ProcessPoolExecutor(max_workers=metric_worker_pool_size)
@@ -2608,7 +2653,6 @@ def trajectory_metrics(model, **kwargs):
         sort_by_length = kwargs.get("sort_by_length", False)
         tokenizer = kwargs.get("tokenizer")
         _ = kwargs.get("generation_args", {})  # generation_args, reserved
-        rank = kwargs.get("rank", 0)
         world_size = kwargs.get("world_size", 1)
         use_distributed_sampler = world_size > 1
 
@@ -3523,9 +3567,6 @@ def trajectory_metrics(model, **kwargs):
                             use_generalized = trajectory_config.get(
                                 "use_generalized_sequence_probability", True
                             )
-                            logit_alignment = trajectory_config.get(
-                                "logit_alignment", "causal"
-                            )
                             if use_generalized:
                                 # Use traj_name-specific logits so probability differs by trajectory type (steps/fixation_start/etc).
                                 device = _get_logits_at_step(
@@ -3533,13 +3574,11 @@ def trajectory_metrics(model, **kwargs):
                                 ).device
                                 labels_full = generated_labels.to(device=device, dtype=torch.long)
                                 for i, step in enumerate(steps_to_use):
-                                    logits_step = _get_logits_at_step(
-                                        sample_traj, traj_name, step
-                                    ).t()  # [L, V]
-                                    # AR convention: logits[t] predicts label[t+1]
-                                    logits_step = torch.cat(
-                                        [logits_step[:1, :], logits_step[:-1, :]], dim=0
-                                    ).unsqueeze(0)  # [1, L, V]
+                                    logits_step = trajectory_step_logits_to_prob_batch(
+                                        _get_logits_at_step(
+                                            sample_traj, traj_name, step
+                                        )
+                                    )
                                     for view in include_views:
                                         if view == "full":
                                             logits_v = logits_step
@@ -3573,13 +3612,11 @@ def trajectory_metrics(model, **kwargs):
                                 ).device
                                 labels_full = generated_labels.to(device=device, dtype=torch.long)
                                 for i, step in enumerate(steps_to_use):
-                                    logits_step = _get_logits_at_step(
-                                        sample_traj, traj_name, step
-                                    ).t()  # [L, V]
-                                    # AR convention: logits[t] predicts label[t+1]
-                                    logits_step = torch.cat(
-                                        [logits_step[:1, :], logits_step[:-1, :]], dim=0
-                                    ).unsqueeze(0)  # [1, L, V]
+                                    logits_step = trajectory_step_logits_to_prob_batch(
+                                        _get_logits_at_step(
+                                            sample_traj, traj_name, step
+                                        )
+                                    )
                                     for view in include_views:
                                         if view == "full":
                                             logits_v = logits_step
@@ -4482,6 +4519,7 @@ def trajectory_metrics(model, **kwargs):
                 loaded_metrics,
                 trajectory_names,
                 include_views,
+                trajectory_config,
             )
 
         # Build trajectory step metadata so results can interpret step indices (which diffusion/unmasked-token step each index is).

@@ -34,3 +34,6 @@ samples: null
 retain_reference_mode: false
 question_key: "question" # Specifies which key to use during forget and retain evaluations (e.g. "question" or "paraphrased_question")
 batch_size: 32
+# Non-traj: default matches trajectory trajectory_config.use_generalized_sequence_probability
+use_generalized_sequence_probability: true
+logit_alignment: causal
