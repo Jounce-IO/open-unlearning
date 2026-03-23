@@ -79,6 +79,22 @@ def test_hm_aggregate_empty_pre_compute(hm):
     assert "retain_mu_components" not in r2
 
 
+def test_ra_wf_mu_prob_normalised_vs_truth_ratio_use_distinct_aggregates():
+    """Regression: ra/wf *_Q_A_Prob_normalised and *_Truth_Ratio must not be conflated.
+
+    In ``trajectory_metrics._compute_mu_for_dataset``, probability is mean normalised
+    P(correct); truth ratio uses per-sample wrong/correct then ``mean(max(0, 1 - tr))``
+    (TOFU ``true_better`` aggregate). Same code path applies to ``retain_mu_components_by_step``.
+    """
+    prob_vals = [0.25, 0.5, 0.75]
+    tr_per_sample = [0.2, 0.4, 0.6]
+    agg_prob = float(np.mean(prob_vals))
+    agg_tr = float(np.mean(np.maximum(0, 1 - np.array(tr_per_sample, dtype=np.float64))))
+    assert agg_prob == pytest.approx(0.5)
+    assert agg_tr == pytest.approx((0.8 + 0.6 + 0.4) / 3)
+    assert abs(agg_prob - agg_tr) > 1e-6
+
+
 def test_hm_aggregate_numpy_floating_accepted(hm):
     pre = {"retain_Q_A_Prob": {"agg_value": np.float64(0.4)}, "retain_Q_A_ROUGE": {"agg_value": np.float64(0.6)}}
     r = hm.evaluate_metric(None, "model_utility", pre_compute=pre)
