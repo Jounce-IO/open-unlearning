@@ -170,6 +170,12 @@ class FinetuneTrainer(Trainer):
         self.four_way_rouge_max_samples = (
             int(_rmax) if _rmax is not None else None
         )
+        _fe = kwargs.pop("four_way_eval_steps", 50)
+        _fr = kwargs.pop("four_way_rouge_eval_steps", 500)
+        self.four_way_eval_steps = max(1, int(_fe if _fe is not None else 50))
+        self.four_way_rouge_eval_steps = max(
+            1, int(_fr if _fr is not None else 500)
+        )
         super().__init__(*args, **kwargs)
 
     def evaluate(
@@ -231,12 +237,37 @@ class FinetuneTrainer(Trainer):
         # Four-way validation: eval_dataset is a dict of named datasets (forget, retain, holdout, utility).
         # Compute both method loss and constant CE loss per set, then merge and log.
         if isinstance(eval_dataset, dict):
+            step = int(
+                getattr(self.state, "global_step", 0) or 0
+                if hasattr(self, "state") and self.state is not None
+                else 0
+            )
+            fe = max(1, int(getattr(self, "four_way_eval_steps", 50)))
+            fr = max(1, int(getattr(self, "four_way_rouge_eval_steps", 500)))
+            run_general = step == 0 or step % fe == 0
+            if not run_general:
+                logger.info(
+                    "[eval] Skipping four-way (global_step=%d not on four_way_eval_steps=%d)",
+                    step,
+                    fe,
+                )
+                return {}
+            include_rouge = bool(getattr(self, "four_way_rouge", True)) and (
+                step == 0 or step % fr == 0
+            )
             logger.info(
-                "[eval] evaluate: running four-way validation keys=%s",
+                "[eval] evaluate: running four-way validation keys=%s "
+                "include_rouge=%s (step=%d)",
                 list(eval_dataset.keys()),
+                include_rouge,
+                step,
             )
             return self._evaluate_four_way(
-                eval_dataset, ignore_keys, metric_key_prefix, trial
+                eval_dataset,
+                ignore_keys,
+                metric_key_prefix,
+                trial,
+                include_rouge=include_rouge,
             )
         # Single dataset: default HF Trainer evaluate
         logger.info("[eval] evaluate: running single-dataset evaluation")
@@ -248,6 +279,7 @@ class FinetuneTrainer(Trainer):
         ignore_keys: Optional[List[str]] = None,
         metric_key_prefix: str = "eval",
         trial: Dict[str, Any] = None,
+        include_rouge: Optional[bool] = None,
     ):
         """Evaluate on each named dataset; report method loss and constant CE loss per set.
 
@@ -279,7 +311,10 @@ class FinetuneTrainer(Trainer):
             four_way_rouge_scores_from_strings_subprocess,
         )
 
-        four_way_rouge = getattr(self, "four_way_rouge", True)
+        four_way_rouge_attr = getattr(self, "four_way_rouge", True)
+        rouge_on = (
+            four_way_rouge_attr if include_rouge is None else bool(include_rouge)
+        )
         four_way_skip = frozenset(getattr(self, "four_way_rouge_skip_splits", ()) or ())
         four_way_only = getattr(self, "four_way_rouge_splits", None)
         if four_way_only is not None:
@@ -303,7 +338,7 @@ class FinetuneTrainer(Trainer):
             r1_sum, rlf_sum, rlr_sum, r_n = 0.0, 0.0, 0.0, 0
             self.model.eval()
             do_rouge = (
-                four_way_rouge
+                rouge_on
                 and name not in four_way_skip
                 and (four_way_only is None or name in four_way_only)
             )
