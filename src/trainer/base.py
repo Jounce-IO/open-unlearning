@@ -166,6 +166,10 @@ class FinetuneTrainer(Trainer):
         self.four_way_rouge_score_workers = kwargs.pop(
             "four_way_rouge_score_workers", None
         )
+        _rmax = kwargs.pop("four_way_rouge_max_samples", None)
+        self.four_way_rouge_max_samples = (
+            int(_rmax) if _rmax is not None else None
+        )
         super().__init__(*args, **kwargs)
 
     def evaluate(
@@ -266,6 +270,7 @@ class FinetuneTrainer(Trainer):
         except Exception:
             pass
 
+        from dllm.core.trainers.mdlm import _four_way_batch_head
         from dllm.four_way_rouge import (
             aggregate_four_way_rouge_batch_scores,
             default_rouge_cpu_workers,
@@ -320,6 +325,7 @@ class FinetuneTrainer(Trainer):
             if do_rouge and overlap_n > 0:
                 ctx = mp.get_context("spawn")
                 rouge_ex = ProcessPoolExecutor(max_workers=overlap_n, mp_context=ctx)
+            rouge_remaining = getattr(self, "four_way_rouge_max_samples", None)
             try:
                 for batch_idx, batch in enumerate(dataloader, start=1):
                     batch = self._prepare_inputs(batch)
@@ -350,7 +356,16 @@ class FinetuneTrainer(Trainer):
                                     ce_n += batch["input_ids"].size(0)
                             except Exception:
                                 pass
-                        if do_rouge:
+                        if do_rouge and (
+                            rouge_remaining is None or rouge_remaining > 0
+                        ):
+                            bsz = int(batch["input_ids"].size(0))
+                            if rouge_remaining is not None:
+                                n_rouge = min(bsz, rouge_remaining)
+                                rouge_batch = _four_way_batch_head(batch, n_rouge)
+                            else:
+                                n_rouge = bsz
+                                rouge_batch = batch
                             try:
                                 tok = getattr(self, "tokenizer", None) or getattr(
                                     self.model, "tokenizer", None
@@ -387,7 +402,7 @@ class FinetuneTrainer(Trainer):
                                         four_way_gen_texts_and_ground_truths_for_batch(
                                             self.model,
                                             tok,
-                                            batch,
+                                            rouge_batch,
                                             generation_args=gen_args,
                                             remasking=rem,
                                             tokens_per_step=max(1, tps),
@@ -403,7 +418,7 @@ class FinetuneTrainer(Trainer):
                                     scores = four_way_rouge_scores_for_batch(
                                         self.model,
                                         tok,
-                                        batch,
+                                        rouge_batch,
                                         generation_args=gen_args,
                                         remasking=rem,
                                         tokens_per_step=max(1, tps),
@@ -416,6 +431,8 @@ class FinetuneTrainer(Trainer):
                                     rlf_sum += b
                                     rlr_sum += c
                                     r_n += cnt
+                                if rouge_remaining is not None:
+                                    rouge_remaining -= n_rouge
                             except Exception as e:
                                 logger.warning(
                                     "Four-way eval: ROUGE failed for split %s: %s (%s)",
