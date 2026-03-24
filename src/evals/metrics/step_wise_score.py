@@ -179,6 +179,151 @@ def build_effective_step_fixation_logits(
     return gathered.permute(0, 2, 1)
 
 
+def log_es_trajectory_diagnostics(
+    R: torch.Tensor,
+    F: torch.Tensor,
+    S_val: int,
+    report_step: Optional[int],
+    fixation_logits: torch.Tensor,
+    *,
+    batch_idx: int,
+    sample_idx: str,
+    traj_name: Optional[str],
+    view: Optional[str],
+    step_index: Optional[int],
+    last_step_index: Optional[int],
+    audit_runtime: bool,
+    r_step_flat_atol: float = 1e-5,
+    prev_fixation_logits: Optional[torch.Tensor] = None,
+    es_diag_every_step: bool = False,
+) -> None:
+    """Log signals that explain flat or suspicious per-step extraction_strength curves.
+
+    Emits ``WARNING`` for a missing ``report_step`` (caller bug: same final fixation logits
+    every outer step). On the first trajectory step only (``step_index == 0``), emits
+    ``WARNING`` if ``R`` is (near) constant along the diffusion-step axis or if every
+    fixation index is zero (effective logits never move with ``report_step``).
+
+    When ``audit_runtime`` is true and DEBUG is enabled, emits a one-line ``DEBUG`` summary
+    on the first and last stored trajectory steps (or every step if ``es_diag_every_step``)
+    with ``F`` stats, max adjacent-step change in ``R``, distance of current effective logits
+    to final-fixation logits, max abs change vs previous step's effective logits
+    (``prev_fixation_logits``), and max abs change on the raw ``R`` slice at ``report_step``
+    vs ``report_step - 1``.
+    """
+    ctx = (
+        f"sample_idx={sample_idx} batch_idx={batch_idx} traj_name={traj_name!r} "
+        f"view={view!r} step_index={step_index} report_step={report_step}"
+    )
+    if report_step is None:
+        logger.warning(
+            "EXTRACTION_STRENGTH_TRAJ_DIAG missing report_step in ES fast path "
+            "(every outer step will use final fixation logits): %s",
+            ctx,
+        )
+        return
+
+    with torch.no_grad():
+        R_work = R.detach().float()
+        if R_work.dim() == 4:
+            R_work = R_work[0]
+        if R_work.dim() != 3:
+            return
+        _v, _l, s_r = R_work.shape
+        if s_r > 1:
+            r_step_delta_max = (R_work[:, :, 1:] - R_work[:, :, :-1]).abs().max().item()
+        else:
+            r_step_delta_max = 0.0
+
+        F_work = F.detach()
+        if F_work.dim() > 1:
+            F_work = F_work.reshape(-1)
+        else:
+            F_work = F_work.reshape(-1)
+        n_pos = int(F_work.numel())
+        if n_pos == 0:
+            return
+        f_long = F_work.long().clamp(min=0, max=max(0, S_val - 1))
+        n_f_zero = int((f_long == 0).sum().item())
+        f_min = int(f_long.min().item())
+        f_max = int(f_long.max().item())
+        rs = int(min(max(report_step, 0), max(0, S_val - 1)))
+        n_saturated = int((torch.tensor(rs, device=f_long.device) >= f_long).sum().item())
+        fl_final = build_fixation_logits_from_R_F(R, F).squeeze(0).float()
+        fl_now = fixation_logits.detach().float()
+        eff_vs_final_max = (fl_now - fl_final).abs().max().item()
+
+        fix_vs_prev_max = float("nan")
+        if prev_fixation_logits is not None:
+            prev = prev_fixation_logits.detach().float()
+            if prev.shape == fl_now.shape:
+                fix_vs_prev_max = (fl_now - prev).abs().max().item()
+            else:
+                fix_vs_prev_max = float("nan")
+
+        r_slice_delta_at_report = float("nan")
+        if report_step is not None and s_r > 1:
+            rs_i = int(min(max(report_step, 0), s_r - 1))
+            if rs_i > 0:
+                r_slice_delta_at_report = (
+                    (R_work[:, :, rs_i] - R_work[:, :, rs_i - 1]).abs().max().item()
+                )
+            else:
+                r_slice_delta_at_report = 0.0
+
+        n_argmax_flip_vs_prev: Optional[int] = None
+        if prev_fixation_logits is not None and prev_fixation_logits.shape == fl_now.shape:
+            p_now = fl_now.argmax(dim=-1)
+            p_prev = prev_fixation_logits.detach().float().argmax(dim=-1)
+            n_argmax_flip_vs_prev = int((p_now != p_prev).sum().item())
+
+    if step_index == 0:
+        if S_val > 1 and r_step_delta_max < r_step_flat_atol:
+            logger.warning(
+                "EXTRACTION_STRENGTH_TRAJ_DIAG R is (near) constant along trajectory axis "
+                "(max_adjacent_step_abs_diff=%.6g < atol=%.6g): %s",
+                r_step_delta_max,
+                r_step_flat_atol,
+                ctx,
+            )
+        if n_pos > 0 and n_f_zero == n_pos:
+            logger.warning(
+                "EXTRACTION_STRENGTH_TRAJ_DIAG all fixation indices are 0 "
+                "(s_eff=min(report_step,0) for every position → identical effective logits "
+                "for all report_step): %s",
+                ctx,
+            )
+
+    detail = bool(audit_runtime) and logger.isEnabledFor(logging.DEBUG)
+    if detail and last_step_index is not None and step_index is not None:
+        emit_detail = es_diag_every_step or step_index in (0, last_step_index)
+        if not emit_detail:
+            return
+        argmax_part = (
+            " n_argmax_flip_vs_prev=%s"
+            % (n_argmax_flip_vs_prev if n_argmax_flip_vs_prev is not None else "n/a")
+        )
+        logger.debug(
+            "EXTRACTION_STRENGTH_TRAJ_DIAG detail %s S_val=%s F_min=%s F_max=%s n_F_eq_0=%s "
+            "n_positions=%s n_saturated_eq_report=%s/%s R_adj_step_max_abs_diff=%.6g "
+            "R_slice_report_vs_prev_max_abs_diff=%.6g eff_vs_final_logits_max_abs_diff=%.6g "
+            "fix_vs_prev_max_abs_diff=%.6g%s",
+            ctx,
+            S_val,
+            f_min,
+            f_max,
+            n_f_zero,
+            n_pos,
+            n_saturated,
+            n_pos,
+            r_step_delta_max,
+            r_slice_delta_at_report,
+            eff_vs_final_max,
+            fix_vs_prev_max,
+            argmax_part,
+        )
+
+
 class FixationStepWiseScoreProvider:
     """
     Step-wise score provider for trajectory/fixation logits (dLLM).

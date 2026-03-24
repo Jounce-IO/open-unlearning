@@ -28,6 +28,7 @@ from evals.metrics.step_wise_score import (
     sequence_probability_from_scores,
     evaluate_probability_via_provider,
     extraction_strength_from_fixation,
+    log_es_trajectory_diagnostics,
     trajectory_step_logits_to_prob_batch,
 )
 
@@ -307,6 +308,52 @@ class TestExtractionStrengthFromFixation:
         assert "loop_t t=0 FAIL" in joined
         assert "loop_t t=2 PASS" in joined
         assert "result best_t=2" in joined
+
+    def test_traj_diag_warns_missing_report_step(self, caplog):
+        caplog.set_level(logging.WARNING, logger="evaluator")
+        V, L, S = 4, 3, 5
+        R = torch.randn(V, L, S)
+        F = torch.tensor([0, 1, 2])
+        fl = build_fixation_logits_from_R_F(R, F).squeeze(0)
+        log_es_trajectory_diagnostics(
+            R,
+            F,
+            S,
+            None,
+            fl,
+            batch_idx=0,
+            sample_idx="0",
+            traj_name="steps",
+            view="full",
+            step_index=0,
+            last_step_index=4,
+            audit_runtime=False,
+        )
+        joined = "\n".join(r.message for r in caplog.records)
+        assert "EXTRACTION_STRENGTH_TRAJ_DIAG missing report_step" in joined
+
+    def test_traj_diag_warns_flat_r_on_step_zero(self, caplog):
+        caplog.set_level(logging.WARNING, logger="evaluator")
+        V, L, S = 4, 3, 8
+        R = torch.ones(V, L, S)
+        F = torch.tensor([1, 2, 3])
+        fl = build_effective_step_fixation_logits(R, F, 0).squeeze(0)
+        log_es_trajectory_diagnostics(
+            R,
+            F,
+            S,
+            0,
+            fl,
+            batch_idx=0,
+            sample_idx="0",
+            traj_name="steps",
+            view="full",
+            step_index=0,
+            last_step_index=7,
+            audit_runtime=False,
+        )
+        joined = "\n".join(r.message for r in caplog.records)
+        assert "near) constant along trajectory axis" in joined
 
 
 def test_trajectory_step_logits_to_prob_batch_shape() -> None:

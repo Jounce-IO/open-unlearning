@@ -40,6 +40,7 @@ from evals.metrics.step_wise_score import (
     compute_prob_from_fixation_logits as _compute_prob_from_fixation_logits,
     sequence_probability_from_scores,
     extraction_strength_from_fixation,
+    log_es_trajectory_diagnostics,
     trajectory_step_logits_to_prob_batch,
 )
 from evals.metrics.trajectory_utils import (
@@ -2614,6 +2615,38 @@ def _call_metric_at_step(
                 ).squeeze(0)
             else:
                 fixation_logits = build_fixation_logits_from_R_F(R, F).squeeze(0)
+            _chain = kwargs.get("_es_fl_prev_chain")
+            _es_tkey = (
+                int(kwargs.get("trajectory_audit_batch_idx", -1)),
+                str(sample_idx),
+                str(kwargs.get("traj_name")),
+                str(kwargs.get("trajectory_audit_view")),
+            )
+            _prev_fl = _chain.get(_es_tkey) if _chain is not None else None
+            _tc_es = (
+                trajectory_config_as_dict(trajectory_config)
+                if trajectory_config is not None
+                else {}
+            )
+            _es_diag_every = bool(_tc_es.get("trajectory_es_diag_every_step", True))
+            log_es_trajectory_diagnostics(
+                R,
+                F,
+                S_val,
+                report_step,
+                fixation_logits,
+                batch_idx=int(kwargs.get("trajectory_audit_batch_idx", -1)),
+                sample_idx=str(sample_idx),
+                traj_name=kwargs.get("traj_name"),
+                view=kwargs.get("trajectory_audit_view"),
+                step_index=kwargs.get("step_index"),
+                last_step_index=kwargs.get("last_step_index"),
+                audit_runtime=bool(_audit_rt),
+                prev_fixation_logits=_prev_fl,
+                es_diag_every_step=_es_diag_every,
+            )
+            if _chain is not None:
+                _chain[_es_tkey] = fixation_logits.detach()
             logit_alignment = trajectory_config.get("logit_alignment", "causal")
             F_sq = F.squeeze(0) if F.dim() > 1 else F
             es_audit = bool(_audit_rt) and logger.isEnabledFor(logging.DEBUG)
@@ -3746,6 +3779,9 @@ def trajectory_metrics(model, **kwargs):
                             response_full_raw,
                         )
                     for traj_name in trajectory_names:
+                        # Per (batch row, dataset index, traj, view): previous step's effective
+                        # fixation logits for ES delta diagnostics (EXTRACTION_STRENGTH_TRAJ_DIAG).
+                        _es_fl_prev_chain: dict[tuple[Any, ...], torch.Tensor] = {}
                         for view in include_views:
                             for step in steps_to_use:
                                 if step not in step_values_by_view[view][traj_name]:
@@ -3976,6 +4012,7 @@ def trajectory_metrics(model, **kwargs):
                                         kwargs_clean["trajectory_config"] = trajectory_config
                                     if guardrail_config_with_pools is not None:
                                         kwargs_clean["guardrail_config"] = guardrail_config_with_pools
+                                    kwargs_clean["_es_fl_prev_chain"] = _es_fl_prev_chain
 
                                     for view in include_views:
                                         bt = batch_template if view == "full" else batch_template_eos
