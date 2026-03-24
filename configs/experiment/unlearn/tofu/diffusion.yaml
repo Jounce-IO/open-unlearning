@@ -53,6 +53,7 @@ data:
           name: ${retain_split}
           split: "train"
   # Four-way validation: forget, retain, holdout, utility (method loss + CE loss per set). No full TOFU evaluators unless retain_logs_path set.
+  # Each named split is capped at 100 rows in get_data (_cap_dataset_at_100 / VALIDATION_MAX_SAMPLES).
   validation_splits:
     forget:
       TOFU_QA_forget:
