@@ -24,6 +24,24 @@ from evals.metrics.utils import _tensor_to_list_of_floats
 logger = logging.getLogger("evaluator")
 
 
+def max_abs_adjacent_step_diff_along_traj_axis(R_work: torch.Tensor) -> float:
+    """Maximum |R[..., s+1] - R[..., s]| over all s, without materializing ``[V, L, S-1]``.
+
+    A full pairwise diff along the trajectory axis allocates ``V * L * (S-1)`` floats and
+    caused GPU OOM on large vocab (e.g. LLaDA) in production diagnostics.
+    """
+    _v, _l, s_r = R_work.shape
+    if s_r <= 1:
+        return 0.0
+    mx = 0.0
+    with torch.no_grad():
+        for s in range(s_r - 1):
+            d = (R_work[:, :, s + 1] - R_work[:, :, s]).abs().max().item()
+            if d > mx:
+                mx = d
+    return float(mx)
+
+
 class StepWiseScoreProvider(Protocol):
     """Protocol for computing per-position step-wise scores (and optional fixation steps)."""
 
@@ -176,7 +194,27 @@ def build_effective_step_fixation_logits(
     )
     index = s_eff.view(B, 1, L, 1).expand(B, V, L, 1).long()
     gathered = torch.gather(R, dim=3, index=index).squeeze(3)
-    return gathered.permute(0, 2, 1)
+    out = gathered.permute(0, 2, 1)
+    if logger.isEnabledFor(logging.DEBUG):
+        rsc = int(report_step_clamped)
+        se_min = int(s_eff.min().item())
+        se_max = int(s_eff.max().item())
+        n_follow_report = int((s_eff == rsc).sum().item())
+        logger.debug(
+            "build_effective_step_fixation_logits: B=%d V=%d L=%d S=%d report_step=%d "
+            "report_clamped=%d s_eff=[%d,%d] n_pos_s_eff_eq_report_clamped=%d/%d",
+            B,
+            V,
+            L,
+            S,
+            int(report_step),
+            rsc,
+            se_min,
+            se_max,
+            n_follow_report,
+            int(s_eff.numel()),
+        )
+    return out
 
 
 def log_es_trajectory_diagnostics(
@@ -201,6 +239,7 @@ def log_es_trajectory_diagnostics(
     fix_vs_prev_max_positions_list: int = 256,
     es_score: Optional[float] = None,
     best_t: Optional[int] = None,
+    prev_es_score: Optional[float] = None,
 ) -> None:
     """Log signals that explain flat or suspicious per-step extraction_strength curves.
 
@@ -208,6 +247,11 @@ def log_es_trajectory_diagnostics(
     every outer step). On the first trajectory step only (``step_index == 0``), emits
     ``WARNING`` if ``R`` is (near) constant along the diffusion-step axis or if every
     fixation index is zero (effective logits never move with ``report_step``).
+
+    When ``prev_es_score`` and ``es_score`` are set and ``step_index > 0``, emits
+    ``WARNING`` ``EXTRACTION_STRENGTH_ANOMALY es_unchanged_but_fixation_logits_moved`` if
+    ES is identical to the previous outer step but any position had a vocab-level logit
+    change vs the previous effective fixation logits (suggests ``best_t`` / ES loop stuck).
 
     When ``audit_runtime`` is true and DEBUG is enabled, emits a one-line ``DEBUG`` summary
     on the first and last stored trajectory steps (or every step if ``es_diag_every_step``)
@@ -245,10 +289,7 @@ def log_es_trajectory_diagnostics(
         if R_work.dim() != 3:
             return
         _v, _l, s_r = R_work.shape
-        if s_r > 1:
-            r_step_delta_max = (R_work[:, :, 1:] - R_work[:, :, :-1]).abs().max().item()
-        else:
-            r_step_delta_max = 0.0
+        r_step_delta_max = max_abs_adjacent_step_diff_along_traj_axis(R_work)
 
         F_work = F.detach()
         if F_work.dim() > 1:
@@ -316,6 +357,32 @@ def log_es_trajectory_diagnostics(
             p_now = fl_now.argmax(dim=-1)
             p_prev = prev_fixation_logits.detach().float().argmax(dim=-1)
             n_argmax_flip_vs_prev = int((p_now != p_prev).sum().item())
+
+    if (
+        step_index is not None
+        and int(step_index) > 0
+        and prev_es_score is not None
+        and es_score is not None
+        and abs(float(es_score) - float(prev_es_score)) <= 1e-12
+    ):
+        logits_moved = (
+            fix_vs_prev_n_pos_vocab_changed is not None
+            and fix_vs_prev_n_pos_vocab_changed > 0
+        )
+        if logits_moved:
+            logger.warning(
+                "EXTRACTION_STRENGTH_ANOMALY es_unchanged_but_fixation_logits_moved "
+                "%s prev_es=%.12g es=%.12g best_t=%s fix_vs_prev_max_abs_diff=%s "
+                "fix_vs_prev_n_pos_vocab_changed=%s",
+                ctx,
+                float(prev_es_score),
+                float(es_score),
+                "n/a" if best_t is None else str(int(best_t)),
+                fix_vs_prev_max
+                if fix_vs_prev_max == fix_vs_prev_max
+                else "nan",
+                fix_vs_prev_n_pos_vocab_changed,
+            )
 
     if step_index == 0:
         if S_val > 1 and r_step_delta_max < r_step_flat_atol:

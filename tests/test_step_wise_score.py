@@ -29,6 +29,7 @@ from evals.metrics.step_wise_score import (
     evaluate_probability_via_provider,
     extraction_strength_from_fixation,
     log_es_trajectory_diagnostics,
+    max_abs_adjacent_step_diff_along_traj_axis,
     trajectory_step_logits_to_prob_batch,
 )
 
@@ -232,6 +233,14 @@ class TestFixationStepWiseScoreProvider:
         assert len(scores) == L_lab - 1
         assert len(fixation_steps) == L_lab - 1
         assert all(0 <= p <= 1 for p in scores)
+
+
+def test_max_abs_adjacent_step_diff_matches_vectorized_small() -> None:
+    torch.manual_seed(0)
+    R = torch.randn(11, 13, 19)
+    a = max_abs_adjacent_step_diff_along_traj_axis(R)
+    b = (R[:, :, 1:] - R[:, :, :-1]).abs().max().item()
+    assert abs(a - b) < 1e-5
 
 
 class TestExtractionStrengthFromFixation:

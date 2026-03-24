@@ -2616,6 +2616,7 @@ def _call_metric_at_step(
             else:
                 fixation_logits = build_fixation_logits_from_R_F(R, F).squeeze(0)
             _chain = kwargs.get("_es_fl_prev_chain")
+            _score_chain = kwargs.get("_es_prev_score_chain")
             _es_tkey = (
                 int(kwargs.get("trajectory_audit_batch_idx", -1)),
                 str(sample_idx),
@@ -2623,6 +2624,9 @@ def _call_metric_at_step(
                 str(kwargs.get("trajectory_audit_view")),
             )
             _prev_fl = _chain.get(_es_tkey) if _chain is not None else None
+            _prev_es = (
+                _score_chain.get(_es_tkey) if _score_chain is not None else None
+            )
             _tc_es = (
                 trajectory_config_as_dict(trajectory_config)
                 if trajectory_config is not None
@@ -2680,9 +2684,12 @@ def _call_metric_at_step(
                 fix_vs_prev_max_positions_list=_es_fix_max_pos,
                 es_score=es_val,
                 best_t=_es_diag.get("best_t"),
+                prev_es_score=_prev_es,
             )
             if _chain is not None:
                 _chain[_es_tkey] = fixation_logits.detach()
+            if _score_chain is not None:
+                _score_chain[_es_tkey] = float(es_val)
             return _audit_wrap([{"score": es_val}], es_branch="fixation_fast_path")
 
     def _exact_memorization_batch_fn(model, batch, **kwargs):
@@ -3794,6 +3801,8 @@ def trajectory_metrics(model, **kwargs):
                         # Per (batch row, dataset index, traj, view): previous step's effective
                         # fixation logits for ES delta diagnostics (EXTRACTION_STRENGTH_TRAJ_DIAG).
                         _es_fl_prev_chain: dict[tuple[Any, ...], torch.Tensor] = {}
+                        # Same keys: previous outer step's ES scalar (flat-curve anomaly detection).
+                        _es_prev_score_chain: dict[tuple[Any, ...], float] = {}
                         for view in include_views:
                             for step in steps_to_use:
                                 if step not in step_values_by_view[view][traj_name]:
@@ -4025,6 +4034,9 @@ def trajectory_metrics(model, **kwargs):
                                     if guardrail_config_with_pools is not None:
                                         kwargs_clean["guardrail_config"] = guardrail_config_with_pools
                                     kwargs_clean["_es_fl_prev_chain"] = _es_fl_prev_chain
+                                    kwargs_clean["_es_prev_score_chain"] = (
+                                        _es_prev_score_chain
+                                    )
 
                                     for view in include_views:
                                         bt = batch_template if view == "full" else batch_template_eos
@@ -4125,6 +4137,36 @@ def trajectory_metrics(model, **kwargs):
                                 del batch_template_eos, logits
                             except NameError:
                                 pass
+
+                        if (
+                            "extraction_strength" in metrics_to_run
+                            and len(steps_to_use) >= 2
+                        ):
+                            for view in include_views:
+                                es_vals: list[float] = []
+                                for st in steps_to_use:
+                                    bucket = step_values_by_view[view][traj_name][
+                                        st
+                                    ].get("extraction_strength", [])
+                                    if bucket:
+                                        es_vals.append(float(bucket[-1]))
+                                if len(es_vals) >= 2:
+                                    lo, hi = min(es_vals), max(es_vals)
+                                    if hi - lo <= 1e-12:
+                                        logger.warning(
+                                            "EXTRACTION_STRENGTH_FLAT_TRAJECTORY "
+                                            "sample_idx=%s batch_idx=%s traj=%s view=%s "
+                                            "n_steps=%s es_constant=%.12g "
+                                            "(identical ES at every report_step; typical "
+                                            "causes: s_eff saturated / R flat on S / "
+                                            "best_t unchanged)",
+                                            idx_str,
+                                            batch_idx,
+                                            traj_name,
+                                            view,
+                                            len(es_vals),
+                                            lo,
+                                        )
 
                     if executor is not None and rouge_futures_this_sample:
                         all_rouge_futures.extend(rouge_futures_this_sample)
