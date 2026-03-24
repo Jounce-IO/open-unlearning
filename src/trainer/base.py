@@ -1,7 +1,10 @@
 # Modified from https://github.com/huggingface/transformers/blob/v4.45.1/src/transformers/trainer.py
 
+from collections import deque
+from concurrent.futures import ProcessPoolExecutor
 from typing import Dict, List, Optional, Union
 
+import multiprocessing as mp
 import os
 import numpy as np
 import logging
@@ -157,6 +160,12 @@ class FinetuneTrainer(Trainer):
         self.four_way_rouge_tokens_per_step = int(
             kwargs.pop("four_way_rouge_tokens_per_step", 4) or 4
         )
+        self.four_way_rouge_cpu_processes = kwargs.pop(
+            "four_way_rouge_cpu_processes", None
+        )
+        self.four_way_rouge_score_workers = kwargs.pop(
+            "four_way_rouge_score_workers", None
+        )
         super().__init__(*args, **kwargs)
 
     def evaluate(
@@ -257,11 +266,25 @@ class FinetuneTrainer(Trainer):
         except Exception:
             pass
 
+        from dllm.four_way_rouge import (
+            aggregate_four_way_rouge_batch_scores,
+            default_rouge_cpu_workers,
+            four_way_gen_texts_and_ground_truths_for_batch,
+            four_way_rouge_scores_for_batch,
+            four_way_rouge_scores_from_strings_subprocess,
+        )
+
         four_way_rouge = getattr(self, "four_way_rouge", True)
         four_way_skip = frozenset(getattr(self, "four_way_rouge_skip_splits", ()) or ())
         four_way_only = getattr(self, "four_way_rouge_splits", None)
         if four_way_only is not None:
             four_way_only = frozenset(four_way_only)
+
+        def _resolved_overlap_workers() -> int:
+            v = getattr(self, "four_way_rouge_cpu_processes", None)
+            if v is None:
+                return default_rouge_cpu_workers()
+            return max(0, int(v))
 
         for name, dataset in eval_dataset.items():
             if dataset is None or len(dataset) == 0:
@@ -279,85 +302,133 @@ class FinetuneTrainer(Trainer):
                 and name not in four_way_skip
                 and (four_way_only is None or name in four_way_only)
             )
-            for batch in dataloader:
-                batch = self._prepare_inputs(batch)
-                with torch.no_grad():
-                    loss, _, _ = self.prediction_step(
-                        self.model, batch, prediction_loss_only=False, ignore_keys=ignore_keys or []
-                    )
-                    if loss is not None:
-                        method_loss_sum += loss.item() * batch["input_ids"].size(0)
-                        method_n += batch["input_ids"].size(0)
-                    if ce_available:
-                        try:
-                            inner = getattr(self.model, "model", self.model)
-                            sched = getattr(
-                                getattr(self.model, "adapter_config", None),
-                                "scheduler",
-                                None,
-                            ) or LinearAlphaScheduler()
-                            proc = getattr(self.model, "tokenizer", None)
-                            if inner is not None and proc is not None and getattr(proc, "mask_token_id", None) is not None:
-                                ce = compute_masked_ce_eval_loss(
-                                    inner, batch, proc, sched, fixed_t=0.5
-                                )
-                                ce_loss_sum += ce.item() * batch["input_ids"].size(0)
-                                ce_n += batch["input_ids"].size(0)
-                        except Exception:
-                            pass
-                    if do_rouge:
-                        try:
-                            from dllm.four_way_rouge import (
-                                aggregate_four_way_rouge_batch_scores,
-                                four_way_rouge_scores_for_batch,
-                            )
+            overlap_n = _resolved_overlap_workers() if do_rouge else 0
+            score_workers = getattr(self, "four_way_rouge_score_workers", None)
+            rouge_ex: Optional[ProcessPoolExecutor] = None
+            rouge_pending: deque = deque()
 
-                            tok = getattr(self, "tokenizer", None) or getattr(
-                                self.model, "tokenizer", None
-                            )
-                            if tok is None:
-                                raise RuntimeError("tokenizer required for four-way ROUGE")
-                            gen_args = dict(
-                                getattr(self, "four_way_rouge_generation_args", None)
-                                or {}
-                            )
-                            if hasattr(self.model, "adapter_config"):
-                                ac = self.model.adapter_config
-                                gen_args.setdefault(
-                                    "max_new_tokens", getattr(ac, "max_new_tokens", 128)
+            def _consume_rouge_future(fut_entry) -> None:
+                nonlocal r1_sum, rlf_sum, rlr_sum, r_n
+                _, fut = fut_entry
+                scores = fut.result()
+                a, b, c, cnt = aggregate_four_way_rouge_batch_scores(scores)
+                r1_sum += a
+                rlf_sum += b
+                rlr_sum += c
+                r_n += cnt
+
+            if do_rouge and overlap_n > 0:
+                ctx = mp.get_context("spawn")
+                rouge_ex = ProcessPoolExecutor(max_workers=overlap_n, mp_context=ctx)
+            try:
+                for batch_idx, batch in enumerate(dataloader, start=1):
+                    batch = self._prepare_inputs(batch)
+                    with torch.no_grad():
+                        loss, _, _ = self.prediction_step(
+                            self.model,
+                            batch,
+                            prediction_loss_only=False,
+                            ignore_keys=ignore_keys or [],
+                        )
+                        if loss is not None:
+                            method_loss_sum += loss.item() * batch["input_ids"].size(0)
+                            method_n += batch["input_ids"].size(0)
+                        if ce_available:
+                            try:
+                                inner = getattr(self.model, "model", self.model)
+                                sched = getattr(
+                                    getattr(self.model, "adapter_config", None),
+                                    "scheduler",
+                                    None,
+                                ) or LinearAlphaScheduler()
+                                proc = getattr(self.model, "tokenizer", None)
+                                if inner is not None and proc is not None and getattr(proc, "mask_token_id", None) is not None:
+                                    ce = compute_masked_ce_eval_loss(
+                                        inner, batch, proc, sched, fixed_t=0.5
+                                    )
+                                    ce_loss_sum += ce.item() * batch["input_ids"].size(0)
+                                    ce_n += batch["input_ids"].size(0)
+                            except Exception:
+                                pass
+                        if do_rouge:
+                            try:
+                                tok = getattr(self, "tokenizer", None) or getattr(
+                                    self.model, "tokenizer", None
                                 )
-                                gen_args.setdefault(
-                                    "tokens_per_step", getattr(ac, "tokens_per_step", 4)
+                                if tok is None:
+                                    raise RuntimeError("tokenizer required for four-way ROUGE")
+                                gen_args = dict(
+                                    getattr(self, "four_way_rouge_generation_args", None)
+                                    or {}
                                 )
-                            rem = getattr(self, "four_way_rouge_remasking", None)
-                            if rem is None and hasattr(self.model, "adapter_config"):
-                                rem = self.model.adapter_config.remasking
-                            if rem is None:
-                                rem = "low_confidence"
-                            tps = int(
-                                getattr(self, "four_way_rouge_tokens_per_step", 4) or 4
-                            )
-                            scores = four_way_rouge_scores_for_batch(
-                                self.model,
-                                tok,
-                                batch,
-                                generation_args=gen_args,
-                                remasking=rem,
-                                tokens_per_step=max(1, tps),
-                            )
-                            a, b, c, cnt = aggregate_four_way_rouge_batch_scores(scores)
-                            r1_sum += a
-                            rlf_sum += b
-                            rlr_sum += c
-                            r_n += cnt
-                        except Exception as e:
-                            logger.warning(
-                                "Four-way eval: ROUGE failed for split %s: %s (%s)",
-                                name,
-                                e,
-                                type(e).__name__,
-                                exc_info=True,
-                            )
+                                if hasattr(self.model, "adapter_config"):
+                                    ac = self.model.adapter_config
+                                    gen_args.setdefault(
+                                        "max_new_tokens",
+                                        getattr(ac, "max_new_tokens", 128),
+                                    )
+                                    gen_args.setdefault(
+                                        "tokens_per_step",
+                                        getattr(ac, "tokens_per_step", 4),
+                                    )
+                                rem = getattr(self, "four_way_rouge_remasking", None)
+                                if rem is None and hasattr(self.model, "adapter_config"):
+                                    rem = self.model.adapter_config.remasking
+                                if rem is None:
+                                    rem = "low_confidence"
+                                tps = int(
+                                    getattr(self, "four_way_rouge_tokens_per_step", 4)
+                                    or 4
+                                )
+                                if overlap_n > 0 and rouge_ex is not None:
+                                    while len(rouge_pending) >= overlap_n:
+                                        _consume_rouge_future(rouge_pending.popleft())
+                                    gen_texts, ground_truths = (
+                                        four_way_gen_texts_and_ground_truths_for_batch(
+                                            self.model,
+                                            tok,
+                                            batch,
+                                            generation_args=gen_args,
+                                            remasking=rem,
+                                            tokens_per_step=max(1, tps),
+                                        )
+                                    )
+                                    fut = rouge_ex.submit(
+                                        four_way_rouge_scores_from_strings_subprocess,
+                                        gen_texts,
+                                        ground_truths,
+                                    )
+                                    rouge_pending.append((batch_idx, fut))
+                                else:
+                                    scores = four_way_rouge_scores_for_batch(
+                                        self.model,
+                                        tok,
+                                        batch,
+                                        generation_args=gen_args,
+                                        remasking=rem,
+                                        tokens_per_step=max(1, tps),
+                                        rouge_workers=score_workers,
+                                    )
+                                    a, b, c, cnt = aggregate_four_way_rouge_batch_scores(
+                                        scores
+                                    )
+                                    r1_sum += a
+                                    rlf_sum += b
+                                    rlr_sum += c
+                                    r_n += cnt
+                            except Exception as e:
+                                logger.warning(
+                                    "Four-way eval: ROUGE failed for split %s: %s (%s)",
+                                    name,
+                                    e,
+                                    type(e).__name__,
+                                    exc_info=True,
+                                )
+            finally:
+                if rouge_ex is not None:
+                    while rouge_pending:
+                        _consume_rouge_future(rouge_pending.popleft())
+                    rouge_ex.shutdown(wait=True)
             # All-reduce so multi-GPU runs get correct global averages and a single log.
             stats = torch.tensor(
                 [

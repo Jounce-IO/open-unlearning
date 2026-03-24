@@ -72,6 +72,9 @@ def test_four_way_evaluate_returns_method_and_ce_keys_when_available():
             eval_dataset=eval_dict,
             tokenizer=tokenizer,
             four_way_rouge_generation_args={"max_new_tokens": 4},
+            # Sync path so the mock on four_way_rouge_scores_for_batch applies.
+            four_way_rouge_cpu_processes=0,
+            four_way_rouge_score_workers=1,
         )
         result = trainer.evaluate(eval_dataset=eval_dict, metric_key_prefix="eval")
     # Four-way path returns EvalLoopOutput to match parent Trainer.evaluate()

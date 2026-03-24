@@ -146,6 +146,8 @@ def test_finetune_trainer_four_way_eval_real_rouge_unmocked():
         four_way_rouge=True,
         four_way_rouge_remasking="low_confidence",
         four_way_rouge_generation_args={"max_new_tokens": 24, "tokens_per_step": 4},
+        four_way_rouge_cpu_processes=0,
+        four_way_rouge_score_workers=1,
     )
 
     result = trainer.evaluate(eval_dataset=eval_dict, metric_key_prefix="eval")
