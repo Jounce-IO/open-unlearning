@@ -2628,7 +2628,38 @@ def _call_metric_at_step(
                 if trajectory_config is not None
                 else {}
             )
-            _es_diag_every = bool(_tc_es.get("trajectory_es_diag_every_step", True))
+            _es_diag_every = bool(_tc_es.get("trajectory_es_diag_every_step", False))
+            _es_diag_per_pos = bool(_tc_es.get("trajectory_es_diag_per_position", False))
+            _es_fix_atol = float(_tc_es.get("trajectory_es_diag_fix_vs_prev_atol", 1e-6))
+            _es_fix_max_pos = int(_tc_es.get("trajectory_es_diag_fix_vs_prev_max_positions", 256))
+            _es_audit_full = bool(_tc_es.get("trajectory_es_audit_full", False))
+            logit_alignment = trajectory_config.get("logit_alignment", "causal")
+            F_sq = F.squeeze(0) if F.dim() > 1 else F
+            es_audit = bool(_audit_rt) and logger.isEnabledFor(logging.DEBUG)
+            es_ctx = None
+            if es_audit:
+                tc_d = trajectory_config_as_dict(trajectory_config)
+                es_ctx = {
+                    "sample_idx": sample_idx,
+                    "step": report_step,
+                    "traj_name": kwargs.get("traj_name"),
+                    "view": kwargs.get("trajectory_audit_view"),
+                    "tokenizer": tokenizer,
+                    "max_decode_chars": int(tc_d.get("trajectory_audit_max_decode_chars", 8000)),
+                }
+            _es_diag: dict[str, Any] = {}
+            es_val = extraction_strength_from_fixation(
+                fixation_logits,
+                lab,
+                F_sq,
+                S_val,
+                logit_alignment,
+                IGNORE_INDEX,
+                audit=es_audit,
+                audit_ctx=es_ctx,
+                audit_compact=not _es_audit_full,
+                diag_out=_es_diag,
+            )
             log_es_trajectory_diagnostics(
                 R,
                 F,
@@ -2644,33 +2675,14 @@ def _call_metric_at_step(
                 audit_runtime=bool(_audit_rt),
                 prev_fixation_logits=_prev_fl,
                 es_diag_every_step=_es_diag_every,
+                fix_vs_prev_count_atol=_es_fix_atol,
+                es_diag_per_position=_es_diag_per_pos,
+                fix_vs_prev_max_positions_list=_es_fix_max_pos,
+                es_score=es_val,
+                best_t=_es_diag.get("best_t"),
             )
             if _chain is not None:
                 _chain[_es_tkey] = fixation_logits.detach()
-            logit_alignment = trajectory_config.get("logit_alignment", "causal")
-            F_sq = F.squeeze(0) if F.dim() > 1 else F
-            es_audit = bool(_audit_rt) and logger.isEnabledFor(logging.DEBUG)
-            es_ctx = None
-            if es_audit:
-                tc_d = trajectory_config_as_dict(trajectory_config)
-                es_ctx = {
-                    "sample_idx": sample_idx,
-                    "step": report_step,
-                    "traj_name": kwargs.get("traj_name"),
-                    "view": kwargs.get("trajectory_audit_view"),
-                    "tokenizer": tokenizer,
-                    "max_decode_chars": int(tc_d.get("trajectory_audit_max_decode_chars", 8000)),
-                }
-            es_val = extraction_strength_from_fixation(
-                fixation_logits,
-                lab,
-                F_sq,
-                S_val,
-                logit_alignment,
-                IGNORE_INDEX,
-                audit=es_audit,
-                audit_ctx=es_ctx,
-            )
             return _audit_wrap([{"score": es_val}], es_branch="fixation_fast_path")
 
     def _exact_memorization_batch_fn(model, batch, **kwargs):

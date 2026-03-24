@@ -196,6 +196,11 @@ def log_es_trajectory_diagnostics(
     r_step_flat_atol: float = 1e-5,
     prev_fixation_logits: Optional[torch.Tensor] = None,
     es_diag_every_step: bool = False,
+    fix_vs_prev_count_atol: float = 1e-6,
+    es_diag_per_position: bool = False,
+    fix_vs_prev_max_positions_list: int = 256,
+    es_score: Optional[float] = None,
+    best_t: Optional[int] = None,
 ) -> None:
     """Log signals that explain flat or suspicious per-step extraction_strength curves.
 
@@ -210,6 +215,16 @@ def log_es_trajectory_diagnostics(
     to final-fixation logits, max abs change vs previous step's effective logits
     (``prev_fixation_logits``), and max abs change on the raw ``R`` slice at ``report_step``
     vs ``report_step - 1``.
+
+    When ``prev_fixation_logits`` is given, also summarizes how many sequence positions had
+    at least one vocab logit change (|Δ| > ``fix_vs_prev_count_atol``) and the maximum
+    number of vocab dimensions that changed at a single position. If ``es_diag_per_position``
+    is true, emits an extra DEBUG line listing up to ``fix_vs_prev_max_positions_list``
+    pairs ``position:n_changed_vocab`` for positions with any change (remainder count if
+    truncated).
+
+    When ``es_score`` / ``best_t`` are set (caller computes ES after this tensor snapshot),
+    they are appended to the detail line so one log entry ties trajectory logits to ES.
     """
     ctx = (
         f"sample_idx={sample_idx} batch_idx={batch_idx} traj_name={traj_name!r} "
@@ -251,13 +266,38 @@ def log_es_trajectory_diagnostics(
         n_saturated = int((torch.tensor(rs, device=f_long.device) >= f_long).sum().item())
         fl_final = build_fixation_logits_from_R_F(R, F).squeeze(0).float()
         fl_now = fixation_logits.detach().float()
+        if fl_now.dim() == 3 and fl_now.shape[0] == 1:
+            fl_now = fl_now.squeeze(0)
         eff_vs_final_max = (fl_now - fl_final).abs().max().item()
 
         fix_vs_prev_max = float("nan")
+        fix_vs_prev_n_pos_vocab_changed: Optional[int] = None
+        fix_vs_prev_max_vocab_dims_one_pos: Optional[int] = None
+        fix_vs_prev_pos_counts_body: Optional[str] = None
+        fix_vs_prev_pos_counts_omitted = 0
         if prev_fixation_logits is not None:
             prev = prev_fixation_logits.detach().float()
+            if prev.dim() == 3 and prev.shape[0] == 1:
+                prev = prev.squeeze(0)
             if prev.shape == fl_now.shape:
                 fix_vs_prev_max = (fl_now - prev).abs().max().item()
+                diff_abs = (fl_now - prev).abs()
+                n_vocab_per_pos = (diff_abs > fix_vs_prev_count_atol).sum(dim=-1)
+                fix_vs_prev_n_pos_vocab_changed = int((n_vocab_per_pos > 0).sum().item())
+                fix_vs_prev_max_vocab_dims_one_pos = (
+                    int(n_vocab_per_pos.max().item())
+                    if n_vocab_per_pos.numel() > 0
+                    else 0
+                )
+                if es_diag_per_position and fix_vs_prev_n_pos_vocab_changed > 0:
+                    nz = torch.nonzero(n_vocab_per_pos > 0, as_tuple=False).flatten()
+                    cap = max(0, int(fix_vs_prev_max_positions_list))
+                    parts: list[str] = []
+                    for i in range(min(int(nz.numel()), cap)):
+                        ell = int(nz[i].item())
+                        parts.append(f"{ell}:{int(n_vocab_per_pos[ell].item())}")
+                    fix_vs_prev_pos_counts_body = ",".join(parts)
+                    fix_vs_prev_pos_counts_omitted = max(0, int(nz.numel()) - cap)
             else:
                 fix_vs_prev_max = float("nan")
 
@@ -303,11 +343,31 @@ def log_es_trajectory_diagnostics(
             " n_argmax_flip_vs_prev=%s"
             % (n_argmax_flip_vs_prev if n_argmax_flip_vs_prev is not None else "n/a")
         )
+        pos_part = (
+            " fix_vs_prev_n_pos_vocab_changed=%s fix_vs_prev_max_vocab_dims_one_pos=%s"
+            % (
+                fix_vs_prev_n_pos_vocab_changed
+                if fix_vs_prev_n_pos_vocab_changed is not None
+                else "n/a",
+                fix_vs_prev_max_vocab_dims_one_pos
+                if fix_vs_prev_max_vocab_dims_one_pos is not None
+                else "n/a",
+            )
+        )
+        es_part = (
+            " es=%.8g best_t=%s"
+            % (
+                float(es_score),
+                "n/a" if best_t is None else str(int(best_t)),
+            )
+            if es_score is not None
+            else " es=n/a best_t=n/a"
+        )
         logger.debug(
             "EXTRACTION_STRENGTH_TRAJ_DIAG detail %s S_val=%s F_min=%s F_max=%s n_F_eq_0=%s "
             "n_positions=%s n_saturated_eq_report=%s/%s R_adj_step_max_abs_diff=%.6g "
             "R_slice_report_vs_prev_max_abs_diff=%.6g eff_vs_final_logits_max_abs_diff=%.6g "
-            "fix_vs_prev_max_abs_diff=%.6g%s",
+            "fix_vs_prev_max_abs_diff=%.6g%s%s%s",
             ctx,
             S_val,
             f_min,
@@ -321,7 +381,25 @@ def log_es_trajectory_diagnostics(
             eff_vs_final_max,
             fix_vs_prev_max,
             argmax_part,
+            pos_part,
+            es_part,
         )
+        if (
+            es_diag_per_position
+            and fix_vs_prev_pos_counts_body is not None
+            and fix_vs_prev_pos_counts_body != ""
+        ):
+            omit_part = (
+                f" fix_vs_prev_pos_counts_omitted={fix_vs_prev_pos_counts_omitted}"
+                if fix_vs_prev_pos_counts_omitted > 0
+                else ""
+            )
+            logger.debug(
+                "EXTRACTION_STRENGTH_TRAJ_DIAG per_position %s fix_vs_prev_pos_n_changed_vocab=%s%s",
+                ctx,
+                fix_vs_prev_pos_counts_body,
+                omit_part,
+            )
 
 
 class FixationStepWiseScoreProvider:
@@ -414,6 +492,8 @@ def extraction_strength_from_fixation(
     *,
     audit: bool = False,
     audit_ctx: Optional[Mapping[str, Any]] = None,
+    audit_compact: bool = False,
+    diag_out: Optional[Dict[str, Any]] = None,
 ) -> float:
     """Compute dLLM extraction strength: 1 minus the smallest fraction of fixation steps to drop so the rest match target.
 
@@ -425,34 +505,49 @@ def extraction_strength_from_fixation(
 
     When ``audit`` is True and the evaluator logger is DEBUG-enabled, emits
     ``EXTRACTION_STRENGTH_AUDIT`` lines (branches, per-t pass/fail, ``best_t``, logits snippet, optional decode).
+    If ``audit_compact`` is True, only ``preds_summary`` and the final ``result`` line are logged (omit
+    per-step loop, logit snapshots, and decode noise).
+
+    If ``diag_out`` is a dict, it is filled with ``es``, ``best_t``, and ``n_valid`` on return (and
+    ``argmax_mismatch_on_valid`` when computed).
     """
     audit_on = bool(audit) and logger.isEnabledFor(logging.DEBUG)
     ap = _es_audit_prefix(audit_ctx)
+    verbose_audit = audit_on and not audit_compact
 
     def _alog(msg: str, *args: Any) -> None:
         if audit_on:
             logger.debug("EXTRACTION_STRENGTH_AUDIT " + ap + msg, *args)
 
+    def _diag(**kwargs: Any) -> None:
+        if diag_out is not None:
+            diag_out.update(kwargs)
+
     fixation_logits = fixation_logits.float()
     L, V = fixation_logits.shape
-    _alog(
-        "enter L=%s V=%s S=%s logit_alignment=%s ignore_index=%s fixation_logits_shape=%s labels_shape=%s F_shape=%s",
-        L,
-        V,
-        S,
-        logit_alignment,
-        ignore_index,
-        tuple(fixation_logits.shape),
-        tuple(labels.shape),
-        tuple(F.shape),
-    )
+    if verbose_audit:
+        _alog(
+            "enter L=%s V=%s S=%s logit_alignment=%s ignore_index=%s fixation_logits_shape=%s labels_shape=%s F_shape=%s",
+            L,
+            V,
+            S,
+            logit_alignment,
+            ignore_index,
+            tuple(fixation_logits.shape),
+            tuple(labels.shape),
+            tuple(F.shape),
+        )
     if L == 0 or S <= 0:
-        _alog("branch early_exit: L==0 or S<=0 (L=%s S=%s) -> return 0.0", L, S)
+        if verbose_audit:
+            _alog("branch early_exit: L==0 or S<=0 (L=%s S=%s) -> return 0.0", L, S)
+        _diag(es=0.0, best_t=int(S) if S > 0 else 0, n_valid=0)
         return 0.0
     L_lab = labels.shape[0]
     L_use = min(L, L_lab)
     if L_use == 0:
-        _alog("branch early_exit: L_use==0 (L=%s L_lab=%s) -> return 0.0", L, L_lab)
+        if verbose_audit:
+            _alog("branch early_exit: L_use==0 (L=%s L_lab=%s) -> return 0.0", L, L_lab)
+        _diag(es=0.0, best_t=int(S) if S > 0 else 0, n_valid=0)
         return 0.0
     preds = torch.zeros(L, dtype=torch.long, device=fixation_logits.device)
     for ell in range(L):
@@ -461,13 +556,16 @@ def extraction_strength_from_fixation(
     valid = (labels != ignore_index) & (labels >= 0) & (labels < V)
     n_valid = int(valid.sum().item())
     if n_valid == 0:
-        _alog("branch early_exit: no valid label positions (valid_count=0) -> return 0.0")
+        if verbose_audit:
+            _alog("branch early_exit: no valid label positions (valid_count=0) -> return 0.0")
+        _diag(es=0.0, best_t=int(S), n_valid=0)
         return 0.0
     F_np = F.cpu().numpy() if F.dim() > 0 else np.array([F.item()])
     if F_np.size != L:
-        _alog("branch F_broadcast: F_np.size=%s != L=%s -> broadcast_to (L,)", F_np.size, L)
+        if verbose_audit:
+            _alog("branch F_broadcast: F_np.size=%s != L=%s -> broadcast_to (L,)", F_np.size, L)
         F_np = np.broadcast_to(F_np, (L,))
-    else:
+    elif verbose_audit:
         _alog("branch F_shape: F_np.size == L=%s (no broadcast)", L)
     labels_np = labels.cpu().numpy()
     preds_np = preds.cpu().numpy()
@@ -492,12 +590,20 @@ def extraction_strength_from_fixation(
         except (TypeError, ValueError):
             max_chars = 8000
     tok = audit_ctx.get("tokenizer") if audit_ctx else None
-    if tok is not None and audit_on:
+    if tok is not None and verbose_audit:
         try:
             pred_ids = preds[:L_use].detach().cpu().tolist()
-            lab_ids = labels[:L_use].detach().cpu().tolist()
+            lab_ids_all = labels[:L_use].detach().cpu().tolist()
+            # Skip ignore_index and out-of-range ids — raw labels often include -100 for CE.
+            lab_ids = [
+                int(t)
+                for t in lab_ids_all
+                if int(t) != int(ignore_index) and 0 <= int(t) < V
+            ]
             pred_txt = tok.decode(pred_ids, skip_special_tokens=True)
-            lab_txt = tok.decode(lab_ids, skip_special_tokens=True)
+            lab_txt = (
+                tok.decode(lab_ids, skip_special_tokens=True) if lab_ids else ""
+            )
             if len(pred_txt) > max_chars:
                 pred_txt = pred_txt[:max_chars] + "…"
             if len(lab_txt) > max_chars:
@@ -506,7 +612,7 @@ def extraction_strength_from_fixation(
         except Exception as e:
             _alog("text_decode failed: %s", e)
     # Logit snapshot: up to 5 valid positions — logit row used, pred/label ids, log-prob of label token
-    if audit_on:
+    if verbose_audit:
         logged = 0
         with torch.no_grad():
             for ell in range(L_use):
@@ -550,14 +656,15 @@ def extraction_strength_from_fixation(
                     )
                     break
         if match:
-            _alog(
-                "loop_t t=%s PASS (all constrained positions match) -> best_t=%s break",
-                t,
-                t,
-            )
+            if verbose_audit:
+                _alog(
+                    "loop_t t=%s PASS (all constrained positions match) -> best_t=%s break",
+                    t,
+                    t,
+                )
             best_t = t
             break
-        if first_mismatch is not None:
+        if first_mismatch is not None and verbose_audit:
             _alog(
                 "loop_t t=%s FAIL first_mismatch ell=%s pred_id=%s label_id=%s F[ell]=%s",
                 t,
@@ -572,6 +679,12 @@ def extraction_strength_from_fixation(
         best_t,
         S,
         es,
+    )
+    _diag(
+        es=es,
+        best_t=int(best_t),
+        n_valid=n_valid,
+        argmax_mismatch_on_valid=mismatch_valid,
     )
     return es
 

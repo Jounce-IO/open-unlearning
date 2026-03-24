@@ -282,6 +282,42 @@ class TestExtractionStrengthFromFixation:
         )
         assert 0 <= es <= 1
 
+    def test_audit_text_decode_skips_ignore_index(self, caplog):
+        """Labels often include IGNORE_INDEX (-100); audit decode must not error."""
+        caplog.set_level(logging.DEBUG, logger="evaluator")
+
+        class _Tok:
+            def decode(self, ids, skip_special_tokens=True):
+                for i in ids:
+                    if i < 0:
+                        raise ValueError("negative id")
+                return "x"
+
+        L, V, S = 2, 10, 4
+        fixation_logits = torch.zeros(L, V)
+        fixation_logits[0, 1] = 10.0
+        fixation_logits[1, 2] = 10.0
+        labels = torch.tensor([IGNORE_INDEX, 2])
+        F = torch.tensor([0, 1])
+        extraction_strength_from_fixation(
+            fixation_logits,
+            labels,
+            F,
+            S,
+            logit_alignment="same_position",
+            audit=True,
+            audit_ctx={
+                "sample_idx": "0",
+                "step": 0,
+                "traj_name": "steps",
+                "view": "full",
+                "tokenizer": _Tok(),
+            },
+        )
+        joined = "\n".join(r.message for r in caplog.records)
+        assert "text_decode failed" not in joined
+        assert "text_decode pred_argmax_seq=" in joined
+
     def test_audit_logs_branches_and_best_t(self, caplog):
         """DEBUG audit: EXTRACTION_STRENGTH_AUDIT traces branches, loop_t, result."""
         caplog.set_level(logging.DEBUG, logger="evaluator")
@@ -299,6 +335,7 @@ class TestExtractionStrengthFromFixation:
             S,
             logit_alignment="same_position",
             audit=True,
+            audit_compact=False,
             audit_ctx={"sample_idx": "0", "step": 7, "traj_name": "steps", "view": "full"},
         )
         assert abs(es - 0.5) < 1e-5
@@ -308,6 +345,54 @@ class TestExtractionStrengthFromFixation:
         assert "loop_t t=0 FAIL" in joined
         assert "loop_t t=2 PASS" in joined
         assert "result best_t=2" in joined
+
+    def test_audit_compact_omits_loop_and_enter(self, caplog):
+        """Compact audit: preds_summary + result only (no per-t loop spam)."""
+        caplog.set_level(logging.DEBUG, logger="evaluator")
+        L, V, S = 3, 10, 4
+        fixation_logits = torch.zeros(L, V)
+        fixation_logits[0, 1] = 10.0
+        fixation_logits[1, 0] = 10.0
+        fixation_logits[2, 3] = 10.0
+        labels = torch.tensor([1, 2, 3])
+        F = torch.tensor([0, 1, 2])
+        extraction_strength_from_fixation(
+            fixation_logits,
+            labels,
+            F,
+            S,
+            logit_alignment="same_position",
+            audit=True,
+            audit_compact=True,
+            audit_ctx={"sample_idx": "0", "step": 7, "traj_name": "steps", "view": "full"},
+        )
+        joined = "\n".join(r.message for r in caplog.records)
+        assert "loop_t t=" not in joined
+        assert "enter L=" not in joined
+        assert "preds_summary" in joined
+        assert "result best_t=" in joined
+
+    def test_diag_out_populated(self):
+        L, V, S = 3, 10, 4
+        fixation_logits = torch.zeros(L, V)
+        fixation_logits[0, 1] = 10.0
+        fixation_logits[1, 0] = 10.0
+        fixation_logits[2, 3] = 10.0
+        labels = torch.tensor([1, 2, 3])
+        F = torch.tensor([0, 1, 2])
+        d: dict = {}
+        es = extraction_strength_from_fixation(
+            fixation_logits,
+            labels,
+            F,
+            S,
+            logit_alignment="same_position",
+            diag_out=d,
+        )
+        assert abs(es - 0.5) < 1e-5
+        assert d["best_t"] == 2
+        assert d["n_valid"] == 3
+        assert d["argmax_mismatch_on_valid"] == 1
 
     def test_traj_diag_warns_missing_report_step(self, caplog):
         caplog.set_level(logging.WARNING, logger="evaluator")
@@ -354,6 +439,45 @@ class TestExtractionStrengthFromFixation:
         )
         joined = "\n".join(r.message for r in caplog.records)
         assert "near) constant along trajectory axis" in joined
+
+    def test_traj_diag_per_position_vocab_change_counts(self, caplog):
+        """DEBUG detail: per-position counts of vocab logits that changed vs prev."""
+        caplog.set_level(logging.DEBUG, logger="evaluator")
+        V, L, S = 5, 4, 8
+        torch.manual_seed(0)
+        R = torch.randn(V, L, S)
+        F = torch.tensor([1, 2, 3, 1])
+        fl_prev = build_effective_step_fixation_logits(R, F, 1).squeeze(0).float()
+        fl_now = fl_prev.clone()
+        fl_now[0] = fl_now[0] + 1.0
+        fl_now[2, 3] = fl_now[2, 3] + 5.0
+        log_es_trajectory_diagnostics(
+            R,
+            F,
+            S,
+            1,
+            fl_now,
+            batch_idx=0,
+            sample_idx="0",
+            traj_name="steps",
+            view="full",
+            step_index=1,
+            last_step_index=7,
+            audit_runtime=True,
+            prev_fixation_logits=fl_prev,
+            es_diag_every_step=True,
+            fix_vs_prev_count_atol=0.5,
+            es_diag_per_position=True,
+            fix_vs_prev_max_positions_list=256,
+            es_score=0.25,
+            best_t=6,
+        )
+        joined = "\n".join(r.message for r in caplog.records)
+        assert " es=" in joined and "best_t=6" in joined
+        assert "fix_vs_prev_n_pos_vocab_changed=2" in joined
+        assert "fix_vs_prev_max_vocab_dims_one_pos=5" in joined
+        assert "EXTRACTION_STRENGTH_TRAJ_DIAG per_position" in joined
+        assert "fix_vs_prev_pos_n_changed_vocab=0:5,2:1" in joined
 
 
 def test_trajectory_step_logits_to_prob_batch_shape() -> None:
