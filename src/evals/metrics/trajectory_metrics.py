@@ -1641,8 +1641,12 @@ def _compute_pre_compute_metrics_at_step(
         sample_input_ids: Input IDs for the sample
         sample_prompt_len: Length of prompt
         sample_idx: Index string for this sample
-        **kwargs: Additional kwargs to pass to pre_compute metrics
-    
+        **kwargs: Additional kwargs to pass to pre_compute metrics.
+            When ``traj_name`` is set (forget trajectory loop: ``steps``, ``fixation_start``,
+            etc.), nested ``probability`` pre_compute uses these ``logits`` (trajectory-sliced)
+            via ``_call_metric_at_step``, not ``FixationStepWiseScoreProvider`` on full ``R``/``F``.
+            Full ``R``/``F`` generalized scoring is used only when ``traj_name`` is absent.
+
     Returns:
         Dict mapping access_key (or metric name) to metric results:
         {
@@ -1696,6 +1700,7 @@ def _compute_pre_compute_metrics_at_step(
             and trajectory_config.get("use_generalized_sequence_probability", True)
             and sample_traj is not None
             and handler_name == "probability"
+            and kwargs.get("traj_name") is None
         )
         if use_generalized:
             try:
@@ -3644,7 +3649,7 @@ def trajectory_metrics(model, **kwargs):
                                         torch.cuda.empty_cache()
 
                         for step in steps_to_use:
-                            # Use traj_name-specific logits so metrics (truth_ratio, extraction_strength, etc.) differ by trajectory type.
+                            # Trajectory-sliced logits per layout; truth_ratio nested probability uses them when traj_name is passed into pre_compute.
                             logits = _get_logits_at_step(sample_traj, traj_name, step)  # [V, L]
 
                             # Build eos batch_template (sliced to L_eff_slice) for eos view.
