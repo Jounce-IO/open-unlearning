@@ -224,6 +224,64 @@ def evaluate_probability(model, batch, **fn_args):
     return _evaluate_probability_single(model, batch, labels)
 
 
+def evaluate_probability_unified(
+    model,
+    batch,
+    *,
+    use_generalized_sequence_probability: bool = True,
+    logit_alignment: str = "causal",
+    labels_field: Optional[str] = None,
+):
+    """Sequence probability for MIA and callers: fixation+provider for dLLM when generalized.
+
+    Falls back to :func:`evaluate_probability` for AR models or when generalized is disabled.
+    """
+    fn: Dict = {}
+    if labels_field:
+        fn["labels_field"] = labels_field
+    if use_generalized_sequence_probability:
+        try:
+            from dllm.integrations.open_unlearning_adapter import (
+                DiffusionModelAdapter,
+            )
+        except ImportError:
+            DiffusionModelAdapter = None  # type: ignore[misc, assignment]
+        if DiffusionModelAdapter is not None and isinstance(model, DiffusionModelAdapter):
+            from evals.metrics.step_wise_score import (
+                diffusion_fixation_logits_for_probability,
+                FixationStepWiseScoreProvider,
+                evaluate_probability_via_provider,
+            )
+
+            device = model.device
+            batch_d = _batch_to_device(batch, device)
+            if labels_field and labels_field in batch_d:
+                lab = batch_d[labels_field]
+            else:
+                lab = batch_d["labels"]
+            if isinstance(lab, torch.Tensor):
+                lab = lab.to(device)
+            if isinstance(lab, torch.Tensor) and lab.dim() == 3:
+                raise ValueError(
+                    "evaluate_probability_unified: 3D labels are not supported for "
+                    "generalized diffusion probability (MIA); set "
+                    "use_generalized_sequence_probability=false for this eval."
+                )
+            input_ids = batch_d["input_ids"]
+            attention_mask = batch_d.get("attention_mask")
+            fixation_logits = diffusion_fixation_logits_for_probability(
+                model, input_ids, attention_mask, lab, IGNORE_INDEX
+            )
+            provider = FixationStepWiseScoreProvider(logit_alignment=logit_alignment)
+            return evaluate_probability_via_provider(
+                provider,
+                fixation_logits,
+                {**batch_d, "labels": lab},
+                ignore_index=IGNORE_INDEX,
+            )
+    return evaluate_probability(model, batch, **fn)
+
+
 def evaluate_probability_confidence_ordered(model, batch):
     """Evaluate forget probability in confidence order (for diffusion LLMs).
 

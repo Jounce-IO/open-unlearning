@@ -2531,20 +2531,18 @@ class TestCallMetricAtStepComprehensive:
             "evals.metrics.trajectory_metrics._handle_text_based_metric",
             side_effect=ValueError("Text handler error"),
         ):
-            # The code catches the exception and returns None, so we check for that
-            result = _call_metric_at_step(
-                metric=mock_metric,
-                logits=logits,
-                batch_template=batch_template,
-                tokenizer=Mock(),
-                sample_labels=torch.zeros(L, dtype=torch.long),
-                sample_input_ids=torch.zeros(L, dtype=torch.long),
-                sample_prompt_len=0,
-                metric_config={},
-                sample_idx="0",
-            )
-            # The exception is caught and returns None
-            assert result is None
+            with pytest.raises(ValueError, match="Text handler error"):
+                _call_metric_at_step(
+                    metric=mock_metric,
+                    logits=logits,
+                    batch_template=batch_template,
+                    tokenizer=Mock(),
+                    sample_labels=torch.zeros(L, dtype=torch.long),
+                    sample_input_ids=torch.zeros(L, dtype=torch.long),
+                    sample_prompt_len=0,
+                    metric_config={},
+                    sample_idx="0",
+                )
     
     def test_metric_fn_raises_generation_error_tries_text_handler(self):
         """Test _metric_fn raises generation-related error → tries text handler."""

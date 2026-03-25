@@ -22,9 +22,11 @@ from evals.metrics.step_wise_score import (
     FixationStepWiseScoreProvider,
     build_effective_step_fixation_logits,
     build_fixation_logits_from_R_F,
+    evaluate_probability_confidence_ordered_from_fixation_logits,
     sequence_probability_from_scores,
     evaluate_probability_via_provider,
     extraction_strength_from_fixation,
+    trajectory_step_logits_to_prob_batch,
 )
 
 
@@ -276,3 +278,31 @@ class TestExtractionStrengthFromFixation:
             fixation_logits, labels, F, S, logit_alignment="causal"
         )
         assert 0 <= es <= 1
+
+
+def test_trajectory_step_logits_to_prob_batch_shape() -> None:
+    V, L = 5, 7
+    logits_vl = torch.randn(V, L)
+    bat = trajectory_step_logits_to_prob_batch(logits_vl)
+    assert bat.shape == (1, L, V)
+
+
+def test_confidence_ordered_from_fixation_geometric_mean_ordering() -> None:
+    """Descending sort of per-position probs then geom mean (two valid positions)."""
+    B, L, V = 1, 4, 8
+    labels = torch.full((B, L), IGNORE_INDEX, dtype=torch.long)
+    labels[0, 1] = 2
+    labels[0, 2] = 3
+    fl = torch.zeros(B, L, V)
+    # causal: ell=1 uses logit_idx 0; ell=2 uses logit_idx 1
+    fl[0, 0, 2] = 10.0
+    fl[0, 1, 3] = 5.0
+    out = evaluate_probability_confidence_ordered_from_fixation_logits(
+        fl, labels, logit_alignment="causal", ignore_index=IGNORE_INDEX
+    )
+    assert out[0]["prob"] is not None
+    p0 = torch.softmax(fl[0, 0].float(), dim=-1)[2].item()
+    p1 = torch.softmax(fl[0, 1].float(), dim=-1)[3].item()
+    high, low = max(p0, p1), min(p0, p1)
+    expected = float((high * low) ** 0.5)
+    assert abs(out[0]["prob"] - expected) < 1e-5

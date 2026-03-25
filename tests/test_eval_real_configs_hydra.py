@@ -229,7 +229,8 @@ class TestMuseRealConfigsHydra:
         assert len(evaluators) >= 1
         ev = next(iter(evaluators.values()))
         assert ev.name == "MUSE"
-        assert "trajectory_all" in ev.metrics
+        assert "trajectory_muse_knowmem" in ev.metrics
+        assert "trajectory_muse_verbmem" in ev.metrics
 
     def test_muse_trajectory_some_metrics_no_reference(self) -> None:
         _require_trajectory_metrics()
@@ -240,7 +241,8 @@ class TestMuseRealConfigsHydra:
             "eval=muse_trajectory",
             "eval.muse_trajectory.data_split=Books",
             "eval.muse_trajectory.samples=2",
-            "eval.muse_trajectory.metrics.trajectory_all.include_metrics=[forget_knowmem_rouge,privleak]",
+            "eval.muse_trajectory.metrics.trajectory_muse_knowmem.include_metrics=[forget_knowmem_rouge]",
+            "eval.muse_trajectory.metrics.trajectory_muse_verbmem.include_metrics=[privleak]",
         ])
         evaluators = _get_evaluators_from_cfg(cfg)
         assert len(evaluators) >= 1

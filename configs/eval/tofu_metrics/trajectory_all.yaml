@@ -1,6 +1,9 @@
 # @package eval.tofu_trajectory.metrics.trajectory_all
 # Single-pass: one trajectory_metrics run with all 7 sub-metrics (same R, one sampler pass).
 # metric_display_names maps each sub-metric to the log/summary key (trajectory_*).
+#
+# Token budget SSoT: locuslab/open-unlearning `configs/generation/default.yaml` (max_new_tokens: 200)
+# and the per-metric YAMLs linked below — all TOFU sub-metrics here use 200.
 
 defaults:
   - .@pre_compute.mia_min_k: mia_min_k
