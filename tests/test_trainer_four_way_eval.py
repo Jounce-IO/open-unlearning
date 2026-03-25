@@ -70,7 +70,7 @@ def test_four_way_evaluate_returns_method_and_ce_keys_when_available():
             args=args,
             train_dataset=_TinyDataset(2, 8, 64),
             eval_dataset=eval_dict,
-            tokenizer=tokenizer,
+            processing_class=tokenizer,
             four_way_rouge_generation_args={"max_new_tokens": 4},
             # Sync path so the mock on four_way_rouge_scores_for_batch applies.
             four_way_rouge_cpu_processes=0,

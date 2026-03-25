@@ -103,7 +103,7 @@ def load_trainer(
         model=model,
         train_dataset=train_dataset,
         eval_dataset=eval_dataset_to_pass,
-        tokenizer=tokenizer,
+        processing_class=tokenizer,
         data_collator=data_collator,
         args=trainer_args,
         evaluators=evaluators,

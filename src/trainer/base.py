@@ -218,7 +218,7 @@ class FinetuneTrainer(Trainer):
                             "output_dir": output_dir,
                             "template_args": self.template_args,
                             "model": self.model,
-                            "tokenizer": self.tokenizer,
+                            "tokenizer": self.processing_class,
                         }
                         eval_metrics.update(evaluator.evaluate(**eval_args))
                     self.log(_scalar_metrics_for_wandb(eval_metrics))
@@ -402,7 +402,7 @@ class FinetuneTrainer(Trainer):
                                 n_rouge = bsz
                                 rouge_batch = batch
                             try:
-                                tok = getattr(self, "tokenizer", None) or getattr(
+                                tok = getattr(self, "processing_class", None) or getattr(
                                     self.model, "tokenizer", None
                                 )
                                 if tok is None:

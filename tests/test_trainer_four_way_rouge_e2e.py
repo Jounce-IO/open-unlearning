@@ -140,7 +140,7 @@ def test_finetune_trainer_four_way_eval_real_rouge_unmocked():
         args=args,
         train_dataset=forget_ds,
         eval_dataset=eval_dict,
-        tokenizer=tok,
+        processing_class=tok,
         data_collator=collator,
         evaluators=None,
         four_way_rouge=True,
