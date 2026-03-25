@@ -326,6 +326,8 @@ The system will:
 3. Pass them to the main metric
 4. Return trajectory results organized by step
 
+**Truth ratio and trajectory layout (`traj_name`).** In the forget trajectory loop, each step passes trajectory-sliced logits (`steps`, `fixation_start`, `fixation_end`, or `fixation_ratio`) into `_call_metric_at_step`. Nested `probability` pre_compute for `truth_ratio` uses those same logits (shifted CE / sequence probability), so `truth_ratio` can differ by layout when `R` varies across diffusion steps—matching `probability` on that layout. When `use_generalized_sequence_probability` is true but `traj_name` is **not** set (e.g. some tests or callers without a layout), nested `probability` may still use the full `R`/`F` fixation provider instead of the passed `logits` slice.
+
 ### Configuration Parameters
 
 | Parameter | Type | Default | Description |
