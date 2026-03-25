@@ -305,10 +305,10 @@ class FinetuneTrainer(Trainer):
         from dllm.core.trainers.mdlm import _four_way_batch_head
         from dllm.four_way_rouge import (
             aggregate_four_way_rouge_batch_scores,
-            default_rouge_cpu_workers,
             four_way_gen_texts_and_ground_truths_for_batch,
             four_way_rouge_scores_for_batch,
             four_way_rouge_scores_from_strings_subprocess,
+            resolve_rouge_overlap_workers,
         )
 
         four_way_rouge_attr = getattr(self, "four_way_rouge", True)
@@ -319,12 +319,6 @@ class FinetuneTrainer(Trainer):
         four_way_only = getattr(self, "four_way_rouge_splits", None)
         if four_way_only is not None:
             four_way_only = frozenset(four_way_only)
-
-        def _resolved_overlap_workers() -> int:
-            v = getattr(self, "four_way_rouge_cpu_processes", None)
-            if v is None:
-                return default_rouge_cpu_workers()
-            return max(0, int(v))
 
         for name, dataset in eval_dataset.items():
             if dataset is None or len(dataset) == 0:
@@ -342,7 +336,13 @@ class FinetuneTrainer(Trainer):
                 and name not in four_way_skip
                 and (four_way_only is None or name in four_way_only)
             )
-            overlap_n = _resolved_overlap_workers() if do_rouge else 0
+            overlap_n = (
+                resolve_rouge_overlap_workers(
+                    getattr(self, "four_way_rouge_cpu_processes", None)
+                )
+                if do_rouge
+                else 0
+            )
             score_workers = getattr(self, "four_way_rouge_score_workers", None)
             rouge_ex: Optional[ProcessPoolExecutor] = None
             rouge_pending: deque = deque()

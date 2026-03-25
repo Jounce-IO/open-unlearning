@@ -4,6 +4,12 @@
 # TrainingArguments defaults) so unlearn and dllm sft runs are comparable without copying
 # trainer knobs. Override per experiment or configs/unlearn/... as needed.
 handler: FinetuneTrainer
+# Shared by all FinetuneTrainer-based trainers (GradAscent, GradDiff, …). Merges with per-method
+# method_args in trainer/*.yaml (e.g. GradDiff gamma/alpha). Aligns four-way ROUGE scheduling with dllm SFT.
+method_args:
+  four_way_eval_steps: 50
+  four_way_rouge_eval_steps: 500
+  four_way_rouge_max_samples: 64
 args:
   per_device_train_batch_size: 4
   per_device_eval_batch_size: 4
