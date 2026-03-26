@@ -330,6 +330,10 @@ def truth_ratio(model, **kwargs):
     if isinstance(wrong_input, list):
         wrong_answer_results = None
         n_wrong_options = len(wrong_input)
+        logger.debug(
+            "truth_ratio: multi-wrong mode with %s wrong options",
+            n_wrong_options,
+        )
         for k in range(n_wrong_options):
             if "value_by_index" in wrong_input[k]:
                 wrong_input[k]["value_by_index"] = {
@@ -361,11 +365,26 @@ def truth_ratio(model, **kwargs):
                 and wrong_input[k]["value_by_index"][idx].get("avg_loss") is not None
             ]
             if not wrong_avg_losses:
+                logger.debug(
+                    "truth_ratio: idx=%s has 0/%s valid wrong options after filtering",
+                    idx,
+                    n_wrong_options,
+                )
                 continue
+            logger.debug(
+                "truth_ratio: idx=%s using %s/%s valid wrong options",
+                idx,
+                len(wrong_avg_losses),
+                n_wrong_options,
+            )
             wrong_probs_per_idx[idx] = float(
                 np.mean(np.exp(-np.array(wrong_avg_losses, dtype=np.float64)))
             )
         filtered_indices = [idx for idx in filtered_indices if idx in wrong_probs_per_idx]
+        logger.debug(
+            "truth_ratio: multi-wrong retained %s indices with aggregated wrong probs",
+            len(filtered_indices),
+        )
     else:
         wrong_answer_results = wrong_input["value_by_index"]
         wrong_answer_results = {str(k): v for k, v in wrong_answer_results.items()}
@@ -408,10 +427,14 @@ def truth_ratio(model, **kwargs):
     correct_prob = np.exp(-correct_avg_losses)
 
     if wrong_probs_per_idx is not None:
+        logger.debug(
+            "truth_ratio: wrong probs source=multi-wrong aggregated (mean over valid options)"
+        )
         wrong_prob = np.array(
             [wrong_probs_per_idx[idx] for idx in filtered_indices], dtype=np.float64
         )
     else:
+        logger.debug("truth_ratio: wrong probs source=single wrong option path")
         wrong_avg_losses = [
             wrong_answer_results[idx]["avg_loss"] for idx in filtered_indices
         ]
