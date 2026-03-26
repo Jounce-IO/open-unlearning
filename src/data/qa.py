@@ -200,7 +200,19 @@ def _wrong_labels_for_sample(question, wrong_answer, process_sample_fn, index):
             raise ValueError(
                 "Empty list for wrong_answer; cannot compute dual-answer labels."
             )
-        return [process_sample_fn(question=question, answer=wrong_answer[k], index=index)["labels"] for k in range(len(wrong_answer))]
+        n_opt = len(wrong_answer)
+        if logger.isEnabledFor(logging.DEBUG):
+            logger.debug(
+                "dual-answer: building %s wrong label tensors (index=%s)",
+                n_opt,
+                index,
+            )
+        return [
+            process_sample_fn(
+                question=question, answer=wrong_answer[k], index=index
+            )["labels"]
+            for k in range(n_opt)
+        ]
     item = process_sample_fn(question=question, answer=wrong_answer, index=index)
     return item["labels"]
 

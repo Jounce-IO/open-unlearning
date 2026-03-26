@@ -1472,24 +1472,69 @@ def _compute_mu_for_dataset(
                         try:
                             if has_dual:
                                 labels_correct_slice = bt.get("labels_correct")
-                                labels_wrong_slice = bt.get("labels_wrong")
-                                if isinstance(labels_wrong_slice, list):
-                                    labels_wrong_slice = labels_wrong_slice[0] if labels_wrong_slice else None
-                                if labels_wrong_slice is not None and labels_correct_slice is not None:
+                                labels_wrong_raw = bt.get("labels_wrong")
+                                if labels_wrong_raw is not None and labels_correct_slice is not None:
                                     bt_correct = dict(bt)
                                     bt_correct["labels"] = (
                                         labels_correct_slice
                                         if not isinstance(labels_correct_slice, list)
                                         else labels_correct_slice[0]
                                     )
-                                    bt_wrong = dict(bt)
-                                    bt_wrong["labels"] = labels_wrong_slice.unsqueeze(0) if labels_wrong_slice.dim() == 1 else labels_wrong_slice
                                     pc = _run_prob(bt_correct, lg, view_name)
-                                    pw = _run_prob(bt_wrong, lg, view_name)
-                                    if pc is not None and pw is not None:
-                                        norm = pc / (pc + pw + 1e-10)
-                                        # TR: TOFU definition = wrong/correct; non-trajectory uses true_better → mean(1 - TR).
-                                        tr_ratio = pw / (pc + 1e-10)
+                                    if isinstance(labels_wrong_raw, list):
+                                        wrong_tensors = labels_wrong_raw
+                                    else:
+                                        wrong_tensors = [labels_wrong_raw]
+                                    if logger.isEnabledFor(logging.DEBUG):
+                                        logger.debug(
+                                            "[MU %s] dual-label probs: N_wrong=%s view=%s traj=%s "
+                                            "step_idx=%s batch=%s sample=%s",
+                                            dataset_key,
+                                            len(wrong_tensors),
+                                            view_name,
+                                            traj_name,
+                                            step_idx,
+                                            batch_idx,
+                                            sample_idx,
+                                        )
+                                    pw_list: list[float] = []
+                                    for k_wrong, wt in enumerate(wrong_tensors):
+                                        bt_wrong = dict(bt)
+                                        lab = (
+                                            wt.unsqueeze(0)
+                                            if isinstance(wt, torch.Tensor) and wt.dim() == 1
+                                            else wt
+                                        )
+                                        bt_wrong["labels"] = lab
+                                        pw_k = _run_prob(bt_wrong, lg, view_name)
+                                        if pw_k is not None:
+                                            pw_list.append(float(pw_k))
+                                        if logger.isEnabledFor(logging.DEBUG):
+                                            logger.debug(
+                                                "[MU %s] wrong option k=%s/%s prob_scalar=%s",
+                                                dataset_key,
+                                                k_wrong,
+                                                len(wrong_tensors),
+                                                pw_k,
+                                            )
+                                    if pc is not None and pw_list:
+                                        mean_pw = float(
+                                            np.mean(np.array(pw_list, dtype=np.float64))
+                                        )
+                                        if logger.isEnabledFor(logging.DEBUG):
+                                            logger.debug(
+                                                "[MU %s] mean over wrong probs: valid=%s/%s "
+                                                "mean_pw=%s pc=%s normalised=%s",
+                                                dataset_key,
+                                                len(pw_list),
+                                                len(wrong_tensors),
+                                                mean_pw,
+                                                pc,
+                                                use_normalised_prob,
+                                            )
+                                        norm = pc / (pc + mean_pw + 1e-10)
+                                        # TR: TOFU wrong/correct with wrong = mean_k P(wrong_k) (same contract as truth_ratio multi-wrong).
+                                        tr_ratio = mean_pw / (pc + 1e-10)
                                         pl["tr"].append(tr_ratio)
                                         if use_normalised_prob:
                                             pl["prob"].append(norm)
@@ -1497,11 +1542,17 @@ def _compute_mu_for_dataset(
                                             pl["prob"].append(pc)
                                     elif pc is not None and not use_normalised_prob:
                                         pl["prob"].append(pc)
+                                        if logger.isEnabledFor(logging.DEBUG):
+                                            logger.debug(
+                                                "[MU %s] dual-label: pc present but no valid wrong "
+                                                "prob (%s options tried); skip TR this cell",
+                                                dataset_key,
+                                                len(wrong_tensors),
+                                            )
                                 else:
                                     pc = _run_prob(bt, lg, view_name)
                                     if pc is not None:
                                         pl["prob"].append(pc)
-                                        # Only append to pl["tr"] when we have a ratio; with dual but missing wrong, skip TR for this sample.
                                         if not has_dual:
                                             pl["tr"].append(pc)
                             else:
