@@ -1,7 +1,10 @@
+import logging
 import torch
 import transformers
 from typing import Dict, Sequence
 from data.utils import IGNORE_INDEX
+
+logger = logging.getLogger(__name__)
 
 
 class DataCollatorForSupervisedDataset(object):
@@ -100,6 +103,16 @@ class DataCollatorForSupervisedDataset(object):
                                 mat = torch.cat([mat, pad], dim=0)
                             padded.append(mat)
                         extra_labels = torch.stack(padded)
+                        if extra_label_key == "labels_wrong" and logger.isEnabledFor(
+                            logging.DEBUG
+                        ):
+                            logger.debug(
+                                "collate labels_wrong multi-option: batch=%s N_max=%s L=%s tensor_shape=%s",
+                                extra_labels.shape[0],
+                                extra_labels.shape[1],
+                                extra_labels.shape[2],
+                                tuple(extra_labels.shape),
+                            )
                     else:
                         extra_labels = self._pad_tokens(extra_labels, IGNORE_INDEX)
                     return_dct.update({extra_label_key: extra_labels})
