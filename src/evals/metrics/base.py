@@ -544,6 +544,10 @@ class UnlearningMetric:
         if torch.cuda.is_available():
             torch.cuda.empty_cache()
         results = self.evaluate_metric(model, metric_name, **metric_kwargs)
+        pass_envelope = None
+        if isinstance(results, dict) and "pass_envelope" in results:
+            results = dict(results)
+            pass_envelope = results.pop("pass_envelope")
         # Single-pass trajectory: result can be dict of sub-results keyed by display name.
         if (
             isinstance(results, dict)
@@ -555,6 +559,8 @@ class UnlearningMetric:
             cache.update(results)
         else:
             cache.update({metric_name: results})
+        if pass_envelope is not None:
+            cache["pass_envelope"] = pass_envelope
         return results
 
     def __call__(self, model, **kwargs):

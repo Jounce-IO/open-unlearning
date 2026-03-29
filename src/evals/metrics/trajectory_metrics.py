@@ -2780,10 +2780,6 @@ def trajectory_metrics(model, **kwargs):
                 f"metrics must be a list or dict, got {type(metrics_config)}"
             )
 
-        # Full order for display-name mapping (before optional filter)
-        full_internal_order = list(metrics_to_compute.keys())
-        full_display_order = list(kwargs.get("metric_display_names") or [])
-
         # Optional subset: only compute these (e.g. from CLI --metrics A B C)
         include_metrics = kwargs.get("include_metrics")
         if include_metrics is not None:
@@ -2794,6 +2790,42 @@ def trajectory_metrics(model, **kwargs):
                     for k in include_metrics
                     if k in metrics_to_compute
                 }
+
+        trajectory_pass_id = kwargs.get("trajectory_pass_id")
+        if trajectory_pass_id is None:
+            ev = kwargs.get("eval_cfg")
+            if ev is not None and callable(getattr(ev, "get", None)):
+                trajectory_pass_id = ev.get("trajectory_pass_id")
+        if trajectory_pass_id is None:
+            if isinstance(trajectory_config, dict):
+                trajectory_pass_id = trajectory_config.get("trajectory_pass_id")
+            elif OmegaConf.is_config(trajectory_config):
+                trajectory_pass_id = OmegaConf.select(
+                    trajectory_config, "trajectory_pass_id", default=None
+                )
+        if trajectory_pass_id:
+            from evals.metrics.trajectory_pass_binding import (
+                filter_metrics_and_data_for_pass,
+                get_pass_spec,
+            )
+
+            _tpid = str(trajectory_pass_id)
+            spec = get_pass_spec(_tpid)
+            metrics_to_compute, data, tc_dict = filter_metrics_and_data_for_pass(
+                _tpid,
+                metrics_to_compute,
+                data,
+                trajectory_config,
+            )
+            kwargs["data"] = data
+            trajectory_config = tc_dict
+            kwargs["trajectory_config"] = trajectory_config
+            kwargs["metric_display_names"] = list(spec.display_names_emitted)
+            kwargs["trajectory_pass_id"] = _tpid
+
+        # Full order for display-name mapping (after include_metrics / trajectory_pass filters)
+        full_internal_order = list(metrics_to_compute.keys())
+        full_display_order = list(kwargs.get("metric_display_names") or [])
 
         # Load metrics from registry (support handler= for logical names, e.g. forget_knowmem_rouge -> rouge)
         loaded_metrics = {}
@@ -4799,6 +4831,11 @@ def trajectory_metrics(model, **kwargs):
 
         if executor is not None:
             executor.shutdown(wait=True)
+        _tp_done = kwargs.get("trajectory_pass_id")
+        if _tp_done:
+            from evals.metrics.trajectory_pass_envelope import build_pass_envelope
+
+            result["pass_envelope"] = build_pass_envelope(str(_tp_done))
         return result
 
 

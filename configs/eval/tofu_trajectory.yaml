@@ -22,3 +22,5 @@ batch_size: 32
 # Log parity with non-traj eval; trajectory metrics read trajectory_config.use_generalized_sequence_probability
 use_generalized_sequence_probability: true
 logit_alignment: causal
+# When set, trajectory_metrics filters datasets/submetrics (multi-pass eval). Null = legacy single coalesced pass.
+trajectory_pass_id: null

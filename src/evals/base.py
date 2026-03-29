@@ -373,6 +373,17 @@ class Evaluator:
                 "eval_cfg": self.eval_cfg,
                 **base_kwargs,
             }
+            try:
+                from omegaconf import OmegaConf as _OC_fc
+
+                _fc = _OC_fc.to_container(first_cfg, resolve=True) or {}
+            except Exception:
+                _fc = dict(first_cfg) if hasattr(first_cfg, "items") else {}
+            if isinstance(_fc, dict) and _fc.get("trajectory_pass_id"):
+                merged_args["trajectory_pass_id"] = _fc["trajectory_pass_id"]
+            _ev_tid = self.eval_cfg.get("trajectory_pass_id")
+            if _ev_tid is not None:
+                merged_args["trajectory_pass_id"] = _ev_tid
             # Pass reference_logs: use pre-loaded validated ref when we loaded at start, else config (path).
             if cached_reference_logs is not None:
                 merged_args["reference_logs"] = cached_reference_logs
@@ -414,6 +425,9 @@ class Evaluator:
                 cache=logs,
                 **merged_args,
             )
+            pass_envelope = None
+            if isinstance(result, dict) and "pass_envelope" in result:
+                pass_envelope = result.pop("pass_envelope")
             if isinstance(result, dict) and all(
                 isinstance(v, dict) and "agg_value" in v for v in result.values()
             ):
@@ -421,6 +435,8 @@ class Evaluator:
                     logs[k] = v
             else:
                 logs[first_name] = result
+            if pass_envelope is not None:
+                logs["pass_envelope"] = pass_envelope
             for metric_name in self.metrics:
                 if logs.get(metric_name, {}).get("agg_value") is not None:
                     logger.info(f"Result for metric {metric_name}:\t{logs[metric_name]['agg_value']}")
