@@ -1,0 +1,22 @@
+# @package eval.tofu_trajectory
+# TOFU trajectory — single pass: forget split, guided_native (dllm --trajectory-pass forget__guided_native / skew base).
+# Same surface as tofu_trajectory.yaml; defaults select trajectory_pass_forget_guided_native.
+
+defaults:
+  - tofu_metrics:
+    - trajectory_pass_forget_guided_native
+
+handler: TOFUEvaluator
+output_dir: ${paths.output_dir}
+metrics: {}
+samples: null
+overwrite: false
+forget_split: forget10
+holdout_split: holdout10
+retain_logs_path: null
+retain_reference_mode: false
+question_key: "question"
+batch_size: 32
+use_generalized_sequence_probability: true
+logit_alignment: causal
+trajectory_pass_id: null
