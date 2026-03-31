@@ -576,6 +576,12 @@ class UnlearningMetric:
                     )
                 except Exception:
                     cache["decoupling_context"] = decoupling
+        try:
+            from evals.metrics.effective_parity import attach_effective_parity_to_cache
+
+            attach_effective_parity_to_cache(cache, eval_cfg, model)
+        except Exception:
+            pass
         return results
 
     def __call__(self, model, **kwargs):
