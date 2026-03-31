@@ -2447,6 +2447,51 @@ class TestTrajectoryMetricsIntegration:
                 # With different lengths (4 vs 8), probability aggregates can differ
                 assert a_full.size > 0 and a_eos.size > 0
 
+    def test_feature_applicability_emitted_from_decoupling_context(self):
+        """Decoupling applicability statuses are copied into feature_applicability."""
+        class MockSamplerOutput:
+            def __init__(self, sequences, histories, logits_history, fixation_steps):
+                self.sequences = sequences
+                self.histories = histories
+                self.logits_history = logits_history
+                self.fixation_steps = fixation_steps
+
+        V, L_gen, S = 20, 4, 3
+        full_len = 5 + L_gen
+        sampler = Mock()
+        sampler.sample.return_value = MockSamplerOutput(
+            sequences=torch.randint(0, V, (1, full_len)),
+            histories=None,
+            logits_history=[torch.randn(1, full_len, V) for _ in range(S)],
+            fixation_steps=torch.randint(0, S, (1, full_len)),
+        )
+        model = Mock()
+        model.sampler = sampler
+        result = trajectory_metrics(
+            model,
+            metric_name="trajectory_metrics",
+            cache={},
+            metrics=["probability"],
+            data=MockDataset(1, full_len, V),
+            collators=mock_collator(1, full_len),
+            tokenizer=Mock(decode=lambda x, **kw: "decoded"),
+            batch_size=1,
+            eval_cfg={
+                "decoupling": {
+                    "applicability_statuses": "trajectory_pass:not_applicable,trajectory_views:applicable"
+                }
+            },
+            trajectory_config={
+                "return_logits": True,
+                "return_fixation_steps": True,
+                "sampler_kwargs": {"steps": S, "max_new_tokens": L_gen},
+            },
+        )
+        assert "feature_applicability" in result
+        fa = result["feature_applicability"]
+        assert fa["trajectory_pass"]["applicability_status"] == "not_applicable"
+        assert fa["trajectory_views"]["applicability_status"] == "applicable"
+
 
 def MockDataset(n, full_len, V, ignore_index=-100):
     """Minimal dataset for trajectory tests: n samples, full_len tokens, random labels in generated region."""

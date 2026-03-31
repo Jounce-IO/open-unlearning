@@ -4831,6 +4831,24 @@ def trajectory_metrics(model, **kwargs):
 
         if executor is not None:
             executor.shutdown(wait=True)
+        _eval_cfg = kwargs.get("eval_cfg")
+        if _eval_cfg is not None and callable(getattr(_eval_cfg, "get", None)):
+            _dec = _eval_cfg.get("decoupling")
+            if _dec is not None:
+                _statuses = None
+                if callable(getattr(_dec, "get", None)):
+                    _statuses = _dec.get("applicability_statuses")
+                elif isinstance(_dec, dict):
+                    _statuses = _dec.get("applicability_statuses")
+                if isinstance(_statuses, str) and _statuses:
+                    feature_applicability = {}
+                    for pair in _statuses.split(","):
+                        if ":" not in pair:
+                            continue
+                        k, v = pair.split(":", 1)
+                        feature_applicability[str(k)] = {"applicability_status": str(v)}
+                    if feature_applicability:
+                        result["feature_applicability"] = feature_applicability
         _tp_done = kwargs.get("trajectory_pass_id")
         if _tp_done:
             from evals.metrics.trajectory_pass_envelope import build_pass_envelope

@@ -561,6 +561,21 @@ class UnlearningMetric:
             cache.update({metric_name: results})
         if pass_envelope is not None:
             cache["pass_envelope"] = pass_envelope
+        eval_cfg = kwargs.get("eval_cfg")
+        if eval_cfg is not None and callable(getattr(eval_cfg, "get", None)):
+            decoupling = eval_cfg.get("decoupling")
+            if decoupling is not None:
+                # Preserve decoupling metadata in the emitted result payload for cross-mode comparison.
+                try:
+                    from omegaconf import OmegaConf
+
+                    cache["decoupling_context"] = (
+                        OmegaConf.to_container(decoupling, resolve=True)
+                        if OmegaConf.is_config(decoupling)
+                        else decoupling
+                    )
+                except Exception:
+                    cache["decoupling_context"] = decoupling
         return results
 
     def __call__(self, model, **kwargs):
