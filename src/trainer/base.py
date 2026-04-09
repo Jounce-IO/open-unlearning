@@ -17,13 +17,15 @@ logger = logging.getLogger(__name__)
 FOUR_WAY_VALIDATION_CAP = 100
 
 # Keys that are never sent to W&B (metadata / retain-reference only).
-_WANDB_SKIP_KEYS = frozenset({
-    "config",
-    "run_info",
-    "trajectory_step_metadata",
-    "mia_min_k_by_step",
-    "forget_truth_ratio_by_step",
-})
+_WANDB_SKIP_KEYS = frozenset(
+    {
+        "config",
+        "run_info",
+        "trajectory_step_metadata",
+        "mia_min_k_by_step",
+        "forget_truth_ratio_by_step",
+    }
+)
 
 
 def _scalar_metrics_for_wandb(eval_metrics: dict) -> Dict[str, float]:
@@ -85,9 +87,15 @@ def _scalar_metrics_for_wandb(eval_metrics: dict) -> Dict[str, float]:
                         if not isinstance(traj_val, dict):
                             continue
                         for arr in traj_val.values():
-                            if arr is not None and hasattr(arr, "__len__") and len(arr) > 0:
+                            if (
+                                arr is not None
+                                and hasattr(arr, "__len__")
+                                and len(arr) > 0
+                            ):
                                 try:
-                                    out[key] = float(np.nanmean(np.asarray(arr, dtype=np.float64)))
+                                    out[key] = float(
+                                        np.nanmean(np.asarray(arr, dtype=np.float64))
+                                    )
                                 except (TypeError, ValueError):
                                     pass
                                 break
@@ -151,18 +159,26 @@ class FinetuneTrainer(Trainer):
         self_eval = getattr(self, "eval_dataset", None)
         self_eval_type = "None"
         if self_eval is not None:
-            self_eval_type = "dict_keys=%s" % list(self_eval.keys()) if isinstance(self_eval, dict) else "single_len=%s" % len(self_eval)
+            self_eval_type = (
+                "dict_keys=%s" % list(self_eval.keys())
+                if isinstance(self_eval, dict)
+                else "single_len=%s" % len(self_eval)
+            )
         logger.info(
             "[eval] evaluate: caller_passed_dataset=%s self_eval_dataset=%s (step=%s)",
             caller_passed,
             self_eval_type,
-            self.state.global_step if hasattr(self, "state") and self.state is not None else "?",
+            self.state.global_step
+            if hasattr(self, "state") and self.state is not None
+            else "?",
         )
         # Run a custom evaluator and save results
         if self.evaluators:
             logger.info(
                 "[eval] evaluate: using evaluators path (four-way skipped) step=%s",
-                self.state.global_step if hasattr(self, "state") and self.state is not None else "?",
+                self.state.global_step
+                if hasattr(self, "state") and self.state is not None
+                else "?",
             )
             if self.accelerator.is_local_main_process:
                 eval_metrics = {}
@@ -193,7 +209,9 @@ class FinetuneTrainer(Trainer):
         if eval_dataset is None:
             eval_dataset = getattr(self, "eval_dataset", None)
         if eval_dataset is None:
-            logger.info("[eval] evaluate: no eval_dataset -> returning {} (four-way skipped)")
+            logger.info(
+                "[eval] evaluate: no eval_dataset -> returning {} (four-way skipped)"
+            )
             return {}
         # Four-way validation: eval_dataset is a dict of named datasets (forget, retain, holdout, utility).
         # Compute both method loss and constant CE loss per set, then merge and log.
@@ -230,6 +248,7 @@ class FinetuneTrainer(Trainer):
         try:
             from dllm.core.schedulers import LinearAlphaScheduler
             from dllm.core.trainers.mdlm import compute_masked_ce_eval_loss
+
             adapter = getattr(self.model, "adapter_config", None)
             tokenizer = getattr(self.model, "tokenizer", None)
             if adapter is not None and tokenizer is not None:
@@ -251,7 +270,10 @@ class FinetuneTrainer(Trainer):
                 batch = self._prepare_inputs(batch)
                 with torch.no_grad():
                     loss, _, _ = self.prediction_step(
-                        self.model, batch, prediction_loss_only=False, ignore_keys=ignore_keys or []
+                        self.model,
+                        batch,
+                        prediction_loss_only=False,
+                        ignore_keys=ignore_keys or [],
                     )
                     if loss is not None:
                         method_loss_sum += loss.item() * batch["input_ids"].size(0)
@@ -259,15 +281,41 @@ class FinetuneTrainer(Trainer):
                     if ce_available:
                         try:
                             inner = getattr(self.model, "model", self.model)
-                            sched = getattr(
-                                getattr(self.model, "adapter_config", None),
-                                "scheduler",
-                                None,
-                            ) or LinearAlphaScheduler()
+                            sched = (
+                                getattr(
+                                    getattr(self.model, "adapter_config", None),
+                                    "scheduler",
+                                    None,
+                                )
+                                or LinearAlphaScheduler()
+                            )
                             proc = getattr(self.model, "tokenizer", None)
-                            if inner is not None and proc is not None and getattr(proc, "mask_token_id", None) is not None:
+                            if (
+                                inner is not None
+                                and proc is not None
+                                and getattr(proc, "mask_token_id", None) is not None
+                            ):
                                 ce = compute_masked_ce_eval_loss(
-                                    inner, batch, proc, sched, fixed_t=0.5
+                                    inner,
+                                    batch,
+                                    proc,
+                                    sched,
+                                    fixed_t=0.5,
+                                    time_epsilon=float(
+                                        getattr(adapter, "time_epsilon", 1e-3)
+                                    ),
+                                    loss_normalization_type=str(
+                                        getattr(
+                                            adapter,
+                                            "loss_normalization_type",
+                                            "sequence",
+                                        )
+                                    ),
+                                    loss_weight_type=str(
+                                        getattr(
+                                            adapter, "loss_weight_type", "scheduler"
+                                        )
+                                    ),
                                 )
                                 ce_loss_sum += ce.item() * batch["input_ids"].size(0)
                                 ce_n += batch["input_ids"].size(0)
@@ -286,7 +334,9 @@ class FinetuneTrainer(Trainer):
             ce_loss_sum = stats[2].item()
             ce_n = int(round(stats[3].item()))
             if method_n > 0:
-                eval_metrics[f"{metric_key_prefix}_{name}_loss"] = method_loss_sum / method_n
+                eval_metrics[f"{metric_key_prefix}_{name}_loss"] = (
+                    method_loss_sum / method_n
+                )
             if ce_n > 0:
                 eval_metrics[f"{metric_key_prefix}_{name}_loss_ce"] = ce_loss_sum / ce_n
             elif method_n > 0:
@@ -297,7 +347,9 @@ class FinetuneTrainer(Trainer):
             num_samples += len(dataset)
         if eval_metrics and self.is_world_process_zero():
             self.log(_scalar_metrics_for_wandb(eval_metrics))
-            logger.info("Four-way eval metrics: %s", ", ".join(sorted(eval_metrics.keys())))
+            logger.info(
+                "Four-way eval metrics: %s", ", ".join(sorted(eval_metrics.keys()))
+            )
         return EvalLoopOutput(
             predictions=None,
             label_ids=None,
