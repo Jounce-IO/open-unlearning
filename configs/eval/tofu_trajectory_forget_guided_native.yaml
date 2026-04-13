@@ -1,10 +1,10 @@
 # @package eval.tofu_trajectory
-# TOFU trajectory — single pass: forget split, guided_native (dllm --trajectory-pass forget__guided_native / skew base).
-# Same surface as tofu_trajectory.yaml; defaults select trajectory_pass_forget_guided_native.
-
+# DEPRECATED preset (010): use eval=tofu_trajectory +
+# eval/tofu_metrics@eval.tofu_trajectory.tofu_metrics=trajectory_pass_forget_guided_native
+# and dllm --trajectory-pass forget__guided_native (or forget__guided_skew + trajectory_pass_id).
+# Kept for manual Hydra / migration only.
 defaults:
-  - tofu_metrics:
-    - trajectory_pass_forget_guided_native
+  - tofu_metrics: trajectory_pass_forget_guided_native
 
 handler: TOFUEvaluator
 output_dir: ${paths.output_dir}
@@ -20,3 +20,4 @@ batch_size: 32
 use_generalized_sequence_probability: true
 logit_alignment: causal
 trajectory_pass_id: null
+trajectory_capture: true

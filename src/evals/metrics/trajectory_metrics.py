@@ -2841,6 +2841,13 @@ def trajectory_metrics(model, **kwargs):
                 logger.error(f"Failed to load metric '{metric_name}': {e}")
                 raise
 
+        trajectory_capture = True
+        _evcfg = kwargs.get("eval_cfg")
+        if _evcfg is not None and callable(getattr(_evcfg, "get", None)):
+            _tcap = _evcfg.get("trajectory_capture")
+            if _tcap is not None:
+                trajectory_capture = bool(_tcap)
+
         # One-time warning if hm_aggregate (trajectory_model_utility) will have no pre_compute (no retain dataset)
         if "hm_aggregate" in loaded_metrics and isinstance(data, dict) and data.get("retain") is None:
             logger.warning(
@@ -3151,6 +3158,7 @@ def trajectory_metrics(model, **kwargs):
 
         run_steps_to_use = None
         run_step_values_metadata = None
+        _logged_capture_final_only = False
 
         keys_to_process = [None] if not multi_dataset else single_dataset_keys
         for _key in keys_to_process:
@@ -3327,6 +3335,17 @@ def trajectory_metrics(model, **kwargs):
                     run_steps_to_use, run_step_values_metadata = _derive_steps_to_use(
                         S, trajectory_config
                     )
+                    if not trajectory_capture and run_steps_to_use:
+                        run_steps_to_use = [run_steps_to_use[-1]]
+                        if run_step_values_metadata:
+                            run_step_values_metadata = [run_step_values_metadata[-1]]
+                        if not _logged_capture_final_only:
+                            logger.info(
+                                "trajectory_capture=false: metrics at final captured step only "
+                                "(step_index=%s)",
+                                run_steps_to_use[0],
+                            )
+                            _logged_capture_final_only = True
                 steps_to_use = [s for s in run_steps_to_use if s < S]
                 if (
                     use_streaming_privleak
