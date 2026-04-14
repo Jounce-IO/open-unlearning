@@ -333,6 +333,7 @@ The system will:
 | Parameter | Type | Default | Description |
 |-----------|------|---------|-------------|
 | `handler` | str | required | Must be `"trajectory_metrics"` |
+| `trajectory_pass_id` | str | null | Optional stable pass id (e.g. `forget__unguided`). When set—also readable from `eval_cfg.trajectory_pass_id`—filters `metrics` and `data` to that pass, sets `trajectory_config.evaluation_mode`, and emits `pass_envelope` in the metric result. Binding table: `evals/metrics/trajectory_pass_binding.py`. |
 | `metrics` | list[str] or dict | required | List of metric names OR dict mapping names to configs |
 | `batch_size` | int | 1 | Batch size for evaluation |
 | `trajectory_config.evaluation_mode` | str | `unguided` | Sampler evaluation mode: **unguided** (no target; default), **guided_native** (same fixation order F as unguided, written token = target), **guided_skew** (position selection by p(a_ℓ), written token = target). For guided modes the pipeline passes `target_sequences` (generated-region labels) to the sampler. |

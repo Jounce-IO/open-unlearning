@@ -41,6 +41,86 @@ def reference_logs_has_usable_retain_path(reference_logs_container) -> bool:
     return True
 
 
+# Internal trajectory_all-style metric names → minimal dataset access_key requirements
+# for coalesced trajectory_metrics when include_metrics selects a subset (008 parity).
+_COALESCED_TRAJECTORY_METRIC_ACCESS_RULES: dict[str, frozenset[str]] = {
+    "probability": frozenset({"forget"}),
+    "rouge": frozenset({"forget"}),
+    "extraction_strength": frozenset({"forget"}),
+    "truth_ratio": frozenset({"forget"}),
+    "ks_test": frozenset({"forget"}),
+    "hm_aggregate": frozenset({"forget", "retain", "ra", "wf"}),
+    "privleak": frozenset({"forget", "holdout"}),
+}
+
+
+def _coalesced_trajectory_required_access_keys(metric_names: frozenset[str]) -> frozenset[str] | None:
+    """Return required access_keys for a subset of trajectory metrics, or None if unknown names (skip filtering)."""
+    if not metric_names:
+        return None
+    required: set[str] = set()
+    for name in metric_names:
+        rule = _COALESCED_TRAJECTORY_METRIC_ACCESS_RULES.get(name)
+        if rule is None:
+            return None
+        required.update(rule)
+    return frozenset(required)
+
+
+def _resolved_include_metrics_list(first_cfg) -> list[str] | None:
+    """Non-empty include_metrics from metric YAML, or None if unset / empty / null."""
+    try:
+        from omegaconf import OmegaConf
+
+        _fc = OmegaConf.to_container(first_cfg, resolve=True) or {}
+    except Exception:
+        _fc = dict(first_cfg) if hasattr(first_cfg, "items") else {}
+    if not isinstance(_fc, dict):
+        return None
+    raw = _fc.get("include_metrics")
+    if raw is None:
+        return None
+    try:
+        from omegaconf import OmegaConf as _OC
+
+        if _OC.is_config(raw):
+            inc = list(_OC.to_container(raw, resolve=True) or [])
+        elif isinstance(raw, (list, tuple)):
+            inc = list(raw)
+        else:
+            inc = []
+    except Exception:
+        inc = list(raw) if isinstance(raw, (list, tuple)) else []
+    if not inc:
+        return None
+    return inc
+
+
+def _filter_trajectory_dataset_cfgs_by_access_keys(dataset_cfgs, allowed: frozenset[str]):
+    """Keep dataset entries whose access_key (or dataset block name) is in allowed; else return original if none match."""
+    if dataset_cfgs is None or not allowed:
+        return dataset_cfgs
+    try:
+        from omegaconf import OmegaConf
+
+        dc = OmegaConf.to_container(dataset_cfgs, resolve=True) or {}
+    except Exception:
+        dc = dict(dataset_cfgs) if hasattr(dataset_cfgs, "items") else {}
+    if not isinstance(dc, dict):
+        return dataset_cfgs
+    filtered: dict = {}
+    for dataset_name, dataset_cfg in dc.items():
+        if not isinstance(dataset_cfg, dict):
+            filtered[dataset_name] = dataset_cfg
+            continue
+        access_name = dataset_cfg.get("access_key", dataset_name)
+        if access_name in allowed:
+            filtered[dataset_name] = dataset_cfg
+    if not filtered:
+        return dataset_cfgs
+    return filtered
+
+
 class Evaluator:
     def __init__(self, name, eval_cfg, **kwargs):
         self.name = name
@@ -324,12 +404,6 @@ class Evaluator:
             }
             if self.eval_cfg.get("samples") is not None:
                 base_kwargs["samples"] = self.eval_cfg.samples
-            data = first_metric.get_datasets(
-                dataset_cfgs=first_cfg.get("datasets"), **base_kwargs
-            )
-            collators = first_metric.get_collators(
-                collator_cfgs=first_cfg.get("collators"), **base_kwargs
-            )
             trajectory_config = first_cfg.get("trajectory_config") or {}
             batch_size = first_cfg.get("batch_size", 1)
             # Merge metrics config: trajectory_metrics expects metrics (list or dict) and metric_display_names.
@@ -362,6 +436,26 @@ class Evaluator:
             if not merged_metrics and len(self.metrics) >= 2:
                 # Fallback when config structure differs (e.g. in cluster): use Prob + ROUGE.
                 merged_metrics = {"probability": {}, "rouge": {"rouge_type": "rougeL_recall"}}
+            _inc_m_list = _resolved_include_metrics_list(first_cfg)
+            dataset_cfgs_load = first_cfg.get("datasets")
+            if _inc_m_list:
+                effective = frozenset(k for k in _inc_m_list if k in merged_metrics)
+                req = _coalesced_trajectory_required_access_keys(effective)
+                if req is not None:
+                    filtered = _filter_trajectory_dataset_cfgs_by_access_keys(dataset_cfgs_load, req)
+                    if filtered is not dataset_cfgs_load:
+                        logger.info(
+                            "Coalesced trajectory: include_metrics=%s → loading datasets for access_keys=%s",
+                            list(_inc_m_list),
+                            sorted(req),
+                        )
+                    dataset_cfgs_load = filtered
+            data = first_metric.get_datasets(
+                dataset_cfgs=dataset_cfgs_load, **base_kwargs
+            )
+            collators = first_metric.get_collators(
+                collator_cfgs=first_cfg.get("collators"), **base_kwargs
+            )
             metric_display_names = list(self.metrics.keys())
             merged_args = {
                 "data": data,
@@ -373,6 +467,19 @@ class Evaluator:
                 "eval_cfg": self.eval_cfg,
                 **base_kwargs,
             }
+            if _inc_m_list:
+                merged_args["include_metrics"] = _inc_m_list
+            try:
+                from omegaconf import OmegaConf as _OC_fc
+
+                _fc = _OC_fc.to_container(first_cfg, resolve=True) or {}
+            except Exception:
+                _fc = dict(first_cfg) if hasattr(first_cfg, "items") else {}
+            if isinstance(_fc, dict) and _fc.get("trajectory_pass_id"):
+                merged_args["trajectory_pass_id"] = _fc["trajectory_pass_id"]
+            _ev_tid = self.eval_cfg.get("trajectory_pass_id")
+            if _ev_tid is not None:
+                merged_args["trajectory_pass_id"] = _ev_tid
             # Pass reference_logs: use pre-loaded validated ref when we loaded at start, else config (path).
             if cached_reference_logs is not None:
                 merged_args["reference_logs"] = cached_reference_logs
@@ -414,6 +521,9 @@ class Evaluator:
                 cache=logs,
                 **merged_args,
             )
+            pass_envelope = None
+            if isinstance(result, dict) and "pass_envelope" in result:
+                pass_envelope = result.pop("pass_envelope")
             if isinstance(result, dict) and all(
                 isinstance(v, dict) and "agg_value" in v for v in result.values()
             ):
@@ -421,6 +531,8 @@ class Evaluator:
                     logs[k] = v
             else:
                 logs[first_name] = result
+            if pass_envelope is not None:
+                logs["pass_envelope"] = pass_envelope
             for metric_name in self.metrics:
                 if logs.get(metric_name, {}).get("agg_value") is not None:
                     logger.info(f"Result for metric {metric_name}:\t{logs[metric_name]['agg_value']}")

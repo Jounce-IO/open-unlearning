@@ -13,13 +13,12 @@ or their geometric mean; they are agnostic to model type or alignment.
 from __future__ import annotations
 
 import logging
-from typing import Any, Dict, List, Optional, Protocol
+from typing import Any, Dict, List, Optional, Protocol, Sequence
 
 import numpy as np
 import torch
 
 from data.utils import IGNORE_INDEX
-from evals.metrics.utils import _tensor_to_list_of_floats
 
 logger = logging.getLogger("evaluator")
 
@@ -301,6 +300,101 @@ def extraction_strength_from_fixation(
     return float(1.0 - (best_t / S))
 
 
+def compute_prob_packed_shifted_segments(
+    segment_fixation_logits: Sequence[torch.Tensor],
+    segment_labels: Sequence[torch.Tensor],
+    device: torch.device,
+    ignore_index: int = IGNORE_INDEX,
+) -> List[Dict[str, float]]:
+    """Per-segment ``prob`` / ``avg_loss`` from packed shifted-token cross-entropy.
+
+    Each segment is one sample (or one view of one sample): ``segment_fixation_logits[i]``
+    is ``[1, T_i, V]`` and ``segment_labels[i]`` is ``[1, T_i]``, already view-sliced
+    (e.g. full length ``L`` or eos prefix). Segments may have different ``T_i`` (ragged).
+
+    Implements the same shift, ``min(T_logits, T_labels)``, dtype promotion, and
+    ``ignore_index`` handling as :func:`compute_prob_from_fixation_logits`, then packs
+    all shifted rows into one ``[T_total, V]`` tensor and one ``cross_entropy`` pass,
+    reducing with per-segment lengths (no batch-padding to a common ``T``).
+
+    Returns one dict per segment, same contract as ``compute_prob_from_fixation_logits``.
+    """
+    if len(segment_fixation_logits) != len(segment_labels):
+        raise ValueError(
+            "segment_fixation_logits and segment_labels must have the same length; "
+            f"got {len(segment_fixation_logits)} vs {len(segment_labels)}"
+        )
+    if not segment_fixation_logits:
+        return []
+
+    flat_logits_parts: list[torch.Tensor] = []
+    flat_labels_parts: list[torch.Tensor] = []
+    seg_shift_lens: list[int] = []
+
+    with torch.no_grad():
+        for log, lab in zip(segment_fixation_logits, segment_labels, strict=True):
+            if log.dim() != 3 or lab.dim() != 2:
+                raise ValueError(
+                    "Each segment expects fixation_logits [1, T, V] and labels [1, T]; "
+                    f"got logits {tuple(log.shape)}, labels {tuple(lab.shape)}"
+                )
+            if log.device != device:
+                log = log.to(device)
+            if lab.device != device:
+                lab = lab.to(device)
+            t_fl = log.shape[1]
+            t_lab = lab.shape[1]
+            t = min(t_fl, t_lab)
+            log = log[:, :t, :].contiguous()
+            lab = lab[:, :t].contiguous()
+            shifted_logits = log[:, :-1, :].contiguous()
+            shifted_labels = lab[:, 1:].contiguous()
+            n_shift = shifted_logits.shape[1]
+            if shifted_logits.dtype in (torch.bfloat16, torch.float16):
+                shifted_logits = shifted_logits.float()
+            if n_shift == 0:
+                seg_shift_lens.append(0)
+                continue
+            v = shifted_logits.shape[-1]
+            flat_logits_parts.append(shifted_logits.reshape(n_shift, v))
+            flat_labels_parts.append(shifted_labels.reshape(n_shift))
+            seg_shift_lens.append(n_shift)
+
+        if not flat_logits_parts:
+            return [{"prob": 1.0, "avg_loss": 0.0} for _ in seg_shift_lens]
+
+        logits_cat = torch.cat(flat_logits_parts, dim=0)
+        labels_cat = torch.cat(flat_labels_parts, dim=0)
+        token_losses = torch.nn.functional.cross_entropy(
+            logits_cat,
+            labels_cat,
+            ignore_index=ignore_index,
+            reduction="none",
+        )
+
+        out: List[Dict[str, float]] = []
+        offset = 0
+        for n_shift in seg_shift_lens:
+            if n_shift == 0:
+                out.append({"prob": 1.0, "avg_loss": 0.0})
+                continue
+            chunk = token_losses[offset : offset + n_shift]
+            chunk_y = labels_cat[offset : offset + n_shift]
+            sum_loss = chunk.sum()
+            num_tok = (chunk_y != ignore_index).sum().clamp(min=1)
+            avg_loss = sum_loss / num_tok.to(dtype=sum_loss.dtype)
+            prob = torch.exp(-avg_loss)
+            out.append(
+                {
+                    "prob": float(prob.detach().cpu()),
+                    "avg_loss": float(avg_loss.detach().cpu()),
+                }
+            )
+            offset += n_shift
+
+    return out
+
+
 def compute_prob_from_fixation_logits(
     fixation_logits: torch.Tensor,
     labels: torch.Tensor,
@@ -313,29 +407,10 @@ def compute_prob_from_fixation_logits(
     logits/labels CE (same as legacy batch path) so results align with
     ``FixationStepWiseScoreProvider`` when the first label position is ignored (standard LM).
     """
-    with torch.no_grad():
-        fixation_logits = fixation_logits.to(device)
-        labels = labels.to(device)
-        t_fl = fixation_logits.shape[1]
-        t_lab = labels.shape[1]
-        t = min(t_fl, t_lab)
-        fixation_logits = fixation_logits[:, :t, :].contiguous()
-        labels = labels[:, :t].contiguous()
-        shifted_logits = fixation_logits[..., :-1, :].contiguous()
-        shifted_labels = labels[..., 1:].contiguous()
-        if shifted_logits.dtype in (torch.bfloat16, torch.float16):
-            shifted_logits = shifted_logits.float()
-        loss_fn = torch.nn.CrossEntropyLoss(ignore_index=ignore_index, reduction="none")
-        losses = loss_fn(shifted_logits.transpose(-1, -2), shifted_labels).sum(dim=-1)
-        num_token_gt = (shifted_labels != ignore_index).sum(dim=-1).clamp(min=1)
-        avg_losses = losses / num_token_gt
-        normalized_probs = torch.exp(-avg_losses)
-        avg_losses_list = _tensor_to_list_of_floats(avg_losses)
-        normalized_probs_list = _tensor_to_list_of_floats(normalized_probs)
-        return [
-            {"prob": prob, "avg_loss": avg_loss}
-            for prob, avg_loss in zip(normalized_probs_list, avg_losses_list)
-        ]
+    bsz = fixation_logits.shape[0]
+    segs_log = [fixation_logits[b : b + 1] for b in range(bsz)]
+    segs_lab = [labels[b : b + 1] for b in range(bsz)]
+    return compute_prob_packed_shifted_segments(segs_log, segs_lab, device, ignore_index)
 
 
 def trajectory_step_logits_to_prob_batch(logits_vl: torch.Tensor) -> torch.Tensor:

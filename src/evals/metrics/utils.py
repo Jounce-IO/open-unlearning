@@ -235,6 +235,11 @@ def evaluate_probability_unified(
     """Sequence probability for MIA and callers: fixation+provider for dLLM when generalized.
 
     Falls back to :func:`evaluate_probability` for AR models or when generalized is disabled.
+
+    For DiffusionModelAdapter, fixation logits come from :meth:`~dllm.integrations.open_unlearning_adapter.DiffusionModelAdapter._fixation_logits_from_sampler`,
+    which uses ``adapter_config.evaluation_mode`` and ``target_sequences`` in the sampler (same
+    MDLM contract as trajectory_metrics). No separate open-unlearning code path is required beyond
+    this delegation when the adapter is configured via Hydra ``+model.diffusion_adapter.*``.
     """
     fn: Dict = {}
     if labels_field:

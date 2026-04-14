@@ -11,6 +11,7 @@ Every-step mode (no interval) is not used.
 import copy
 import gc
 import logging
+import os
 import time
 from collections import defaultdict
 from concurrent.futures import ProcessPoolExecutor
@@ -38,6 +39,7 @@ from evals.metrics.step_wise_score import (
     build_effective_step_fixation_logits,
     build_fixation_logits_from_R_F,
     compute_prob_from_fixation_logits as _compute_prob_from_fixation_logits,
+    compute_prob_packed_shifted_segments as _compute_prob_packed_shifted_segments,
     sequence_probability_from_scores,
     extraction_strength_from_fixation,
     trajectory_step_logits_to_prob_batch,
@@ -2780,10 +2782,6 @@ def trajectory_metrics(model, **kwargs):
                 f"metrics must be a list or dict, got {type(metrics_config)}"
             )
 
-        # Full order for display-name mapping (before optional filter)
-        full_internal_order = list(metrics_to_compute.keys())
-        full_display_order = list(kwargs.get("metric_display_names") or [])
-
         # Optional subset: only compute these (e.g. from CLI --metrics A B C)
         include_metrics = kwargs.get("include_metrics")
         if include_metrics is not None:
@@ -2794,6 +2792,42 @@ def trajectory_metrics(model, **kwargs):
                     for k in include_metrics
                     if k in metrics_to_compute
                 }
+
+        trajectory_pass_id = kwargs.get("trajectory_pass_id")
+        if trajectory_pass_id is None:
+            ev = kwargs.get("eval_cfg")
+            if ev is not None and callable(getattr(ev, "get", None)):
+                trajectory_pass_id = ev.get("trajectory_pass_id")
+        if trajectory_pass_id is None:
+            if isinstance(trajectory_config, dict):
+                trajectory_pass_id = trajectory_config.get("trajectory_pass_id")
+            elif OmegaConf.is_config(trajectory_config):
+                trajectory_pass_id = OmegaConf.select(
+                    trajectory_config, "trajectory_pass_id", default=None
+                )
+        if trajectory_pass_id:
+            from evals.metrics.trajectory_pass_binding import (
+                filter_metrics_and_data_for_pass,
+                get_pass_spec,
+            )
+
+            _tpid = str(trajectory_pass_id)
+            spec = get_pass_spec(_tpid)
+            metrics_to_compute, data, tc_dict = filter_metrics_and_data_for_pass(
+                _tpid,
+                metrics_to_compute,
+                data,
+                trajectory_config,
+            )
+            kwargs["data"] = data
+            trajectory_config = tc_dict
+            kwargs["trajectory_config"] = trajectory_config
+            kwargs["metric_display_names"] = list(spec.display_names_emitted)
+            kwargs["trajectory_pass_id"] = _tpid
+
+        # Full order for display-name mapping (after include_metrics / trajectory_pass filters)
+        full_internal_order = list(metrics_to_compute.keys())
+        full_display_order = list(kwargs.get("metric_display_names") or [])
 
         # Load metrics from registry (support handler= for logical names, e.g. forget_knowmem_rouge -> rouge)
         loaded_metrics = {}
@@ -2808,6 +2842,13 @@ def trajectory_metrics(model, **kwargs):
             except ValueError as e:
                 logger.error(f"Failed to load metric '{metric_name}': {e}")
                 raise
+
+        trajectory_capture = True
+        _evcfg = kwargs.get("eval_cfg")
+        if _evcfg is not None and callable(getattr(_evcfg, "get", None)):
+            _tcap = _evcfg.get("trajectory_capture")
+            if _tcap is not None:
+                trajectory_capture = bool(_tcap)
 
         # One-time warning if hm_aggregate (trajectory_model_utility) will have no pre_compute (no retain dataset)
         if "hm_aggregate" in loaded_metrics and isinstance(data, dict) and data.get("retain") is None:
@@ -3119,6 +3160,7 @@ def trajectory_metrics(model, **kwargs):
 
         run_steps_to_use = None
         run_step_values_metadata = None
+        _logged_capture_final_only = False
 
         keys_to_process = [None] if not multi_dataset else single_dataset_keys
         for _key in keys_to_process:
@@ -3295,6 +3337,17 @@ def trajectory_metrics(model, **kwargs):
                     run_steps_to_use, run_step_values_metadata = _derive_steps_to_use(
                         S, trajectory_config
                     )
+                    if not trajectory_capture and run_steps_to_use:
+                        run_steps_to_use = [run_steps_to_use[-1]]
+                        if run_step_values_metadata:
+                            run_step_values_metadata = [run_step_values_metadata[-1]]
+                        if not _logged_capture_final_only:
+                            logger.info(
+                                "trajectory_capture=false: metrics at final captured step only "
+                                "(step_index=%s)",
+                                run_steps_to_use[0],
+                            )
+                            _logged_capture_final_only = True
                 steps_to_use = [s for s in run_steps_to_use if s < S]
                 if (
                     use_streaming_privleak
@@ -3416,14 +3469,33 @@ def trajectory_metrics(model, **kwargs):
                                     )
                 gpu_set_phase("trajectory_after_trajectories", batch_idx=batch_idx)
 
+                # Per-sample generated labels [L] for packed trajectory probability (same slicing as per-sample loop).
+                _gen_labels_for_packed_prob: list[torch.Tensor] = []
+                if "probability" in metrics_to_run and labels is not None:
+                    for b in range(B):
+                        sample_labels_b = labels[b]
+                        gs_b = _generation_start(
+                            b, prompt_starts, prompt_lens, _prompt_only_input_ids
+                        )
+                        gl = sample_labels_b[gs_b : gs_b + L]
+                        if gl.shape[0] < L:
+                            padding = torch.full(
+                                (L - gl.shape[0],),
+                                IGNORE_INDEX,
+                                dtype=gl.dtype,
+                                device=gl.device,
+                            )
+                            gl = torch.cat([gl, padding])
+                        assert gl.shape[0] == L, (
+                            "packed probability invariant: generated label length must equal L; "
+                            "got %s, L=%s" % (gl.shape[0], L)
+                        )
+                        _gen_labels_for_packed_prob.append(gl)
+
                 # Process each sample in batch (each sample uses its own R, F; logits computed on-demand)
                 for sample_idx in range(B):
                     idx_str = str(indices[sample_idx].item() if torch.is_tensor(indices[sample_idx]) else indices[sample_idx])
                     sample_traj = {"R": R[sample_idx], "F": F[sample_idx], "S": S, "L": L}
-                    use_generalized = (
-                        trajectory_config.get("use_generalized_sequence_probability", True)
-                        if trajectory_config else False
-                    )
 
                     # Get ground truth for this sample
                     sample_labels = labels[sample_idx] if labels is not None else None
@@ -3619,86 +3691,6 @@ def trajectory_metrics(model, **kwargs):
                                         (future, traj_name, rouge_metrics_in_run, steps_to_use, view)
                                     )
 
-                        if "probability" in metrics_to_run and generated_labels is not None:
-                            use_generalized = trajectory_config.get(
-                                "use_generalized_sequence_probability", True
-                            )
-                            if use_generalized:
-                                # Use traj_name-specific logits so probability differs by trajectory type (steps/fixation_start/etc).
-                                device = _get_logits_at_step(
-                                    sample_traj, traj_name, steps_to_use[0]
-                                ).device
-                                labels_full = generated_labels.to(device=device, dtype=torch.long)
-                                for i, step in enumerate(steps_to_use):
-                                    logits_step = trajectory_step_logits_to_prob_batch(
-                                        _get_logits_at_step(
-                                            sample_traj, traj_name, step
-                                        )
-                                    )
-                                    for view in include_views:
-                                        if view == "full":
-                                            logits_v = logits_step
-                                            lab = labels_full.unsqueeze(0)
-                                        else:
-                                            L_eff_slice = min(
-                                                L_eff_b, logits_step.shape[1]
-                                            )
-                                            logits_v = logits_step[
-                                                :, :L_eff_slice, :
-                                            ].contiguous()
-                                            lab = labels_full[
-                                                :L_eff_slice
-                                            ].unsqueeze(0)
-                                        prob_results = _compute_prob_from_fixation_logits(
-                                            logits_v, lab, device, IGNORE_INDEX
-                                        )
-                                        if prob_results and "prob" in prob_results[0]:
-                                            step_values_by_view[view][traj_name][step][
-                                                "probability"
-                                            ].append(prob_results[0]["prob"])
-                                    if torch.cuda.is_available():
-                                        del logits_step
-                                        torch.cuda.synchronize()
-                                        torch.cuda.empty_cache()
-                            else:
-                                # Process probability per step to avoid OOM: stacking all steps
-                                # (num_steps x L x V) can exceed GPU memory (e.g. 25 x 200 x 126k).
-                                device = _get_logits_at_step(
-                                    sample_traj, traj_name, steps_to_use[0]
-                                ).device
-                                labels_full = generated_labels.to(device=device, dtype=torch.long)
-                                for i, step in enumerate(steps_to_use):
-                                    logits_step = trajectory_step_logits_to_prob_batch(
-                                        _get_logits_at_step(
-                                            sample_traj, traj_name, step
-                                        )
-                                    )
-                                    for view in include_views:
-                                        if view == "full":
-                                            logits_v = logits_step
-                                            lab = labels_full.unsqueeze(0)
-                                        else:
-                                            L_eff_slice = min(
-                                                L_eff_b, logits_step.shape[1]
-                                            )
-                                            logits_v = logits_step[
-                                                :, :L_eff_slice, :
-                                            ].contiguous()
-                                            lab = labels_full[
-                                                :L_eff_slice
-                                            ].unsqueeze(0)
-                                        prob_results = _compute_prob_from_fixation_logits(
-                                            logits_v, lab, device, IGNORE_INDEX
-                                        )
-                                        if prob_results and "prob" in prob_results[0]:
-                                            step_values_by_view[view][traj_name][step][
-                                                "probability"
-                                            ].append(prob_results[0]["prob"])
-                                    if torch.cuda.is_available():
-                                        del logits_step
-                                        torch.cuda.synchronize()
-                                        torch.cuda.empty_cache()
-
                         for step in steps_to_use:
                             # Trajectory-sliced logits per layout; truth_ratio nested probability uses them when traj_name is passed into pre_compute.
                             logits = _get_logits_at_step(sample_traj, traj_name, step)  # [V, L]
@@ -3845,6 +3837,45 @@ def trajectory_metrics(model, **kwargs):
                     if torch.cuda.is_available():
                         torch.cuda.empty_cache()
 
+                # Packed generalized sequence probability (full + eos): same shifted CE as
+                # ``compute_prob_from_fixation_logits``, one flat cross_entropy per (traj_name, step, view).
+                if "probability" in metrics_to_run and labels is not None and _gen_labels_for_packed_prob:
+                    device_prob = R.device
+                    for traj_name in trajectory_names:
+                        for step in steps_to_use:
+                            for view in include_views:
+                                seg_logits: list[torch.Tensor] = []
+                                seg_labels: list[torch.Tensor] = []
+                                for b in range(B):
+                                    gl = _gen_labels_for_packed_prob[b]
+                                    L_eff_bp = int(effective_lengths[b])
+                                    st_b = {"R": R[b], "F": F[b], "S": S, "L": L}
+                                    logits_step = trajectory_step_logits_to_prob_batch(
+                                        _get_logits_at_step(st_b, traj_name, step)
+                                    )
+                                    gl_dev = gl.to(device=device_prob, dtype=torch.long)
+                                    if view == "full":
+                                        seg_logits.append(logits_step)
+                                        seg_labels.append(gl_dev.unsqueeze(0))
+                                    else:
+                                        Ls = min(L_eff_bp, logits_step.shape[1])
+                                        seg_logits.append(
+                                            logits_step[:, :Ls, :].contiguous()
+                                        )
+                                        seg_labels.append(gl_dev[:Ls].unsqueeze(0))
+                                if step not in step_values_by_view[view][traj_name]:
+                                    step_values_by_view[view][traj_name][step] = {
+                                        m: [] for m in loaded_metrics.keys()
+                                    }
+                                probs_out = _compute_prob_packed_shifted_segments(
+                                    seg_logits, seg_labels, device_prob, IGNORE_INDEX
+                                )
+                                for pr in probs_out:
+                                    if pr and "prob" in pr:
+                                        step_values_by_view[view][traj_name][step][
+                                            "probability"
+                                        ].append(pr["prob"])
+
                 gpu_set_phase("trajectory_batch_end", batch_idx=batch_idx)
                 _batch_duration = time.perf_counter() - _batch_t0
                 logger.info(
@@ -3866,7 +3897,8 @@ def trajectory_metrics(model, **kwargs):
                 if should_run_gc(0.9):
                     gc.collect()
                     if torch.cuda.is_available():
-                        torch.cuda.synchronize()
+                        if os.environ.get("DLLM_DEBUG_CUDA_SYNC"):
+                            torch.cuda.synchronize()
                         torch.cuda.empty_cache()
 
             logger.info(
@@ -4799,6 +4831,29 @@ def trajectory_metrics(model, **kwargs):
 
         if executor is not None:
             executor.shutdown(wait=True)
+        _eval_cfg = kwargs.get("eval_cfg")
+        if _eval_cfg is not None and callable(getattr(_eval_cfg, "get", None)):
+            _dec = _eval_cfg.get("decoupling")
+            if _dec is not None:
+                _statuses = None
+                if callable(getattr(_dec, "get", None)):
+                    _statuses = _dec.get("applicability_statuses")
+                elif isinstance(_dec, dict):
+                    _statuses = _dec.get("applicability_statuses")
+                if isinstance(_statuses, str) and _statuses:
+                    feature_applicability = {}
+                    for pair in _statuses.split(","):
+                        if ":" not in pair:
+                            continue
+                        k, v = pair.split(":", 1)
+                        feature_applicability[str(k)] = {"applicability_status": str(v)}
+                    if feature_applicability:
+                        result["feature_applicability"] = feature_applicability
+        _tp_done = kwargs.get("trajectory_pass_id")
+        if _tp_done:
+            from evals.metrics.trajectory_pass_envelope import build_pass_envelope
+
+            result["pass_envelope"] = build_pass_envelope(str(_tp_done))
         return result
 
 
