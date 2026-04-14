@@ -1950,9 +1950,10 @@ class TestTrajectoryMetricsIntegration:
             r = _trajectory_result_effective(result)
             assert r is not None
             assert "agg_value" in r
-            # With 2 views we run probability twice per (sample, traj_name). Cleanup runs after first view each time.
-            assert mock_sync.call_count >= 1, "cuda.synchronize should be called when two views and CUDA available"
-            assert mock_empty.call_count >= 1, "cuda.empty_cache should be called when two views and CUDA available"
+            # Packed probability path no longer calls cuda.synchronize per step (throughput); per-sample
+            # cleanup may still invoke empty_cache. Optional sync only when DLLM_DEBUG_CUDA_SYNC is set.
+            assert mock_sync.call_count == 0
+            assert mock_empty.call_count >= 1, "cuda.empty_cache should be called from per-sample cleanup"
 
     def test_two_view_multi_batch_no_python_memory_leak(self):
         """Run trajectory_metrics with both views over multiple batches; completes without error (no GPU). Validates no crash from leaked refs."""

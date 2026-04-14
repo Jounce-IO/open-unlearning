@@ -24,6 +24,7 @@ from evals.metrics.utils import (
     eval_rouge_recall_batch,
     eval_text_similarity,
 )
+from evals.metrics.step_wise_score import compute_prob_packed_shifted_segments
 from evals.metrics.trajectory_metrics import _compute_prob_from_fixation_logits
 
 
@@ -208,6 +209,57 @@ class TestComputeProbFromFixationLogits:
         import math
         for item in result:
             assert abs(item["prob"] - math.exp(-item["avg_loss"])) < 1e-5
+
+
+class TestComputeProbPackedShiftedSegments:
+    """Packed shifted CE matches rectangular batch and per-segment sequential CE."""
+
+    def test_packed_matches_rectangular_batch(self):
+        torch.manual_seed(0)
+        B, T, V = 4, 5, 11
+        fixation_logits = torch.randn(B, T, V)
+        labels = torch.randint(0, V, (B, T + 1))
+        labels[:, 0] = -100
+        device = torch.device("cpu")
+        rect = _compute_prob_from_fixation_logits(
+            fixation_logits, labels, device, ignore_index=-100
+        )
+        segs_log = [fixation_logits[b : b + 1] for b in range(B)]
+        segs_lab = [labels[b : b + 1] for b in range(B)]
+        packed = compute_prob_packed_shifted_segments(
+            segs_log, segs_lab, device, ignore_index=-100
+        )
+        assert len(packed) == B
+        for a, b in zip(rect, packed, strict=True):
+            assert abs(a["prob"] - b["prob"]) < 1e-5
+            assert abs(a["avg_loss"] - b["avg_loss"]) < 1e-5
+
+    def test_packed_ragged_matches_sequential(self):
+        """Variable segment lengths (eos-style): packed == loop of single-segment calls."""
+        torch.manual_seed(1)
+        V = 9
+        device = torch.device("cpu")
+        seg_logits = []
+        seg_labels = []
+        expected = []
+        for Tb in (3, 5, 2, 6):
+            log = torch.randn(1, Tb, V)
+            lab = torch.randint(0, V, (1, Tb))
+            lab[:, 0] = -100
+            seg_logits.append(log)
+            seg_labels.append(lab)
+            expected.extend(
+                _compute_prob_from_fixation_logits(
+                    log, lab, device, ignore_index=-100
+                )
+            )
+        packed = compute_prob_packed_shifted_segments(
+            seg_logits, seg_labels, device, ignore_index=-100
+        )
+        assert len(packed) == len(expected)
+        for a, b in zip(packed, expected, strict=True):
+            assert abs(a["prob"] - b["prob"]) < 1e-5
+            assert abs(a["avg_loss"] - b["avg_loss"]) < 1e-5
 
 
 class TestEvalRougeRecallBatch:

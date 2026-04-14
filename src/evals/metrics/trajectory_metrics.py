@@ -11,6 +11,7 @@ Every-step mode (no interval) is not used.
 import copy
 import gc
 import logging
+import os
 import time
 from collections import defaultdict
 from concurrent.futures import ProcessPoolExecutor
@@ -38,6 +39,7 @@ from evals.metrics.step_wise_score import (
     build_effective_step_fixation_logits,
     build_fixation_logits_from_R_F,
     compute_prob_from_fixation_logits as _compute_prob_from_fixation_logits,
+    compute_prob_packed_shifted_segments as _compute_prob_packed_shifted_segments,
     sequence_probability_from_scores,
     extraction_strength_from_fixation,
     trajectory_step_logits_to_prob_batch,
@@ -3467,14 +3469,33 @@ def trajectory_metrics(model, **kwargs):
                                     )
                 gpu_set_phase("trajectory_after_trajectories", batch_idx=batch_idx)
 
+                # Per-sample generated labels [L] for packed trajectory probability (same slicing as per-sample loop).
+                _gen_labels_for_packed_prob: list[torch.Tensor] = []
+                if "probability" in metrics_to_run and labels is not None:
+                    for b in range(B):
+                        sample_labels_b = labels[b]
+                        gs_b = _generation_start(
+                            b, prompt_starts, prompt_lens, _prompt_only_input_ids
+                        )
+                        gl = sample_labels_b[gs_b : gs_b + L]
+                        if gl.shape[0] < L:
+                            padding = torch.full(
+                                (L - gl.shape[0],),
+                                IGNORE_INDEX,
+                                dtype=gl.dtype,
+                                device=gl.device,
+                            )
+                            gl = torch.cat([gl, padding])
+                        assert gl.shape[0] == L, (
+                            "packed probability invariant: generated label length must equal L; "
+                            "got %s, L=%s" % (gl.shape[0], L)
+                        )
+                        _gen_labels_for_packed_prob.append(gl)
+
                 # Process each sample in batch (each sample uses its own R, F; logits computed on-demand)
                 for sample_idx in range(B):
                     idx_str = str(indices[sample_idx].item() if torch.is_tensor(indices[sample_idx]) else indices[sample_idx])
                     sample_traj = {"R": R[sample_idx], "F": F[sample_idx], "S": S, "L": L}
-                    use_generalized = (
-                        trajectory_config.get("use_generalized_sequence_probability", True)
-                        if trajectory_config else False
-                    )
 
                     # Get ground truth for this sample
                     sample_labels = labels[sample_idx] if labels is not None else None
@@ -3670,86 +3691,6 @@ def trajectory_metrics(model, **kwargs):
                                         (future, traj_name, rouge_metrics_in_run, steps_to_use, view)
                                     )
 
-                        if "probability" in metrics_to_run and generated_labels is not None:
-                            use_generalized = trajectory_config.get(
-                                "use_generalized_sequence_probability", True
-                            )
-                            if use_generalized:
-                                # Use traj_name-specific logits so probability differs by trajectory type (steps/fixation_start/etc).
-                                device = _get_logits_at_step(
-                                    sample_traj, traj_name, steps_to_use[0]
-                                ).device
-                                labels_full = generated_labels.to(device=device, dtype=torch.long)
-                                for i, step in enumerate(steps_to_use):
-                                    logits_step = trajectory_step_logits_to_prob_batch(
-                                        _get_logits_at_step(
-                                            sample_traj, traj_name, step
-                                        )
-                                    )
-                                    for view in include_views:
-                                        if view == "full":
-                                            logits_v = logits_step
-                                            lab = labels_full.unsqueeze(0)
-                                        else:
-                                            L_eff_slice = min(
-                                                L_eff_b, logits_step.shape[1]
-                                            )
-                                            logits_v = logits_step[
-                                                :, :L_eff_slice, :
-                                            ].contiguous()
-                                            lab = labels_full[
-                                                :L_eff_slice
-                                            ].unsqueeze(0)
-                                        prob_results = _compute_prob_from_fixation_logits(
-                                            logits_v, lab, device, IGNORE_INDEX
-                                        )
-                                        if prob_results and "prob" in prob_results[0]:
-                                            step_values_by_view[view][traj_name][step][
-                                                "probability"
-                                            ].append(prob_results[0]["prob"])
-                                    if torch.cuda.is_available():
-                                        del logits_step
-                                        torch.cuda.synchronize()
-                                        torch.cuda.empty_cache()
-                            else:
-                                # Process probability per step to avoid OOM: stacking all steps
-                                # (num_steps x L x V) can exceed GPU memory (e.g. 25 x 200 x 126k).
-                                device = _get_logits_at_step(
-                                    sample_traj, traj_name, steps_to_use[0]
-                                ).device
-                                labels_full = generated_labels.to(device=device, dtype=torch.long)
-                                for i, step in enumerate(steps_to_use):
-                                    logits_step = trajectory_step_logits_to_prob_batch(
-                                        _get_logits_at_step(
-                                            sample_traj, traj_name, step
-                                        )
-                                    )
-                                    for view in include_views:
-                                        if view == "full":
-                                            logits_v = logits_step
-                                            lab = labels_full.unsqueeze(0)
-                                        else:
-                                            L_eff_slice = min(
-                                                L_eff_b, logits_step.shape[1]
-                                            )
-                                            logits_v = logits_step[
-                                                :, :L_eff_slice, :
-                                            ].contiguous()
-                                            lab = labels_full[
-                                                :L_eff_slice
-                                            ].unsqueeze(0)
-                                        prob_results = _compute_prob_from_fixation_logits(
-                                            logits_v, lab, device, IGNORE_INDEX
-                                        )
-                                        if prob_results and "prob" in prob_results[0]:
-                                            step_values_by_view[view][traj_name][step][
-                                                "probability"
-                                            ].append(prob_results[0]["prob"])
-                                    if torch.cuda.is_available():
-                                        del logits_step
-                                        torch.cuda.synchronize()
-                                        torch.cuda.empty_cache()
-
                         for step in steps_to_use:
                             # Trajectory-sliced logits per layout; truth_ratio nested probability uses them when traj_name is passed into pre_compute.
                             logits = _get_logits_at_step(sample_traj, traj_name, step)  # [V, L]
@@ -3896,6 +3837,45 @@ def trajectory_metrics(model, **kwargs):
                     if torch.cuda.is_available():
                         torch.cuda.empty_cache()
 
+                # Packed generalized sequence probability (full + eos): same shifted CE as
+                # ``compute_prob_from_fixation_logits``, one flat cross_entropy per (traj_name, step, view).
+                if "probability" in metrics_to_run and labels is not None and _gen_labels_for_packed_prob:
+                    device_prob = R.device
+                    for traj_name in trajectory_names:
+                        for step in steps_to_use:
+                            for view in include_views:
+                                seg_logits: list[torch.Tensor] = []
+                                seg_labels: list[torch.Tensor] = []
+                                for b in range(B):
+                                    gl = _gen_labels_for_packed_prob[b]
+                                    L_eff_bp = int(effective_lengths[b])
+                                    st_b = {"R": R[b], "F": F[b], "S": S, "L": L}
+                                    logits_step = trajectory_step_logits_to_prob_batch(
+                                        _get_logits_at_step(st_b, traj_name, step)
+                                    )
+                                    gl_dev = gl.to(device=device_prob, dtype=torch.long)
+                                    if view == "full":
+                                        seg_logits.append(logits_step)
+                                        seg_labels.append(gl_dev.unsqueeze(0))
+                                    else:
+                                        Ls = min(L_eff_bp, logits_step.shape[1])
+                                        seg_logits.append(
+                                            logits_step[:, :Ls, :].contiguous()
+                                        )
+                                        seg_labels.append(gl_dev[:Ls].unsqueeze(0))
+                                if step not in step_values_by_view[view][traj_name]:
+                                    step_values_by_view[view][traj_name][step] = {
+                                        m: [] for m in loaded_metrics.keys()
+                                    }
+                                probs_out = _compute_prob_packed_shifted_segments(
+                                    seg_logits, seg_labels, device_prob, IGNORE_INDEX
+                                )
+                                for pr in probs_out:
+                                    if pr and "prob" in pr:
+                                        step_values_by_view[view][traj_name][step][
+                                            "probability"
+                                        ].append(pr["prob"])
+
                 gpu_set_phase("trajectory_batch_end", batch_idx=batch_idx)
                 _batch_duration = time.perf_counter() - _batch_t0
                 logger.info(
@@ -3917,7 +3897,8 @@ def trajectory_metrics(model, **kwargs):
                 if should_run_gc(0.9):
                     gc.collect()
                     if torch.cuda.is_available():
-                        torch.cuda.synchronize()
+                        if os.environ.get("DLLM_DEBUG_CUDA_SYNC"):
+                            torch.cuda.synchronize()
                         torch.cuda.empty_cache()
 
             logger.info(
