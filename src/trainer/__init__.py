@@ -1,6 +1,6 @@
 import torch
 from typing import Dict, Any
-from omegaconf import DictConfig
+from omegaconf import DictConfig, OmegaConf
 from transformers import Trainer, TrainingArguments
 
 from trainer.base import FinetuneTrainer, _DummyEvalDataset
@@ -65,7 +65,20 @@ def load_trainer(
     # Support both DictConfig and plain dict (e.g. from Hydra composition).
     trainer_args = _get_cfg(trainer_cfg, "args")
     assert trainer_args is not None, "trainer.args is required"
-    method_args = _get_cfg(trainer_cfg, "method_args") or {}
+    _raw_ma = _get_cfg(trainer_cfg, "method_args") or {}
+    if OmegaConf.is_config(_raw_ma):
+        method_args = dict(OmegaConf.to_container(_raw_ma, resolve=True))
+    else:
+        method_args = dict(_raw_ma)
+    # TOFU multi-eval / legacy four-way ROUGE keys are dllm-only; HF Trainer rejects unknown kwargs.
+    try:
+        from dllm.utils.tofu_multi_eval_config import FINETUNE_TOFU_MULTI_EVAL_METHOD_ARG_KEYS
+
+        for _k in list(method_args.keys()):
+            if _k in FINETUNE_TOFU_MULTI_EVAL_METHOD_ARG_KEYS:
+                method_args.pop(_k, None)
+    except ImportError:
+        pass
     # When eval_dataset is None but eval_strategy is not "no", Trainer.__init__ in
     # transformers >= 4.57 raises. We pass a dummy so init succeeds; FinetuneTrainer
     # runs custom evaluators every epoch and never uses the dummy. See _DummyEvalDataset.
@@ -78,7 +91,7 @@ def load_trainer(
             eval_dataset_to_pass = _DummyEvalDataset()
             dummy_substituted = True
             logger.info(
-                "[eval] load_trainer: eval_dataset=None eval_strategy=%s -> passing dummy (four-way will not run)",
+                "[eval] load_trainer: eval_dataset=None eval_strategy=%s -> passing dummy (multi-eval will not run)",
                 eval_strategy,
             )
     if eval_dataset_to_pass is not None and not dummy_substituted:

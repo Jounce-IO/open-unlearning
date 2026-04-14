@@ -37,6 +37,7 @@ eval:
     batch_size: 1
 
 data:
+  validation_cap: 256
   anchor: forget
   forget:
     TOFU_QA_forget:
@@ -52,7 +53,7 @@ data:
           path: "locuslab/TOFU"
           name: ${retain_split}
           split: "train"
-  # Four-way validation: forget, retain, holdout, utility (method loss + CE loss per set). No full TOFU evaluators unless retain_logs_path set.
+  # TOFU multi-eval validation: forget, retain, holdout, real_authors, world_facts, utility (method + CE per set).
   validation_splits:
     forget:
       TOFU_QA_forget:
@@ -79,6 +80,24 @@ data:
           hf_args:
             path: "locuslab/TOFU"
             name: ${holdout_split}
+            split: "train"
+          question_key: ${question_key}
+    real_authors:
+      TOFU_QA_real_authors:
+        handler: QADataset
+        args:
+          hf_args:
+            path: "locuslab/TOFU"
+            name: "real_authors_perturbed"
+            split: "train"
+          question_key: ${question_key}
+    world_facts:
+      TOFU_QA_world_facts:
+        handler: QADataset
+        args:
+          hf_args:
+            path: "locuslab/TOFU"
+            name: "world_facts_perturbed"
             split: "train"
           question_key: ${question_key}
     utility:

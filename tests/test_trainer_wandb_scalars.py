@@ -124,3 +124,19 @@ def test_four_way_validation_eight_keys_method_and_ce():
     assert len(out) == 8
     for v in out.values():
         assert isinstance(v, float)
+
+
+def test_six_split_validation_loss_keys_included():
+    """TOFU multi-eval (six splits): RA/WF scalars pass through like other splits."""
+    metrics = {
+        "eval_forget_loss": 1.0,
+        "eval_retain_loss": 0.9,
+        "eval_holdout_loss": 1.0,
+        "eval_real_authors_loss": 1.05,
+        "eval_world_facts_loss": 1.08,
+        "eval_utility_loss": 1.1,
+    }
+    out = _scalar_metrics_for_wandb(metrics)
+    assert len(out) == 6
+    assert out["eval_real_authors_loss"] == 1.05
+    assert out["eval_world_facts_loss"] == 1.08
