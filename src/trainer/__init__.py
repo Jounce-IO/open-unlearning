@@ -71,12 +71,26 @@ def load_trainer(
     else:
         method_args = dict(_raw_ma)
     # TOFU multi-eval / legacy four-way ROUGE keys are dllm-only; HF Trainer rejects unknown kwargs.
+    tofu_multi_eval_cfg: dict = {}
+    tofu_multi_eval_runtime = None
     try:
-        from dllm.utils.tofu_multi_eval_config import FINETUNE_TOFU_MULTI_EVAL_METHOD_ARG_KEYS
+        from dllm.core.trainers.tofu_multi_eval_phase2 import (
+            build_runtime_from_flat_method_args,
+        )
+        from dllm.utils.tofu_multi_eval_config import (
+            FINETUNE_TOFU_MULTI_EVAL_METHOD_ARG_KEYS,
+            normalize_tofu_multi_eval_flat_dict,
+        )
 
         for _k in list(method_args.keys()):
             if _k in FINETUNE_TOFU_MULTI_EVAL_METHOD_ARG_KEYS:
+                tofu_multi_eval_cfg[_k] = method_args[_k]
+        if tofu_multi_eval_cfg:
+            normalize_tofu_multi_eval_flat_dict(tofu_multi_eval_cfg, warn_on_conflict=False)
+        for _k in list(method_args.keys()):
+            if _k in FINETUNE_TOFU_MULTI_EVAL_METHOD_ARG_KEYS:
                 method_args.pop(_k, None)
+        tofu_multi_eval_runtime = build_runtime_from_flat_method_args(tofu_multi_eval_cfg)
     except ImportError:
         pass
     # When eval_dataset is None but eval_strategy is not "no", Trainer.__init__ in
@@ -123,6 +137,10 @@ def load_trainer(
         template_args=template_args,
         **method_args,
     )
+    if tofu_multi_eval_runtime is not None and hasattr(
+        trainer, "attach_tofu_multi_eval_phase2_runtime"
+    ):
+        trainer.attach_tofu_multi_eval_phase2_runtime(tofu_multi_eval_runtime)
     logger.info(
         f"{trainer_handler_name} Trainer loaded, output_dir: {trainer_args.output_dir}"
     )

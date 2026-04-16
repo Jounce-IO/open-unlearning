@@ -146,6 +146,12 @@ class FinetuneTrainer(Trainer):
         self.evaluators = evaluators
         self.template_args = template_args
         super().__init__(*args, **kwargs)
+        # Set by ``load_trainer`` when dllm is available (TOFU multi-eval Phase 2 + schedule).
+        self._dllm_tofu_multi_phase2_runtime = None
+
+    def attach_tofu_multi_eval_phase2_runtime(self, runtime) -> None:
+        """Store normalized TOFU multi-eval runtime from ``trainer.method_args`` (dllm)."""
+        self._dllm_tofu_multi_phase2_runtime = runtime
 
     def evaluate(
         self,
@@ -198,12 +204,50 @@ class FinetuneTrainer(Trainer):
                             "tokenizer": self.tokenizer,
                         }
                         eval_metrics.update(evaluator.evaluate(**eval_args))
-                    self.log(_scalar_metrics_for_wandb(eval_metrics))
-                else:
-                    logger.warning(
-                        "Custom evaluator can be run with this Trainer only when a single accelerator process is running."
-                    )
-                return eval_metrics
+                    ed = getattr(self, "eval_dataset", None)
+                    rt = getattr(self, "_dllm_tofu_multi_phase2_runtime", None)
+                    if (
+                        isinstance(ed, dict)
+                        and rt is not None
+                        and getattr(rt, "tofu_multi_eval", True)
+                    ):
+                        try:
+                            from dllm.core.trainers.tofu_multi_eval_phase2 import (
+                                run_tofu_multi_eval_phase2,
+                                tofu_multi_eval_step_schedule,
+                            )
+
+                            run_general, include_rouge = tofu_multi_eval_step_schedule(
+                                int(getattr(self.state, "global_step", 0) or 0),
+                                rt.tofu_multi_eval_steps,
+                                rt.tofu_multi_eval_rouge_steps,
+                                tofu_multi_eval_rouge_enabled=rt.tofu_multi_eval_rouge,
+                            )
+                            if run_general:
+                                p2 = run_tofu_multi_eval_phase2(
+                                    self,
+                                    ed,
+                                    runtime=rt,
+                                    ignore_keys=None,
+                                    metric_key_prefix=metric_key_prefix,
+                                    include_rouge=include_rouge,
+                                    log_metrics=False,
+                                )
+                                for k, v in (p2.metrics or {}).items():
+                                    if isinstance(v, (int, float)):
+                                        eval_metrics[k] = float(v)
+                        except Exception as exc:
+                            logger.warning(
+                                "TOFU multi-eval Phase 2 merge alongside evaluators failed: %s",
+                                exc,
+                                exc_info=True,
+                            )
+                self.log(_scalar_metrics_for_wandb(eval_metrics))
+            else:
+                logger.warning(
+                    "Custom evaluator can be run with this Trainer only when a single accelerator process is running."
+                )
+            return eval_metrics
 
         # When the training loop calls evaluate() it does not pass eval_dataset; use the one from __init__.
         if eval_dataset is None:
@@ -227,6 +271,94 @@ class FinetuneTrainer(Trainer):
         logger.info("[eval] evaluate: running single-dataset evaluation")
         return super().evaluate(eval_dataset, ignore_keys, metric_key_prefix)
 
+    def _evaluate_tofu_multi_eval_mdlm_style(
+        self,
+        eval_dataset: Dict[str, Dataset],
+        ignore_keys: Optional[List[str]] = None,
+        metric_key_prefix: str = "eval",
+        trial: Dict[str, Any] = None,
+    ) -> EvalLoopOutput:
+        """TOFU multi-split eval matching SFT: schedule gate, Phase 1 ``Trainer.evaluate`` per split, Phase 2 shared dllm pass.
+
+        Phase 1 must call the base :class:`~transformers.Trainer` implementation (not
+        :meth:`FinetuneTrainer.evaluate`) so ``retain_logs_path`` / evaluator short-circuit
+        does not skip per-split HF eval.
+        """
+        from dllm.core.trainers.tofu_multi_eval_phase2 import (
+            run_tofu_multi_eval_phase2,
+            tofu_multi_eval_step_schedule,
+        )
+
+        rt = self._dllm_tofu_multi_phase2_runtime
+        run_general, include_rouge = tofu_multi_eval_step_schedule(
+            int(getattr(self.state, "global_step", 0) or 0),
+            rt.tofu_multi_eval_steps,
+            rt.tofu_multi_eval_rouge_steps,
+            tofu_multi_eval_rouge_enabled=rt.tofu_multi_eval_rouge,
+        )
+        if not run_general:
+            if self.is_world_process_zero():
+                logger.info(
+                    "[tofu-multi-eval eval] Skipped (global_step=%d not on "
+                    "tofu_multi_eval_steps=%d boundary; align eval_steps or use "
+                    "eval_on_start for step 0).",
+                    int(getattr(self.state, "global_step", 0) or 0),
+                    rt.tofu_multi_eval_steps,
+                )
+            return EvalLoopOutput(
+                predictions=None, label_ids=None, metrics={}, num_samples=None
+            )
+
+        combined_metrics: Dict[str, float] = {}
+        if self.is_world_process_zero():
+            logger.info(
+                "[tofu-multi-eval eval] Phase 1 (base Trainer.evaluate per split): "
+                "method loss — no ROUGE in this pass."
+            )
+        for name, dataset in eval_dataset.items():
+            if dataset is None or len(dataset) == 0:
+                continue
+            if self.is_world_process_zero():
+                logger.info(
+                    "[tofu-multi-eval eval] Phase 1 split=%r n_examples=%d",
+                    name,
+                    len(dataset),
+                )
+            metrics = super(FinetuneTrainer, self).evaluate(
+                dataset,
+                ignore_keys=ignore_keys,
+                metric_key_prefix=f"{metric_key_prefix}_{name}",
+            )
+            if hasattr(metrics, "metrics") and getattr(metrics, "metrics", None):
+                combined_metrics.update(metrics.metrics)
+            elif isinstance(metrics, dict) and metrics:
+                combined_metrics.update(metrics)
+        if self.is_world_process_zero():
+            logger.info(
+                "[tofu-multi-eval eval] Phase 2 (dllm shared): include_rouge=%s step=%s",
+                include_rouge,
+                int(getattr(self.state, "global_step", 0) or 0),
+            )
+        four_way_output = run_tofu_multi_eval_phase2(
+            self,
+            eval_dataset,
+            runtime=rt,
+            ignore_keys=ignore_keys,
+            metric_key_prefix=metric_key_prefix,
+            include_rouge=include_rouge,
+            log_metrics=False,
+        )
+        if four_way_output.metrics:
+            combined_metrics.update(four_way_output.metrics)
+        if combined_metrics and self.is_world_process_zero():
+            self.log(_scalar_metrics_for_wandb(combined_metrics))
+        return EvalLoopOutput(
+            predictions=None,
+            label_ids=None,
+            metrics=combined_metrics,
+            num_samples=four_way_output.num_samples,
+        )
+
     def _evaluate_four_way(
         self,
         eval_dataset: Dict[str, Dataset],
@@ -241,13 +373,21 @@ class FinetuneTrainer(Trainer):
         Under multi-GPU, sums and counts are all-reduced so metrics are global; logging on rank 0 only.
         num_samples is the total eval set size across all four splits.
         """
+        rt = getattr(self, "_dllm_tofu_multi_phase2_runtime", None)
+        if rt is not None and getattr(rt, "tofu_multi_eval", True):
+            return self._evaluate_tofu_multi_eval_mdlm_style(
+                eval_dataset, ignore_keys, metric_key_prefix, trial
+            )
+
         eval_metrics: Dict[str, float] = {}
         device = getattr(self.args, "device", torch.device("cpu"))
         num_samples = 0
         ce_available = False
         try:
             from dllm.core.schedulers import LinearAlphaScheduler
-            from dllm.core.trainers.mdlm import compute_masked_ce_eval_loss
+            from dllm.core.trainers.tofu_multi_eval_phase2 import (
+                compute_masked_ce_eval_loss,
+            )
 
             adapter = getattr(self.model, "adapter_config", None)
             tokenizer = getattr(self.model, "tokenizer", None)
