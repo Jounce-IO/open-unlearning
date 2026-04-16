@@ -18,7 +18,7 @@ from concurrent.futures import ProcessPoolExecutor
 
 import numpy as np
 import torch
-from typing import Any, Dict, FrozenSet, List, Optional, Tuple, Union
+from typing import Any, Dict, FrozenSet, List, Optional, Sequence, Tuple, Union
 from torch.utils.data import DataLoader
 from torch.utils.data.distributed import DistributedSampler
 from omegaconf import DictConfig, ListConfig, OmegaConf
@@ -70,6 +70,22 @@ _trajectory_single_retain_warned: set = set()
 
 # Trajectory evals use interval mode only; every-step mode is not used.
 DEFAULT_TRAJECTORY_SAMPLE_INTERVAL = 8
+
+
+def _trajectory_should_empty_cuda_cache(trajectory_config: Optional[Any]) -> bool:
+    """When False, skip ``torch.cuda.empty_cache()`` in hot paths (set ``aggressive_cuda_empty_cache: false``)."""
+    if not torch.cuda.is_available():
+        return False
+    if trajectory_config is None:
+        return True
+    tc = (
+        OmegaConf.to_container(trajectory_config, resolve=True)
+        if OmegaConf.is_config(trajectory_config)
+        else trajectory_config
+    )
+    if not isinstance(tc, dict):
+        return True
+    return bool(tc.get("aggressive_cuda_empty_cache", True))
 
 
 def _trajectory_metric_display_name(metric_name: str, loaded_metrics: Dict[str, Any]) -> str:
@@ -569,10 +585,53 @@ def _trajectory_decode_prediction_for_rouge(
     lv = logits_vl
     if lv.dim() == 3:
         lv = lv[0]
-    pred_ids = torch.argmax(lv, dim=-1).tolist()
+    # Trajectory slice is [V, L] (same as ``trajectory_step_logits_to_prob_batch`` input); argmax over vocab.
+    pred_ids = torch.argmax(lv, dim=0).tolist()
     if view == "eos":
         pred_ids = pred_ids[: min(int(L_eff_b), len(pred_ids))]
     return tokenizer.decode(pred_ids, skip_special_tokens=True)
+
+
+def _trajectory_batch_decode_predictions_for_rouge(
+    tokenizer: Any,
+    logits_rows: Sequence[torch.Tensor],
+    view: str,
+    L_eff_list: Sequence[int],
+) -> List[str]:
+    """Batched argmax over ``B`` rows of ``[V,L]`` logits (shared ``L``); eos view trims on device before decode."""
+    if not logits_rows:
+        return []
+    normed: list[torch.Tensor] = []
+    for lv in logits_rows:
+        if lv.dim() == 3:
+            lv = lv[0]
+        if lv.dim() != 2:
+            raise ValueError(
+                "trajectory ROUGE decode: expected [V, L] logits per row, "
+                f"got dim={lv.dim()} shape={tuple(lv.shape)}"
+            )
+        normed.append(lv)
+    lengths = [int(t.shape[1]) for t in normed]
+    if len(set(lengths)) != 1:
+        raise ValueError(
+            "trajectory ROUGE batch decode requires a common sequence length per row; "
+            f"got lengths {lengths}"
+        )
+    stacked = torch.stack(normed, dim=0)
+    pred = stacked.argmax(dim=1)
+    token_rows: list[list[int]] = []
+    for b in range(pred.shape[0]):
+        row = pred[b]
+        if view == "eos":
+            n = min(int(L_eff_list[b]), int(row.shape[0]))
+            row = row[:n]
+        token_rows.append(row.detach().cpu().tolist())
+    batch_decode = getattr(tokenizer, "batch_decode", None)
+    if callable(batch_decode):
+        return list(batch_decode(token_rows, skip_special_tokens=True))
+    return [
+        tokenizer.decode(ids, skip_special_tokens=True) for ids in token_rows
+    ]
 
 
 def _trajectory_exact_mem_post_loop_metric_names(
@@ -670,16 +729,31 @@ def _trajectory_append_post_loop_rouge(
                     step_values_by_view[view][traj_name][step] = {
                         m: [] for m in loaded_metrics.keys()
                     }
-                gen_texts: List[str] = []
+                logits_rows: list[torch.Tensor] = []
+                for b in range(B):
+                    logits_rows.append(
+                        _trajectory_logits_vl_at_step(R[b], F[b], S, L, traj_name, step)
+                    )
+                flat_lens: set[int] = set()
+                for t in logits_rows:
+                    lv = t[0] if t.dim() == 3 else t
+                    flat_lens.add(int(lv.shape[1]))
+                if len(flat_lens) == 1:
+                    gen_texts = _trajectory_batch_decode_predictions_for_rouge(
+                        tokenizer, logits_rows, view, effective_lengths
+                    )
+                else:
+                    gen_texts = [
+                        _trajectory_decode_prediction_for_rouge(
+                            tokenizer,
+                            logits_rows[b],
+                            view,
+                            int(effective_lengths[b]),
+                        )
+                        for b in range(B)
+                    ]
                 ground_truths: List[str] = []
                 for b in range(B):
-                    L_eff_b = int(effective_lengths[b])
-                    logits_vl = _trajectory_logits_vl_at_step(R[b], F[b], S, L, traj_name, step)
-                    gen_texts.append(
-                        _trajectory_decode_prediction_for_rouge(
-                            tokenizer, logits_vl, view, L_eff_b
-                        )
-                    )
                     _, gt_str, _ = _trajectory_build_sample_batch_template(
                         b,
                         batch,
@@ -837,7 +911,7 @@ def _trajectory_append_post_loop_exact_mem_allowlist(
                         step_values_by_view[view][traj_name][step][metric_name].append(
                             metric_value
                         )
-        if torch.cuda.is_available():
+        if _trajectory_should_empty_cuda_cache(trajectory_config):
             torch.cuda.empty_cache()
 
 
@@ -1381,7 +1455,7 @@ def _compute_retain_mu_by_step(
         )
         R, F, S, L = out["R"], out["F"], out["S"], out["L"]
         del logits_history
-        if torch.cuda.is_available():
+        if _trajectory_should_empty_cuda_cache(trajectory_config):
             torch.cuda.empty_cache()
         if run_steps_to_use is None:
             run_steps_to_use, _ = _derive_steps_to_use(S, trajectory_config)
@@ -1532,7 +1606,7 @@ def _compute_retain_mu_by_step(
                                 logger.debug("retain MU %s at step %s: %s", metric_name, step, e)
 
         del R, F, out
-        if torch.cuda.is_available():
+        if _trajectory_should_empty_cuda_cache(trajectory_config):
             torch.cuda.empty_cache()
 
     for traj_name in trajectory_names:
@@ -1781,7 +1855,7 @@ def _compute_mu_for_dataset(
         )
         R, F, S, L = out["R"], out["F"], out["S"], out["L"]
         del logits_history
-        if torch.cuda.is_available():
+        if _trajectory_should_empty_cuda_cache(trajectory_config):
             torch.cuda.empty_cache()
         if run_steps_to_use is None:
             run_steps_to_use, _ = _derive_steps_to_use(S, trajectory_config)
@@ -2055,7 +2129,7 @@ def _compute_mu_for_dataset(
                                 )
 
         del R, F, out
-        if torch.cuda.is_available():
+        if _trajectory_should_empty_cuda_cache(trajectory_config):
             torch.cuda.empty_cache()
 
     if logger.isEnabledFor(logging.DEBUG) and per_step_lists:
@@ -2179,7 +2253,122 @@ def _compute_pre_compute_metrics_at_step(
     # Normalize so truth_ratio always sees same key type (str) for correct vs wrong value_by_index.
     idx_key = str(sample_idx)
 
+    fused_precompute_skip: set[str] = set()
+    _pc_get = getattr(pre_compute_config, "get", None)
+    if (
+        callable(_pc_get)
+        and kwargs.get("traj_name") is None
+        and trajectory_config is not None
+        and bool(trajectory_config.get("use_generalized_sequence_probability", True))
+        and sample_traj is not None
+    ):
+        c_raw = _pc_get("correct")
+        w_raw = _pc_get("wrong")
+
+        def _pre_cfg_plain(cfg_any: Any) -> dict[str, Any]:
+            if cfg_any is None:
+                return {}
+            if OmegaConf.is_config(cfg_any):
+                c = OmegaConf.to_container(cfg_any, resolve=True)
+                return dict(c) if isinstance(c, dict) else {}
+            return dict(cfg_any) if isinstance(cfg_any, dict) else {}
+
+        ccfg = _pre_cfg_plain(c_raw)
+        wcfg = _pre_cfg_plain(w_raw)
+        if (
+            c_raw is not None
+            and w_raw is not None
+            and str(ccfg.get("handler") or "probability") == "probability"
+            and str(wcfg.get("handler") or "probability") == "probability"
+        ):
+            lf_c = ccfg.get("labels_field") or "labels"
+            lf_w = wcfg.get("labels_field") or "labels"
+            if lf_c != lf_w:
+                R_tr = sample_traj["R"]
+                L_gen = int(R_tr.shape[1]) if R_tr.dim() >= 2 else 0
+                lab_c = batch_template.get(lf_c)
+                lab_w = batch_template.get(lf_w)
+                acc_c = str(ccfg.get("access_key", "correct"))
+                acc_w = str(wcfg.get("access_key", "wrong"))
+                empty_pack = {
+                    "agg_value": None,
+                    "value_by_index": {idx_key: {"prob": None, "avg_loss": None}},
+                }
+
+                def _pack_prob_pre(scores_list: list[float]) -> dict[str, Any]:
+                    if scores_list:
+                        prob_val = sequence_probability_from_scores(scores_list)
+                        avg_loss_val = float(-np.log(prob_val + 1e-12))
+                        return {
+                            "agg_value": prob_val,
+                            "value_by_index": {
+                                idx_key: {"prob": prob_val, "avg_loss": avg_loss_val},
+                            },
+                        }
+                    return {
+                        "agg_value": None,
+                        "value_by_index": {idx_key: {"prob": None, "avg_loss": None}},
+                    }
+
+                if L_gen == 0:
+                    pre_compute_results[acc_c] = empty_pack
+                    pre_compute_results[acc_w] = empty_pack
+                    fused_precompute_skip.update({"correct", "wrong"})
+                elif (
+                    not isinstance(lab_c, list)
+                    and not isinstance(lab_w, list)
+                    and lab_c is not None
+                    and lab_w is not None
+                ):
+                    lc = lab_c.squeeze(0) if isinstance(lab_c, torch.Tensor) and lab_c.dim() > 1 else lab_c
+                    lw = lab_w.squeeze(0) if isinstance(lab_w, torch.Tensor) and lab_w.dim() > 1 else lab_w
+                    if isinstance(lc, torch.Tensor) and isinstance(lw, torch.Tensor) and lc.shape == lw.shape:
+                        try:
+                            logit_alignment = trajectory_config.get("logit_alignment", "causal")
+                            provider = FixationStepWiseScoreProvider(logit_alignment=logit_alignment)
+                            device_rf = R_tr.device
+                            labels_2d = torch.stack(
+                                [
+                                    lc.to(device=device_rf, dtype=torch.long),
+                                    lw.to(device=device_rf, dtype=torch.long),
+                                ],
+                                dim=0,
+                            )
+                            r0 = R_tr.unsqueeze(0)
+                            f0 = sample_traj["F"]
+                            f0u = f0.unsqueeze(0) if f0.dim() == 1 else f0
+                            r_batch = r0.expand(2, *r0.shape[1:]).contiguous()
+                            f_batch = f0u.expand(2, *f0u.shape[1:]).contiguous()
+                            model_or_logits_fused: dict[str, Any] = {
+                                "R": r_batch,
+                                "F": f_batch,
+                                "report_step": step,
+                            }
+                            results_pair = provider.get_per_position_scores(
+                                model_or_logits_fused,
+                                {"labels": labels_2d},
+                                ignore_index=IGNORE_INDEX,
+                            )
+                        except Exception as e:
+                            logger.warning(
+                                "pre_compute fused probability (correct+wrong): %s "
+                                "(sample_idx=%s step=%s); falling back to separate pre_compute",
+                                e,
+                                sample_idx,
+                                step,
+                                exc_info=True,
+                            )
+                        else:
+                            if len(results_pair) >= 2:
+                                s0 = results_pair[0][0] if results_pair[0] else []
+                                s1 = results_pair[1][0] if results_pair[1] else []
+                                pre_compute_results[acc_c] = _pack_prob_pre(s0)
+                                pre_compute_results[acc_w] = _pack_prob_pre(s1)
+                                fused_precompute_skip.update({"correct", "wrong"})
+
     for pre_metric_name, pre_metric_cfg in pre_compute_config.items():
+        if pre_metric_name in fused_precompute_skip:
+            continue
         # Get access key (defaults to metric name)
         access_key = pre_metric_cfg.get("access_key", pre_metric_name)
         # labels_field: use this batch key instead of "labels" for probability (e.g. labels_correct, labels_wrong)
@@ -2554,10 +2743,16 @@ def _handle_text_based_metric(logits, tokenizer, sample_labels, sample_input_ids
     Returns:
         Metric result (list of dicts)
     """
-    # Decode logits to text via argmax
+    # Decode logits to text via argmax (trajectory uses [V, L]; LM-style tensors use [L, V]).
     if logits.dim() == 3:
-        logits = logits[0]  # [L, V]
-    predicted_tokens = torch.argmax(logits, dim=-1)  # [L]
+        logits = logits[0]
+    if logits.dim() != 2:
+        raise ValueError(f"text metric decode expects 2D logits after squeeze, got {tuple(logits.shape)}")
+    r0, r1 = int(logits.shape[0]), int(logits.shape[1])
+    if r0 > r1:
+        predicted_tokens = torch.argmax(logits, dim=0)
+    else:
+        predicted_tokens = torch.argmax(logits, dim=-1)
     gen_text = tokenizer.decode(predicted_tokens.tolist(), skip_special_tokens=True)
     guardrail_config = kwargs.get("guardrail_config")
     if guardrail_config is not None:
@@ -4202,7 +4397,7 @@ def trajectory_metrics(model, **kwargs):
                                                 step_values_by_view[view][traj_name][step][metric_name].append(
                                                     metric_value
                                                 )
-                                    if torch.cuda.is_available():
+                                    if _trajectory_should_empty_cuda_cache(trajectory_config):
                                         torch.cuda.empty_cache()
                                     continue
 
@@ -4329,7 +4524,7 @@ def trajectory_metrics(model, **kwargs):
                                             )
                                         if metric_value is not None:
                                             step_values_by_view[view][traj_name][step][metric_name].append(metric_value)
-                                    if metric_name in ("extraction_strength", "truth_ratio", "ks_test") and torch.cuda.is_available():
+                                    if metric_name in ("extraction_strength", "truth_ratio", "ks_test") and _trajectory_should_empty_cuda_cache(trajectory_config):
                                         torch.cuda.empty_cache()
 
                             except Exception as e:
@@ -4351,7 +4546,7 @@ def trajectory_metrics(model, **kwargs):
 
                     # Aggressive per-sample cleanup to avoid baseline memory growth across samples (GPU leak).
                     gc.collect()
-                    if torch.cuda.is_available():
+                    if _trajectory_should_empty_cuda_cache(trajectory_config):
                         torch.cuda.empty_cache()
 
                 _trajectory_append_post_loop_rouge(
@@ -4476,7 +4671,7 @@ def trajectory_metrics(model, **kwargs):
                 del out, R, F
                 if should_run_gc(0.9):
                     gc.collect()
-                    if torch.cuda.is_available():
+                    if _trajectory_should_empty_cuda_cache(trajectory_config):
                         if os.environ.get("DLLM_DEBUG_CUDA_SYNC"):
                             torch.cuda.synchronize()
                         torch.cuda.empty_cache()
@@ -4683,7 +4878,7 @@ def trajectory_metrics(model, **kwargs):
                     del h_R, h_F
                     if should_run_gc(0.9):
                         gc.collect()
-                        if torch.cuda.is_available():
+                        if _trajectory_should_empty_cuda_cache(trajectory_config):
                             torch.cuda.empty_cache()
                 _plc_f = privleak_streaming_cfg or {}
                 _dual_f = _plc_f.get("_layout") == "dual"

@@ -7,6 +7,7 @@ Tests for step-wise score provider (generalized unlearning metrics).
 
 import pytest
 import torch
+import numpy as np
 from unittest.mock import Mock
 
 import sys
@@ -28,6 +29,53 @@ from evals.metrics.step_wise_score import (
     extraction_strength_from_fixation,
     trajectory_step_logits_to_prob_batch,
 )
+
+
+def _extraction_strength_from_fixation_reference_slow(
+    fixation_logits: torch.Tensor,
+    labels: torch.Tensor,
+    F: torch.Tensor,
+    S: int,
+    logit_alignment: str = "causal",
+    ignore_index: int = IGNORE_INDEX,
+) -> float:
+    """Reference (Python loops) for parity with :func:`extraction_strength_from_fixation`."""
+    fixation_logits = fixation_logits.float()
+    L, V = fixation_logits.shape
+    if L == 0 or S <= 0:
+        return 0.0
+    L_lab = int(labels.shape[0])
+    L_use = min(L, L_lab)
+    if L_use == 0:
+        return 0.0
+    F_np = F.detach().cpu().numpy().reshape(-1)
+    if F_np.size != L:
+        F_np = np.broadcast_to(F_np, (L,))
+    preds: list[int] = []
+    for ell in range(L):
+        if logit_alignment == "causal":
+            logit_idx = max(0, ell - 1)
+        else:
+            logit_idx = ell
+        preds.append(int(fixation_logits[logit_idx].argmax(dim=-1).item()))
+    lab = labels.detach().cpu().numpy().reshape(-1)
+    valid = (lab != ignore_index) & (lab >= 0) & (lab < V)
+    if not np.any(valid[:L_use]):
+        return 0.0
+    best_t = S
+    for t in range(S):
+        ok = True
+        for ell in range(L_use):
+            if not valid[ell]:
+                continue
+            if F_np[ell] >= t:
+                if preds[ell] != int(lab[ell]):
+                    ok = False
+                    break
+        if ok:
+            best_t = t
+            break
+    return float(1.0 - (best_t / S))
 
 
 class TestSequenceProbabilityFromScores:
@@ -247,6 +295,10 @@ class TestExtractionStrengthFromFixation:
         )
         assert 0 <= es <= 1
         assert abs(es - 1.0) < 1e-5
+        ref = _extraction_strength_from_fixation_reference_slow(
+            fixation_logits, labels, F, S, logit_alignment="same_position"
+        )
+        assert abs(es - ref) < 1e-9
 
     def test_one_wrong_at_late_step_es_half(self):
         L, V, S = 3, 10, 4
@@ -261,6 +313,10 @@ class TestExtractionStrengthFromFixation:
         )
         assert 0 <= es <= 1
         assert abs(es - 0.5) < 1e-5
+        ref = _extraction_strength_from_fixation_reference_slow(
+            fixation_logits, labels, F, S, logit_alignment="same_position"
+        )
+        assert abs(es - ref) < 1e-9
 
     def test_empty_or_zero_steps_returns_zero(self):
         es = extraction_strength_from_fixation(
@@ -278,6 +334,52 @@ class TestExtractionStrengthFromFixation:
             fixation_logits, labels, F, S, logit_alignment="causal"
         )
         assert 0 <= es <= 1
+        ref = _extraction_strength_from_fixation_reference_slow(
+            fixation_logits, labels, F, S, logit_alignment="causal"
+        )
+        assert abs(es - ref) < 1e-9
+
+    @pytest.mark.parametrize("logit_alignment", ("causal", "same_position"))
+    @pytest.mark.parametrize("seed", (0, 1, 2, 3))
+    def test_extraction_strength_parity_random_cpu(self, logit_alignment: str, seed: int) -> None:
+        torch.manual_seed(seed)
+        L, V, S = 11, 19, 9
+        fixation_logits = torch.randn(L, V)
+        labels = torch.randint(0, V, (L,))
+        labels[torch.rand(L) < 0.15] = IGNORE_INDEX
+        labels[torch.rand(L) < 0.05] = V  # out of range → masked like production
+        F = torch.randint(0, S, (L,))
+        got = extraction_strength_from_fixation(
+            fixation_logits, labels, F, S, logit_alignment=logit_alignment
+        )
+        ref = _extraction_strength_from_fixation_reference_slow(
+            fixation_logits, labels, F, S, logit_alignment=logit_alignment
+        )
+        assert abs(got - ref) < 1e-6
+
+    @pytest.mark.parametrize("logit_alignment", ("causal", "same_position"))
+    def test_extraction_strength_parity_random_cuda_matches_cpu_reference(
+        self, logit_alignment: str
+    ) -> None:
+        if not torch.cuda.is_available():
+            pytest.skip("CUDA not available")
+        torch.manual_seed(7)
+        L, V, S = 8, 31, 6
+        fixation_logits = torch.randn(L, V, device="cuda")
+        labels = torch.randint(0, V, (L,), device="cuda")
+        labels[0] = IGNORE_INDEX
+        F = torch.randint(0, S, (L,), device="cuda")
+        got = extraction_strength_from_fixation(
+            fixation_logits, labels, F, S, logit_alignment=logit_alignment
+        )
+        ref = _extraction_strength_from_fixation_reference_slow(
+            fixation_logits.cpu(),
+            labels.cpu(),
+            F.cpu(),
+            S,
+            logit_alignment=logit_alignment,
+        )
+        assert abs(got - ref) < 1e-6
 
 
 def test_trajectory_step_logits_to_prob_batch_shape() -> None:

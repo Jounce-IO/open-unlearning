@@ -255,3 +255,105 @@ def test_post_loop_rouge_append_order_b2_executor_none() -> None:
     vals = step_values_by_view["full"]["steps"][1]["rouge"]
     assert len(vals) == B
     assert all(isinstance(x, (int, float, np.number)) for x in vals)
+
+
+def test_batch_rouge_decode_matches_per_row_decode() -> None:
+    from evals.metrics.trajectory_metrics import (
+        _trajectory_batch_decode_predictions_for_rouge,
+        _trajectory_decode_prediction_for_rouge,
+    )
+
+    try:
+        from transformers import AutoTokenizer
+
+        tok = AutoTokenizer.from_pretrained("gpt2")
+    except Exception:
+        pytest.skip("gpt2 tokenizer unavailable")
+
+    torch.manual_seed(11)
+    V, L = tok.vocab_size, 9
+    rows = [torch.randn(V, L), torch.randn(V, L), torch.randn(V, L)]
+    leff = [L, 2, L]
+    for view in ("full", "eos"):
+        bat = _trajectory_batch_decode_predictions_for_rouge(tok, rows, view, leff)
+        assert len(bat) == 3
+        for i, lv in enumerate(rows):
+            want = _trajectory_decode_prediction_for_rouge(tok, lv, view, leff[i])
+            assert bat[i] == want
+
+
+def test_fused_truth_ratio_precompute_matches_sequential() -> None:
+    from evals.metrics.trajectory_metrics import _compute_pre_compute_metrics_at_step
+    from evals.metrics.step_wise_score import FixationStepWiseScoreProvider, sequence_probability_from_scores
+
+    torch.manual_seed(13)
+    V, L, S = 11, 7, 8
+    R = torch.randn(V, L, S)
+    F = torch.randint(0, S, (L,), dtype=torch.long)
+    step = 4
+    lab_c = torch.randint(0, V, (L,), dtype=torch.long)
+    lab_w = torch.randint(0, V, (L,), dtype=torch.long)
+    lab_c[0] = -100
+    lab_w[1] = -100
+    batch_template = {
+        "input_ids": torch.zeros(1, L, dtype=torch.long),
+        "labels_correct": lab_c.unsqueeze(0),
+        "labels_wrong": lab_w.unsqueeze(0),
+        "attention_mask": torch.ones(1, L, dtype=torch.long),
+        "index": torch.tensor([0], dtype=torch.long),
+    }
+    sample_traj = {"R": R, "F": F, "S": S, "L": L}
+    pre_compute_config = {
+        "correct": {
+            "handler": "probability",
+            "access_key": "correct",
+            "labels_field": "labels_correct",
+        },
+        "wrong": {
+            "handler": "probability",
+            "access_key": "wrong",
+            "labels_field": "labels_wrong",
+        },
+    }
+    logits = torch.zeros(V, L)
+    out = _compute_pre_compute_metrics_at_step(
+        pre_compute_config=pre_compute_config,
+        logits=logits,
+        batch_template=batch_template,
+        tokenizer=None,
+        sample_labels=None,
+        sample_input_ids=torch.zeros(L, dtype=torch.long),
+        sample_prompt_len=0,
+        sample_idx="0",
+        trajectory_config={"use_generalized_sequence_probability": True, "logit_alignment": "causal"},
+        sample_traj=sample_traj,
+        step=step,
+    )
+    prov = FixationStepWiseScoreProvider(logit_alignment="causal")
+    mo = {"R": R.unsqueeze(0), "F": F.unsqueeze(0), "report_step": step}
+
+    def _expected(lab_1d: torch.Tensor) -> float | None:
+        r = prov.get_per_position_scores(mo, {"labels": lab_1d.unsqueeze(0)})
+        if not r or not r[0][0]:
+            return None
+        return float(sequence_probability_from_scores(r[0][0]))
+
+    ec = _expected(lab_c)
+    ew = _expected(lab_w)
+    assert (out["correct"]["agg_value"] is None) == (ec is None)
+    assert (out["wrong"]["agg_value"] is None) == (ew is None)
+    if ec is not None:
+        assert abs(float(out["correct"]["agg_value"]) - ec) < 1e-5
+    if ew is not None:
+        assert abs(float(out["wrong"]["agg_value"]) - ew) < 1e-5
+
+
+def test_trajectory_should_empty_cuda_cache_respects_flag() -> None:
+    from evals.metrics.trajectory_metrics import _trajectory_should_empty_cuda_cache
+
+    if not torch.cuda.is_available():
+        assert _trajectory_should_empty_cuda_cache(None) is False
+    else:
+        assert _trajectory_should_empty_cuda_cache(None) is True
+        assert _trajectory_should_empty_cuda_cache({"aggressive_cuda_empty_cache": False}) is False
+        assert _trajectory_should_empty_cuda_cache({"aggressive_cuda_empty_cache": True}) is True
