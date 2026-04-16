@@ -2253,6 +2253,14 @@ def _compute_pre_compute_metrics_at_step(
     # Normalize so truth_ratio always sees same key type (str) for correct vs wrong value_by_index.
     idx_key = str(sample_idx)
 
+    def _pre_cfg_plain(cfg_any: Any) -> dict[str, Any]:
+        if cfg_any is None:
+            return {}
+        if OmegaConf.is_config(cfg_any):
+            c = OmegaConf.to_container(cfg_any, resolve=True)
+            return dict(c) if isinstance(c, dict) else {}
+        return dict(cfg_any) if isinstance(cfg_any, dict) else {}
+
     fused_precompute_skip: set[str] = set()
     _pc_get = getattr(pre_compute_config, "get", None)
     if (
@@ -2264,14 +2272,6 @@ def _compute_pre_compute_metrics_at_step(
     ):
         c_raw = _pc_get("correct")
         w_raw = _pc_get("wrong")
-
-        def _pre_cfg_plain(cfg_any: Any) -> dict[str, Any]:
-            if cfg_any is None:
-                return {}
-            if OmegaConf.is_config(cfg_any):
-                c = OmegaConf.to_container(cfg_any, resolve=True)
-                return dict(c) if isinstance(c, dict) else {}
-            return dict(cfg_any) if isinstance(cfg_any, dict) else {}
 
         ccfg = _pre_cfg_plain(c_raw)
         wcfg = _pre_cfg_plain(w_raw)
@@ -2312,7 +2312,18 @@ def _compute_pre_compute_metrics_at_step(
 
                 if L_gen == 0:
                     pre_compute_results[acc_c] = empty_pack
-                    pre_compute_results[acc_w] = empty_pack
+                    if isinstance(lab_w, list):
+                        pre_compute_results[acc_w] = [
+                            {
+                                "agg_value": None,
+                                "value_by_index": {
+                                    idx_key: {"prob": None, "avg_loss": None},
+                                },
+                            }
+                            for _ in lab_w
+                        ]
+                    else:
+                        pre_compute_results[acc_w] = empty_pack
                     fused_precompute_skip.update({"correct", "wrong"})
                 elif (
                     not isinstance(lab_c, list)
@@ -2365,6 +2376,122 @@ def _compute_pre_compute_metrics_at_step(
                                 pre_compute_results[acc_c] = _pack_prob_pre(s0)
                                 pre_compute_results[acc_w] = _pack_prob_pre(s1)
                                 fused_precompute_skip.update({"correct", "wrong"})
+
+    # Trajectory loop (traj_name set): truth_ratio pre_compute uses step logits + shifted CE
+    # (``compute_prob_from_fixation_logits``), not FixationStepWiseScoreProvider. Fuse correct
+    # and wrong into one ``_compute_prob_packed_shifted_segments`` call (same numerics as two
+    # nested ``_call_metric_at_step(probability)``).
+    if (
+        callable(_pc_get)
+        and kwargs.get("traj_name") is not None
+        and not fused_precompute_skip.intersection({"correct", "wrong"})
+    ):
+        c_raw_tr = _pc_get("correct")
+        w_raw_tr = _pc_get("wrong")
+        ccfg_tr = _pre_cfg_plain(c_raw_tr)
+        wcfg_tr = _pre_cfg_plain(w_raw_tr)
+        if (
+            c_raw_tr is not None
+            and w_raw_tr is not None
+            and str(ccfg_tr.get("handler") or "probability") == "probability"
+            and str(wcfg_tr.get("handler") or "probability") == "probability"
+        ):
+            lf_ctr = ccfg_tr.get("labels_field") or "labels"
+            lf_wtr = wcfg_tr.get("labels_field") or "labels"
+            if lf_ctr != lf_wtr:
+                lab_ctr = batch_template.get(lf_ctr)
+                lab_wtr = batch_template.get(lf_wtr)
+                acc_ctr = str(ccfg_tr.get("access_key", "correct"))
+                acc_wtr = str(wcfg_tr.get("access_key", "wrong"))
+
+                def _pack_shifted_ce_pre(seg: dict[str, Any]) -> dict[str, Any]:
+                    prob_v = seg.get("prob")
+                    al_v = seg.get("avg_loss")
+                    return {
+                        "agg_value": prob_v,
+                        "value_by_index": {
+                            idx_key: {"prob": prob_v, "avg_loss": al_v},
+                        },
+                    }
+
+                def _labels_batch_1l(x: torch.Tensor) -> Optional[torch.Tensor]:
+                    if x.dim() == 1:
+                        return x.unsqueeze(0)
+                    if x.dim() == 2 and x.shape[0] == 1:
+                        return x
+                    return None
+
+                logit_1lv_tr: Optional[torch.Tensor] = None
+                if isinstance(logits, torch.Tensor):
+                    if logits.dim() == 2:
+                        logit_1lv_tr = logits.transpose(0, 1).unsqueeze(0)
+                    elif logits.dim() == 3 and logits.shape[0] == 1:
+                        logit_1lv_tr = logits
+
+                if (
+                    logit_1lv_tr is not None
+                    and not isinstance(lab_ctr, list)
+                    and not isinstance(lab_wtr, list)
+                    and lab_ctr is not None
+                    and lab_wtr is not None
+                ):
+                    lc_tr = (
+                        lab_ctr.squeeze(0)
+                        if isinstance(lab_ctr, torch.Tensor) and lab_ctr.dim() > 1
+                        else lab_ctr
+                    )
+                    lw_tr = (
+                        lab_wtr.squeeze(0)
+                        if isinstance(lab_wtr, torch.Tensor) and lab_wtr.dim() > 1
+                        else lab_wtr
+                    )
+                    if (
+                        isinstance(lc_tr, torch.Tensor)
+                        and isinstance(lw_tr, torch.Tensor)
+                        and lc_tr.shape == lw_tr.shape
+                    ):
+                        lab_c_2d = _labels_batch_1l(lc_tr)
+                        lab_w_2d = _labels_batch_1l(lw_tr)
+                        L_log_tr = int(logit_1lv_tr.shape[1])
+                        if (
+                            lab_c_2d is not None
+                            and lab_w_2d is not None
+                            and lab_c_2d.shape[1] == L_log_tr
+                            and lab_w_2d.shape[1] == L_log_tr
+                        ):
+                            try:
+                                device_tr = logit_1lv_tr.device
+                                lab_c_b = lab_c_2d.to(
+                                    device=device_tr, dtype=torch.long
+                                ).contiguous()
+                                lab_w_b = lab_w_2d.to(
+                                    device=device_tr, dtype=torch.long
+                                ).contiguous()
+                                log_b = logit_1lv_tr.contiguous()
+                                results_tr = _compute_prob_packed_shifted_segments(
+                                    [log_b, log_b],
+                                    [lab_c_b, lab_w_b],
+                                    device_tr,
+                                    IGNORE_INDEX,
+                                )
+                            except Exception as e:
+                                logger.warning(
+                                    "pre_compute fused probability (traj step CE, correct+wrong): %s "
+                                    "(sample_idx=%s step=%s); falling back to separate pre_compute",
+                                    e,
+                                    sample_idx,
+                                    step,
+                                    exc_info=True,
+                                )
+                            else:
+                                if len(results_tr) == 2:
+                                    pre_compute_results[acc_ctr] = _pack_shifted_ce_pre(
+                                        results_tr[0]
+                                    )
+                                    pre_compute_results[acc_wtr] = _pack_shifted_ce_pre(
+                                        results_tr[1]
+                                    )
+                                    fused_precompute_skip.update({"correct", "wrong"})
 
     for pre_metric_name, pre_metric_cfg in pre_compute_config.items():
         if pre_metric_name in fused_precompute_skip:

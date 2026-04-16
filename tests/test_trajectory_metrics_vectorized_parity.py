@@ -19,6 +19,8 @@ from evals.metrics.trajectory_metrics import (
     _stack_step_logits_for_prob_batch,
 )
 from evals.metrics import METRICS_REGISTRY
+from evals.metrics.utils import IGNORE_INDEX
+from evals.metrics.step_wise_score import compute_prob_from_fixation_logits
 
 
 def test_prefetch_steps_logits_matches_get_logits_at_step() -> None:
@@ -346,6 +348,80 @@ def test_fused_truth_ratio_precompute_matches_sequential() -> None:
         assert abs(float(out["correct"]["agg_value"]) - ec) < 1e-5
     if ew is not None:
         assert abs(float(out["wrong"]["agg_value"]) - ew) < 1e-5
+
+
+def test_fused_truth_ratio_traj_step_precompute_matches_sequential() -> None:
+    """traj_name set: dual probability pre_compute must match two shifted-CE calls."""
+    from evals.metrics.trajectory_metrics import _compute_pre_compute_metrics_at_step
+
+    torch.manual_seed(21)
+    L, V = 9, 17
+    logits_1lv = torch.randn(1, L, V)
+    lab_c = torch.randint(0, V, (L,), dtype=torch.long)
+    lab_w = torch.randint(0, V, (L,), dtype=torch.long)
+    lab_c[0] = IGNORE_INDEX
+    lab_w[2] = IGNORE_INDEX
+    batch_template = {
+        "input_ids": torch.zeros(1, L, dtype=torch.long),
+        "labels_correct": lab_c.unsqueeze(0),
+        "labels_wrong": lab_w.unsqueeze(0),
+        "attention_mask": torch.ones(1, L, dtype=torch.long),
+    }
+    pre_compute_config = {
+        "correct": {
+            "handler": "probability",
+            "access_key": "correct",
+            "labels_field": "labels_correct",
+        },
+        "wrong": {
+            "handler": "probability",
+            "access_key": "wrong",
+            "labels_field": "labels_wrong",
+        },
+    }
+    device = logits_1lv.device
+    labels_c_b = lab_c.unsqueeze(0)
+    labels_w_b = lab_w.unsqueeze(0)
+    ref_c = compute_prob_from_fixation_logits(logits_1lv, labels_c_b, device)[0]
+    ref_w = compute_prob_from_fixation_logits(logits_1lv, labels_w_b, device)[0]
+
+    def _assert_leg(out_leg: dict, ref: dict) -> None:
+        vbi = out_leg["value_by_index"]["0"]
+        assert abs(float(out_leg["agg_value"]) - float(ref["prob"])) < 1e-5
+        assert abs(float(vbi["prob"]) - float(ref["prob"])) < 1e-5
+        assert abs(float(vbi["avg_loss"]) - float(ref["avg_loss"])) < 1e-5
+
+    out_1 = _compute_pre_compute_metrics_at_step(
+        pre_compute_config=pre_compute_config,
+        logits=logits_1lv,
+        batch_template=batch_template,
+        tokenizer=None,
+        sample_labels=None,
+        sample_input_ids=torch.zeros(L, dtype=torch.long),
+        sample_prompt_len=0,
+        sample_idx="0",
+        traj_name="steps",
+        step=3,
+    )
+    _assert_leg(out_1["correct"], ref_c)
+    _assert_leg(out_1["wrong"], ref_w)
+
+    logits_vl = logits_1lv.squeeze(0).transpose(0, 1).contiguous()
+    assert logits_vl.shape == (V, L)
+    out_vl = _compute_pre_compute_metrics_at_step(
+        pre_compute_config=pre_compute_config,
+        logits=logits_vl,
+        batch_template=batch_template,
+        tokenizer=None,
+        sample_labels=None,
+        sample_input_ids=torch.zeros(L, dtype=torch.long),
+        sample_prompt_len=0,
+        sample_idx="0",
+        traj_name="steps",
+        step=3,
+    )
+    _assert_leg(out_vl["correct"], ref_c)
+    _assert_leg(out_vl["wrong"], ref_w)
 
 
 def test_trajectory_should_empty_cuda_cache_respects_flag() -> None:
