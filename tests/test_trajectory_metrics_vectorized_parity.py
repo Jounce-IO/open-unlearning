@@ -5,6 +5,8 @@ from __future__ import annotations
 import sys
 from pathlib import Path
 
+import numpy as np
+import pytest
 import torch
 
 repo_root = Path(__file__).parent.parent
@@ -120,3 +122,136 @@ def test_worker_exact_memorization_cpu_matches_call() -> None:
     )
     assert cpu_score is not None
     assert abs(cpu_score - float(sync[0]["score"])) < 1e-5
+
+
+def test_trajectory_logits_vl_at_step_steps_matches_index() -> None:
+    from evals.metrics.trajectory_metrics import _trajectory_logits_vl_at_step
+
+    torch.manual_seed(0)
+    V, L, S = 5, 4, 6
+    R = torch.randn(V, L, S)
+    F = torch.randint(0, S, (L,), dtype=torch.long)
+    step = 3
+    got = _trajectory_logits_vl_at_step(R, F, S, L, "steps", step)
+    assert torch.equal(got, R[:, :, step])
+
+
+def test_batch_template_has_list_tensors() -> None:
+    from evals.metrics.trajectory_metrics import _batch_template_has_list_tensors
+
+    assert not _batch_template_has_list_tensors({"labels": torch.zeros(1, 3)})
+    assert _batch_template_has_list_tensors(
+        {"labels": [torch.zeros(1, 3)]}
+    )
+
+
+def test_exact_mem_post_loop_metric_names_excludes_list_template() -> None:
+    """When any row has list-of-tensor batch_template (e.g. multi wrong), skip post-loop set."""
+    from evals.metrics.trajectory_metrics import _trajectory_exact_mem_post_loop_metric_names
+    from evals.metrics import METRICS_REGISTRY
+
+    Vocab = 20
+    L = 5
+    B = 2
+    seq_len = 12
+    labels = torch.full((B, seq_len), -100)
+    labels[:, 6:] = torch.randint(0, Vocab, (B, seq_len - 6))
+    input_ids = torch.zeros((B, seq_len), dtype=torch.long)
+    batch = {
+        "input_ids": input_ids,
+        "labels": labels,
+        "labels_wrong": torch.randint(0, Vocab, (B, 2, seq_len)),
+    }
+    prompt_starts = [0, 0]
+    prompt_lens = [6, 6]
+    indices = torch.arange(B)
+    loaded_metrics = {
+        "exact_memorization": {"metric": METRICS_REGISTRY["exact_memorization"], "config": {}},
+    }
+    metrics_to_run = ["exact_memorization"]
+    allow = frozenset({"exact_memorization"})
+    tok = None
+    try:
+        from transformers import AutoTokenizer
+
+        tok = AutoTokenizer.from_pretrained("gpt2")
+    except Exception:
+        pytest.skip("gpt2 tokenizer unavailable")
+    names = _trajectory_exact_mem_post_loop_metric_names(
+        metrics_to_run=metrics_to_run,
+        loaded_metrics=loaded_metrics,
+        step_metric_batch_allowlist=allow,
+        B=B,
+        batch=batch,
+        labels=labels,
+        input_ids=input_ids,
+        indices=indices,
+        prompt_starts=prompt_starts,
+        prompt_lens=prompt_lens,
+        L=L,
+        prompt_only_input_ids=False,
+        tokenizer=tok,
+    )
+    assert names == frozenset()
+
+
+def test_post_loop_rouge_append_order_b2_executor_none() -> None:
+    """Two samples: post-loop ROUGE appends two scores per (step, view) in batch order."""
+    from evals.metrics.trajectory_metrics import _trajectory_append_post_loop_rouge
+    from evals.metrics import METRICS_REGISTRY
+
+    try:
+        from transformers import AutoTokenizer
+
+        tok = AutoTokenizer.from_pretrained("gpt2")
+    except Exception:
+        pytest.skip("gpt2 tokenizer unavailable")
+
+    B, V, L, S = 2, tok.vocab_size, 4, 5
+    R = torch.zeros(B, V, L, S)
+    F = torch.zeros(B, L, dtype=torch.long)
+    for b in range(B):
+        for pos in range(L):
+            R[b, (b + 1) % V, pos, 1] = 1.0
+    steps_to_use = [1]
+    loaded_metrics = {"rouge": {"metric": METRICS_REGISTRY["rouge"], "config": {"rouge_type": "rougeL_recall"}}}
+    metrics_to_run = ["rouge"]
+    step_values_by_view = {
+        "full": {"steps": {}},
+        "eos": {"steps": {}},
+    }
+    labels = torch.randint(0, min(100, V), (B, 20))
+    labels[:, :10] = -100
+    input_ids = torch.zeros((B, 20), dtype=torch.long)
+    batch = {"input_ids": input_ids, "labels": labels}
+    indices = torch.arange(B)
+    prompt_starts = [10, 10]
+    prompt_lens = [0, 0]
+    _trajectory_append_post_loop_rouge(
+        trajectory_names=["steps"],
+        steps_to_use=steps_to_use,
+        include_views=["full"],
+        R=R,
+        F=F,
+        S=S,
+        L=L,
+        B=B,
+        effective_lengths=[L, L],
+        labels=labels,
+        input_ids=input_ids,
+        batch=batch,
+        indices=indices,
+        prompt_starts=prompt_starts,
+        prompt_lens=prompt_lens,
+        prompt_only_input_ids=False,
+        tokenizer=tok,
+        metrics_to_run=metrics_to_run,
+        loaded_metrics=loaded_metrics,
+        step_values_by_view=step_values_by_view,
+        executor=None,
+        all_rouge_futures=[],
+        kwargs={"rouge_type": "rougeL_recall"},
+    )
+    vals = step_values_by_view["full"]["steps"][1]["rouge"]
+    assert len(vals) == B
+    assert all(isinstance(x, (int, float, np.number)) for x in vals)
