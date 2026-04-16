@@ -743,6 +743,80 @@ def _get_logits_at_step(traj: Dict[str, Any], traj_name: str, step: int) -> torc
     raise ValueError(f"Unknown traj_name: {traj_name}")
 
 
+def _prefetch_logits_by_step(
+    sample_traj: Dict[str, Any], traj_name: str, steps_to_use: List[int]
+) -> Dict[int, torch.Tensor]:
+    """Map step -> [V, L] logits for all reporting steps (one index_select for ``steps``)."""
+    if not steps_to_use:
+        return {}
+    R_sample = sample_traj["R"]
+    if traj_name == "steps":
+        device = R_sample.device
+        idx = torch.tensor(steps_to_use, dtype=torch.long, device=device)
+        stacked = R_sample.index_select(2, idx)
+        return {int(steps_to_use[j]): stacked[:, :, j] for j in range(len(steps_to_use))}
+    return {int(s): _get_logits_at_step(sample_traj, traj_name, int(s)) for s in steps_to_use}
+
+
+def _stack_step_logits_for_prob_batch(
+    logits_by_step: Dict[int, torch.Tensor], steps_to_use: List[int], L_eff_slice: Optional[int]
+) -> torch.Tensor:
+    """Stack [V,L] per-step logits into [T,L,V] for batched ``exact_memorization`` / probability-style CE."""
+    rows: List[torch.Tensor] = []
+    for s in steps_to_use:
+        sl = logits_by_step[int(s)]
+        if L_eff_slice is not None:
+            sl = sl[:, :L_eff_slice]
+        rows.append(trajectory_step_logits_to_prob_batch(sl).squeeze(0))
+    return torch.stack(rows, dim=0)
+
+
+def _expand_batch_template_leading_dim(
+    batch_template: Dict[str, Any], T: int
+) -> Dict[str, Any]:
+    """Expand tensors with leading batch dim 1 to ``(T, …)`` for batched logit metrics."""
+    out: Dict[str, Any] = {}
+    for k, v in batch_template.items():
+        if isinstance(v, torch.Tensor) and v.dim() >= 1 and v.shape[0] == 1:
+            out[k] = v.expand(T, *v.shape[1:]).contiguous()
+        else:
+            out[k] = v
+    return out
+
+
+def _worker_exact_memorization_cpu(
+    logits_l_v_numpy: np.ndarray,
+    labels_1l_numpy: np.ndarray,
+    _ignore_index: int,
+) -> Optional[float]:
+    """Picklable ProcessPool worker: [L,V] float logits + [L] int labels → exact_mem score (CPU)."""
+    from evals.metrics.trajectory_adapters import LogitModelWrapper
+    from evals.metrics.utils import tokenwise_vocab_logprobs
+
+    logits_lv = torch.from_numpy(np.ascontiguousarray(logits_l_v_numpy)).float()
+    labels_1l = torch.from_numpy(np.ascontiguousarray(labels_1l_numpy)).long()
+    logits_b = logits_lv.unsqueeze(0)
+    L = labels_1l.shape[0]
+    batch = {
+        "labels": labels_1l.unsqueeze(0),
+        "input_ids": torch.zeros((1, L), dtype=torch.long),
+        "attention_mask": torch.ones((1, L), dtype=torch.long),
+    }
+    model = LogitModelWrapper(logits_b, logits_b.device)
+    log_probs_batch, labels_batch = tokenwise_vocab_logprobs(
+        model, batch, grad=False, return_labels=True
+    )
+    if len(log_probs_batch) == 0 or len(labels_batch) == 0:
+        return None
+    log_probs = log_probs_batch[0]
+    labels_use = labels_batch[0]
+    if len(labels_use) == 0:
+        return None
+    preds = torch.argmax(log_probs, dim=-1)
+    em_score = (preds == labels_use).sum().float() / float(len(labels_use))
+    return float(em_score.item())
+
+
 def _get_metric_from_registry(metric_name: str):
     """Get metric from registry by name."""
     # Import here to avoid circular import
@@ -2306,20 +2380,27 @@ def _call_metric_at_step(
     if sample_input_ids is None:
         sample_input_ids = torch.zeros(1, dtype=torch.long)
     
-    # Ensure logits are in [B, L, V] format
+    # Ensure logits are in [B, L, V] format (B may be T>1 for batched trajectory steps).
     if logits.dim() == 2:
         # [V, L] -> transpose to [L, V] then add batch dim -> [1, L, V]
         logits = logits.transpose(0, 1).unsqueeze(0)
     elif logits.dim() == 3 and logits.shape[0] == 1:
         # [1, L, V] - already correct
         pass
+    elif logits.dim() == 3 and logits.shape[0] > 1:
+        # [T, L, V] — batched diffusion steps (callers must not use pre_compute with T>1).
+        pass
     else:
         raise ValueError(f"Unexpected logits shape: {logits.shape}")
-    
+
+    batched_steps = logits.shape[0] > 1
+    if batched_steps:
+        batch_template = _expand_batch_template_leading_dim(batch_template, logits.shape[0])
+
     # Create model wrapper (or use override for DualLogitModelWrapper e.g. mia_min_k)
     device = logits.device if model_wrapper_override is None else model_wrapper_override.device
     model_wrapper = model_wrapper_override if model_wrapper_override is not None else LogitModelWrapper(logits, device)
-    
+
     # Prepare batch
     batch = {}
     for key, value in batch_template.items():
@@ -2327,11 +2408,16 @@ def _call_metric_at_step(
             batch[key] = value.to(device)
         else:
             batch[key] = value
-    
+
     # Handle pre_compute metrics if present (use get: DictConfig in struct mode does not support pop)
     pre_compute_config = metric_config.get("pre_compute", {})
     pre_compute_results = {}
     if pre_compute_config:
+        if batched_steps:
+            raise ValueError(
+                "Batched trajectory logits (shape[0]>1) are not supported with pre_compute; "
+                "call _call_metric_at_step per step for this metric."
+            )
         if sample_idx is None:
             sample_idx = "0"  # Default index
         pre_compute_results = _compute_pre_compute_metrics_at_step(
@@ -2454,6 +2540,7 @@ def _call_metric_at_step(
     sample_traj = kwargs.get("sample_traj")
     if (
         metric_name == "extraction_strength"
+        and not batched_steps
         and trajectory_config is not None
         and trajectory_config.get("use_generalized_sequence_probability", True)
         and sample_traj is not None
@@ -2520,7 +2607,22 @@ def _call_metric_at_step(
         "exact_memorization": _exact_memorization_batch_fn,
         "extraction_strength": _extraction_strength_batch_fn,
     }
-    
+
+    if metric_name == "exact_memorization" and logits.shape[0] > 1:
+        tn = logits.shape[0]
+        batch_fn = batch_function_map["exact_memorization"]
+        out_list: List[Any] = []
+        for ti in range(tn):
+            lw_i = LogitModelWrapper(logits[ti : ti + 1], device)
+            sub_batch = {}
+            for key, value in batch.items():
+                if isinstance(value, torch.Tensor) and value.dim() >= 1 and value.shape[0] == tn:
+                    sub_batch[key] = value[ti : ti + 1]
+                else:
+                    sub_batch[key] = value
+            out_list.extend(batch_fn(model=lw_i, batch=sub_batch))
+        return out_list
+
     # Probability: invariant — step logits and batch labels must have the same sequence length
     # (single L from trajectories_from_logits). Callers must never pass mismatched lengths.
     if metric_name == "probability" and "labels" in batch and batch["labels"] is not None:
@@ -3228,6 +3330,7 @@ def trajectory_metrics(model, **kwargs):
                     f"Data parallel: rank {rank}/{world_size} processes {n_samples} samples (no duplication)"
                 )
             all_rouge_futures: list = []
+            all_cpu_metric_futures: list = []
             effective_length_by_index: dict[str, int] = {}
             prompt_len_by_index: dict[str, int] = {}
             # Progress logging: log every 5% of batches or at least every 5 batches, plus first and last
@@ -3288,12 +3391,13 @@ def trajectory_metrics(model, **kwargs):
                     sample_kw["target_sequences"] = target_sequences
                     sample_kw["evaluation_mode"] = evaluation_mode
                 sampler_output = sampler.sample(**sample_kw)
-                _batch_elapsed = time.perf_counter() - _batch_t0
+                _t_after_sampler = time.perf_counter()
+                _sampler_sec = _t_after_sampler - _batch_t0
                 gpu_set_phase("trajectory_after_sampler", batch_idx=batch_idx)
                 if (batch_idx % _log_interval == 0 or batch_idx == 0 or batch_idx == expected_batches - 1) and logger.isEnabledFor(logging.DEBUG):
                     logger.debug(
                         "Batch %s/%s: diffusion sampling done in %.1fs",
-                        batch_idx + 1, expected_batches, _batch_elapsed,
+                        batch_idx + 1, expected_batches, _sampler_sec,
                     )
 
                 # Extract logits and fixation steps
@@ -3419,13 +3523,7 @@ def trajectory_metrics(model, **kwargs):
                                     ),
                                 )
                         else:
-                            logits_list = [
-                                _get_logits_at_step(
-                                    {"R": R[i], "F": F[i], "S": S, "L": L}, "steps", step
-                                ).T
-                                for i in range(B)
-                            ]
-                            logits_batch = torch.stack(logits_list, dim=0)
+                            logits_batch = R[:, :, :, step].permute(0, 2, 1)
                             if not _dual_pl:
                                 sv = _plc.get("_single_view") or "full"
                                 if sv == "full":
@@ -3435,7 +3533,7 @@ def trajectory_metrics(model, **kwargs):
                                 else:
                                     for i in range(B):
                                         Li = min(int(effective_lengths[i]), L)
-                                        lb = logits_list[i][:Li].unsqueeze(0)
+                                        lb = logits_batch[i : i + 1, :Li, :]
                                         sb = {
                                             k: (
                                                 v[i : i + 1]
@@ -3453,7 +3551,7 @@ def trajectory_metrics(model, **kwargs):
                                 )
                                 for i in range(B):
                                     Li = min(int(effective_lengths[i]), L)
-                                    lb = logits_list[i][:Li].unsqueeze(0)
+                                    lb = logits_batch[i : i + 1, :Li, :]
                                     sb = {
                                         k: (
                                             v[i : i + 1]
@@ -3580,6 +3678,21 @@ def trajectory_metrics(model, **kwargs):
                         ground_truth_str = ""
                     rouge_scorer_instance = rouge_scorer.RougeScorer(["rouge1", "rougeL"], use_stemmer=True)
                     rouge_futures_this_sample = []
+                    cpu_metric_futures_this_sample: list[Any] = []
+                    _tc_plain: Dict[str, Any] = {}
+                    if trajectory_config is not None:
+                        if OmegaConf.is_config(trajectory_config):
+                            _tc_plain = OmegaConf.to_container(trajectory_config, resolve=True) or {}
+                        elif isinstance(trajectory_config, dict):
+                            _tc_plain = trajectory_config
+                    _raw_allow = _tc_plain.get("trajectory_step_metric_batch_allowlist") or ()
+                    _step_metric_batch_allowlist = frozenset(
+                        str(x) for x in (_raw_allow if isinstance(_raw_allow, (list, tuple)) else ())
+                    )
+                    _raw_cpu = _tc_plain.get("trajectory_cpu_offload_metrics") or ()
+                    _cpu_offload_metrics = frozenset(
+                        str(x) for x in (_raw_cpu if isinstance(_raw_cpu, (list, tuple)) else ())
+                    )
 
                     # Compute metrics for each trajectory type and step (only report steps)
                     L_eff_b = effective_lengths[sample_idx]
@@ -3641,18 +3754,29 @@ def trajectory_metrics(model, **kwargs):
                                         m: [] for m in loaded_metrics.keys()
                                     }
 
+                        logits_by_step = _prefetch_logits_by_step(sample_traj, traj_name, steps_to_use)
+
                         rouge_metrics_in_run = [
                             m for m in metrics_to_run
                             if loaded_metrics[m]["metric"].name == "rouge"
                         ]
                         if rouge_metrics_in_run:
-                            pred_token_lists = []
-                            for step in steps_to_use:
-                                logits_s = _get_logits_at_step(sample_traj, traj_name, step)
-                                if logits_s.dim() == 3:
-                                    logits_s = logits_s[0]
-                                pred_tokens = torch.argmax(logits_s, dim=-1)
-                                pred_token_lists.append(pred_tokens.tolist())
+                            if traj_name == "steps" and len(steps_to_use) > 0:
+                                R_s = sample_traj["R"]
+                                idx_t = torch.tensor(steps_to_use, dtype=torch.long, device=R_s.device)
+                                stacked_sl = R_s.index_select(2, idx_t)
+                                pred_tokens_batched = stacked_sl.argmax(dim=0)
+                                pred_token_lists = [
+                                    pred_tokens_batched[:, j].tolist()
+                                    for j in range(pred_tokens_batched.shape[1])
+                                ]
+                            else:
+                                pred_token_lists = []
+                                for step in steps_to_use:
+                                    logits_s = logits_by_step[int(step)]
+                                    if logits_s.dim() == 3:
+                                        logits_s = logits_s[0]
+                                    pred_token_lists.append(torch.argmax(logits_s, dim=-1).tolist())
                             gen_texts_full = tokenizer.batch_decode(
                                 pred_token_lists, skip_special_tokens=True
                             )
@@ -3691,30 +3815,110 @@ def trajectory_metrics(model, **kwargs):
                                         (future, traj_name, rouge_metrics_in_run, steps_to_use, view)
                                     )
 
-                        for step in steps_to_use:
-                            # Trajectory-sliced logits per layout; truth_ratio nested probability uses them when traj_name is passed into pre_compute.
-                            logits = _get_logits_at_step(sample_traj, traj_name, step)  # [V, L]
+                        L_eff_slice = min(L_eff_b, batch_template["input_ids"].shape[1])
+                        batch_template_eos = _slice_batch_template_to_length(batch_template, L_eff_slice)
+                        _has_list_bt = any(
+                            isinstance(v, list) and v and isinstance(v[0], torch.Tensor)
+                            for v in batch_template.values()
+                        )
 
-                            # Build eos batch_template (sliced to L_eff_slice) for eos view.
-                            # Use helper so labels_correct/labels_wrong (list of tensors) are sliced too (probability invariant).
-                            L_eff_slice = min(L_eff_b, batch_template["input_ids"].shape[1])
-                            batch_template_eos = _slice_batch_template_to_length(batch_template, L_eff_slice)
+                        for metric_name, metric_info in [(m, loaded_metrics[m]) for m in metrics_to_run]:
+                            try:
+                                metric = metric_info["metric"]
+                                metric_cfg = metric_info["config"]
 
-                            # Compute each requested metric (skip rouge and probability; already batched above) for each view
-                            for metric_name, metric_info in [(m, loaded_metrics[m]) for m in metrics_to_run]:
-                                try:
-                                    metric = metric_info["metric"]
-                                    metric_cfg = metric_info["config"]
-
-                                    if metric_name == "privleak" and trajectories_by_key is not None:
+                                if metric_name == "privleak" and trajectories_by_key is not None:
+                                    continue
+                                if metric_name in rouge_metrics_in_run or metric_name == "probability":
+                                    continue
+                                if metric_name == "ks_test":
+                                    ref_logs = kwargs.get("reference_logs") or {}
+                                    if not ref_logs.get("retain_model_logs"):
                                         continue
-                                    if metric_name in rouge_metrics_in_run or metric_name == "probability":
-                                        continue
-                                    # When producing reference (no reference provided), skip metrics that only compare to reference.
-                                    if metric_name == "ks_test":
-                                        ref_logs = kwargs.get("reference_logs") or {}
-                                        if not ref_logs.get("retain_model_logs"):
-                                            continue
+
+                                _pcfg = metric_cfg.get("pre_compute") if hasattr(metric_cfg, "get") else None
+                                if OmegaConf.is_config(_pcfg):
+                                    _pcfg = OmegaConf.to_container(_pcfg, resolve=True) or {}
+                                elif _pcfg is None:
+                                    _pcfg = {}
+                                _pre_empty = not (isinstance(_pcfg, dict) and len(_pcfg) > 0)
+                                can_batch_exact = (
+                                    traj_name == "steps"
+                                    and (
+                                        metric_name in _step_metric_batch_allowlist
+                                        or metric.name in _step_metric_batch_allowlist
+                                    )
+                                    and metric.name == "exact_memorization"
+                                    and _pre_empty
+                                    and not _has_list_bt
+                                )
+
+                                if can_batch_exact:
+                                    gpu_set_phase(
+                                        "trajectory_metric",
+                                        metric=metric_name,
+                                        batch_idx=batch_idx,
+                                        step=-1,
+                                    )
+                                    kwargs_clean = {k: v for k, v in kwargs.items() if k != "tokenizer"}
+                                    if primary_data is not None:
+                                        kwargs_clean["data"] = primary_data
+                                    kwargs_clean["ground_truth"] = ground_truth_str
+                                    kwargs_clean["rouge_scorer"] = rouge_scorer_instance
+                                    kwargs_clean["sample_traj"] = sample_traj
+                                    kwargs_clean["step"] = steps_to_use[0]
+                                    kwargs_clean["step_index"] = 0
+                                    if trajectory_config is not None:
+                                        kwargs_clean["trajectory_config"] = trajectory_config
+                                    if guardrail_config_with_pools is not None:
+                                        kwargs_clean["guardrail_config"] = guardrail_config_with_pools
+
+                                    for view in include_views:
+                                        bt = batch_template if view == "full" else batch_template_eos
+                                        leff = L_eff_slice if view == "eos" else None
+                                        logits_batched = _stack_step_logits_for_prob_batch(
+                                            logits_by_step, steps_to_use, leff
+                                        )
+                                        kwargs_metric = dict(kwargs_clean)
+                                        kwargs_metric["traj_name"] = traj_name
+                                        if metric_name == "hm_aggregate":
+                                            kwargs_metric["trajectory_view"] = view
+                                        result = _call_metric_at_step(
+                                            metric=metric,
+                                            logits=logits_batched,
+                                            batch_template=bt,
+                                            tokenizer=tokenizer,
+                                            sample_labels=sample_labels,
+                                            sample_input_ids=sample_input_ids,
+                                            sample_prompt_len=sample_prompt_len,
+                                            metric_config=metric_cfg,
+                                            sample_idx=idx_str,
+                                            **kwargs_metric,
+                                        )
+                                        if not isinstance(result, list) or len(result) != len(steps_to_use):
+                                            raise RuntimeError(
+                                                "batched exact_memorization: expected list of length "
+                                                f"{len(steps_to_use)}, got {type(result).__name__} len="
+                                                f"{len(result) if isinstance(result, list) else 'n/a'}"
+                                            )
+                                        for j, step in enumerate(steps_to_use):
+                                            rd = result[j]
+                                            metric_value = None
+                                            if isinstance(rd, dict):
+                                                if "score" in rd:
+                                                    metric_value = rd["score"]
+                                                elif "prob" in rd:
+                                                    metric_value = rd["prob"]
+                                            if metric_value is not None:
+                                                step_values_by_view[view][traj_name][step][metric_name].append(
+                                                    metric_value
+                                                )
+                                    if torch.cuda.is_available():
+                                        torch.cuda.empty_cache()
+                                    continue
+
+                                for step in steps_to_use:
+                                    logits = logits_by_step[int(step)]
 
                                     gpu_set_phase("trajectory_metric", metric=metric_name, batch_idx=batch_idx, step=step)
 
@@ -3741,6 +3945,33 @@ def trajectory_metrics(model, **kwargs):
                                         kwargs_metric["traj_name"] = traj_name
                                         if metric_name == "hm_aggregate":
                                             kwargs_metric["trajectory_view"] = view
+
+                                        use_cpu_exact = (
+                                            executor is not None
+                                            and (
+                                                metric_name in _cpu_offload_metrics
+                                                or metric.name in _cpu_offload_metrics
+                                            )
+                                            and metric.name == "exact_memorization"
+                                        )
+                                        if use_cpu_exact:
+                                            if bt.get("labels") is None:
+                                                raise ValueError(
+                                                    "trajectory_cpu_offload_metrics exact_memorization requires labels in batch_template"
+                                                )
+                                            logits_lv = trajectory_step_logits_to_prob_batch(logits_view).squeeze(0)
+                                            lab_1d = bt["labels"].squeeze(0)
+                                            fut = executor.submit(
+                                                _worker_exact_memorization_cpu,
+                                                np.asarray(logits_lv.detach().cpu().numpy(), dtype=np.float32),
+                                                np.asarray(lab_1d.detach().cpu().numpy(), dtype=np.int64),
+                                                IGNORE_INDEX,
+                                            )
+                                            cpu_metric_futures_this_sample.append(
+                                                (fut, traj_name, step, view, metric_name)
+                                            )
+                                            continue
+
                                         result = _call_metric_at_step(
                                             metric=metric,
                                             logits=logits_view,
@@ -3809,28 +4040,27 @@ def trajectory_metrics(model, **kwargs):
                                             )
                                         if metric_value is not None:
                                             step_values_by_view[view][traj_name][step][metric_name].append(metric_value)
-                                    # Return GPU memory after metrics that allocate large log_probs/contiguous logits
-                                    # so the next metric (e.g. hm_aggregate) or next step does not OOM (see .monitor/oom-investigation-exact-cause.md).
                                     if metric_name in ("extraction_strength", "truth_ratio", "ks_test") and torch.cuda.is_available():
                                         torch.cuda.empty_cache()
-                        
-                                except Exception as e:
-                                    from evals.metrics.base import RetainReferenceValidationError
-                                    if isinstance(e, RetainReferenceValidationError):
-                                        raise
-                                    logger.error(
-                                        f"Error computing {metric_name} at step {step} for {traj_name}: {e}",
-                                        exc_info=True
-                                    )
+
+                            except Exception as e:
+                                from evals.metrics.base import RetainReferenceValidationError
+                                if isinstance(e, RetainReferenceValidationError):
                                     raise
-                            # Release per-step tensors so baseline memory does not grow across steps (fixes GPU leak).
-                            try:
-                                del batch_template_eos, logits
-                            except NameError:
-                                pass
+                                logger.error(
+                                    f"Error computing {metric_name} for {traj_name}: {e}",
+                                    exc_info=True
+                                )
+                                raise
+                        try:
+                            del batch_template_eos
+                        except NameError:
+                            pass
 
                     if executor is not None and rouge_futures_this_sample:
                         all_rouge_futures.extend(rouge_futures_this_sample)
+                    if executor is not None and cpu_metric_futures_this_sample:
+                        all_cpu_metric_futures.extend(cpu_metric_futures_this_sample)
 
                     # Aggressive per-sample cleanup to avoid baseline memory growth across samples (GPU leak).
                     gc.collect()
@@ -3849,10 +4079,15 @@ def trajectory_metrics(model, **kwargs):
                                 for b in range(B):
                                     gl = _gen_labels_for_packed_prob[b]
                                     L_eff_bp = int(effective_lengths[b])
-                                    st_b = {"R": R[b], "F": F[b], "S": S, "L": L}
-                                    logits_step = trajectory_step_logits_to_prob_batch(
-                                        _get_logits_at_step(st_b, traj_name, step)
-                                    )
+                                    if traj_name == "steps":
+                                        logits_step = trajectory_step_logits_to_prob_batch(
+                                            R[b, :, :, step]
+                                        )
+                                    else:
+                                        st_b = {"R": R[b], "F": F[b], "S": S, "L": L}
+                                        logits_step = trajectory_step_logits_to_prob_batch(
+                                            _get_logits_at_step(st_b, traj_name, step)
+                                        )
                                     gl_dev = gl.to(device=device_prob, dtype=torch.long)
                                     if view == "full":
                                         seg_logits.append(logits_step)
@@ -3878,11 +4113,15 @@ def trajectory_metrics(model, **kwargs):
 
                 gpu_set_phase("trajectory_batch_end", batch_idx=batch_idx)
                 _batch_duration = time.perf_counter() - _batch_t0
+                _post_sampler_sec = _batch_duration - _sampler_sec
                 logger.info(
-                    "trajectory_batch_duration batch_idx=%s batch_size=%s duration_sec=%.2f",
+                    "trajectory_batch_duration batch_idx=%s batch_size=%s duration_sec=%.2f "
+                    "sampler_sec=%.3f post_sampler_sec=%.3f",
                     batch_idx,
                     B,
                     _batch_duration,
+                    _sampler_sec,
+                    _post_sampler_sec,
                 )
                 # Release batch-sized GPU data before next batch to avoid holding two batches in memory (OOM with many samples).
                 # R and F are references to out["R"] and out["F"]; deleting only 'out' leaves R, F alive (see reports/oom-investigation-why-still-oom.md).
@@ -3919,6 +4158,12 @@ def trajectory_metrics(model, **kwargs):
                         for i, step in enumerate(steps_to_use):
                             if i < len(rouge_scores) and isinstance(rouge_scores[i], dict) and rouge_type in rouge_scores[i]:
                                 step_values_by_view[view][traj_name][step][metric_name].append(rouge_scores[i][rouge_type])
+
+            if executor is not None and all_cpu_metric_futures:
+                for fut, traj_name, step, view, metric_name in all_cpu_metric_futures:
+                    score = fut.result()
+                    if score is not None:
+                        step_values_by_view[view][traj_name][step][metric_name].append(score)
 
             if _key is None and privleak_accumulators is not None and holdout_dataloader is not None:
                 privleak_cfg = privleak_streaming_cfg["privleak_cfg"]
@@ -4030,13 +4275,7 @@ def trajectory_metrics(model, **kwargs):
                                     ),
                                 )
                         else:
-                            h_logits_list = [
-                                _get_logits_at_step(
-                                    {"R": h_R[i], "F": h_F[i], "S": h_S, "L": h_L}, "steps", step
-                                ).T
-                                for i in range(h_B)
-                            ]
-                            h_logits_batch = torch.stack(h_logits_list, dim=0)
+                            h_logits_batch = h_R[:, :, :, step].permute(0, 2, 1)
                             if not _dual_h:
                                 sv = _plc_h.get("_single_view") or "full"
                                 if sv == "full":
@@ -4046,7 +4285,7 @@ def trajectory_metrics(model, **kwargs):
                                 else:
                                     for i in range(h_B):
                                         Li = min(int(h_effective_lengths[i]), h_L)
-                                        lb = h_logits_list[i][:Li].unsqueeze(0)
+                                        lb = h_logits_batch[i : i + 1, :Li, :]
                                         sb = {
                                             k: (
                                                 v[i : i + 1]
@@ -4064,7 +4303,7 @@ def trajectory_metrics(model, **kwargs):
                                 )
                                 for i in range(h_B):
                                     Li = min(int(h_effective_lengths[i]), h_L)
-                                    lb = h_logits_list[i][:Li].unsqueeze(0)
+                                    lb = h_logits_batch[i : i + 1, :Li, :]
                                     sb = {
                                         k: (
                                             v[i : i + 1]
