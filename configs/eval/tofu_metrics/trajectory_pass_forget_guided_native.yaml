@@ -30,7 +30,7 @@ trajectory_config:
   include_views: [full, eos]
   use_generalized_sequence_probability: true
   logit_alignment: causal
-  metric_worker_pool_size: 4
+  metric_worker_pool_size: 8
   sampler_kwargs:
     steps: 50
     temperature: 0.0

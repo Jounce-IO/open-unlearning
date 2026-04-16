@@ -2800,7 +2800,7 @@ def trajectory_metrics(model, **kwargs):
                 "trajectory_metrics: trajectory_config.use_generalized_sequence_probability=%s",
                 _traj_u,
             )
-        metric_worker_pool_size = trajectory_config.get("metric_worker_pool_size", 4)
+        metric_worker_pool_size = trajectory_config.get("metric_worker_pool_size", 8)
         executor = (
             ProcessPoolExecutor(max_workers=metric_worker_pool_size)
             if metric_worker_pool_size > 0
