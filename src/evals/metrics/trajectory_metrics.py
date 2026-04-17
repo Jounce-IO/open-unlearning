@@ -70,6 +70,8 @@ _trajectory_single_retain_warned: set = set()
 
 # Trajectory evals use interval mode only; every-step mode is not used.
 DEFAULT_TRAJECTORY_SAMPLE_INTERVAL = 8
+# Packed shifted-CE (post-loop probability / truth_ratio legs): cap segments per GPU chunk when unset.
+DEFAULT_TRAJECTORY_STEP_VIEW_BATCH_CHUNK_MAX = 32
 
 
 def _trajectory_should_empty_cuda_cache(trajectory_config: Optional[Any]) -> bool:
@@ -483,8 +485,10 @@ def _trajectory_tc_allowlist_sets(
     Segment / row order is lexicographic ``(step, view)`` — for each step in ``steps_to_use`` order,
     then each view in ``include_views`` order.
 
-    ``trajectory_step_view_batch_chunk_max`` (optional positive int): max number of packed shifted-CE
-    segments per GPU chunk (for ``probability`` / ``truth_ratio`` legs). None means no chunking.
+    ``trajectory_step_view_batch_chunk_max`` (optional int): max number of packed shifted-CE
+    segments per GPU chunk (for ``probability`` / ``truth_ratio`` legs). When the key is absent,
+    defaults to ``DEFAULT_TRAJECTORY_STEP_VIEW_BATCH_CHUNK_MAX``. Use ``0`` or a negative value to
+    disable chunking (single fused pass, highest peak memory).
     """
     _tc_plain: Dict[str, Any] = {}
     if trajectory_config is not None:
@@ -501,14 +505,15 @@ def _trajectory_tc_allowlist_sets(
     _raw_tv = _tc_plain.get("trajectory_step_view_batch_allowlist") or ()
     tv_allow = frozenset(str(x) for x in (_raw_tv if isinstance(_raw_tv, (list, tuple)) else ()))
     _raw_chunk = _tc_plain.get("trajectory_step_view_batch_chunk_max")
-    chunk_max: Optional[int] = None
-    if _raw_chunk is not None:
+    chunk_max: Optional[int]
+    if _raw_chunk is None:
+        chunk_max = DEFAULT_TRAJECTORY_STEP_VIEW_BATCH_CHUNK_MAX
+    else:
         try:
             cmi = int(_raw_chunk)
-            if cmi > 0:
-                chunk_max = cmi
+            chunk_max = cmi if cmi > 0 else None
         except (TypeError, ValueError):
-            chunk_max = None
+            chunk_max = DEFAULT_TRAJECTORY_STEP_VIEW_BATCH_CHUNK_MAX
     return _tc_plain, step_allow, cpu_off, tv_allow, chunk_max
 
 
@@ -3788,8 +3793,9 @@ def trajectory_metrics(model, **kwargs):
           truth_ratio, extraction_strength) allowed to use one packed or stacked pass per
           (sample, traj_name, metric) over steps × include_views. Row / segment order is
           lexicographic (step, then view).
-        - trajectory_step_view_batch_chunk_max: positive int caps packed shifted-CE segment
-          count per GPU chunk (post-loop probability and truth_ratio legs).
+        - trajectory_step_view_batch_chunk_max: int caps packed shifted-CE segment count per GPU
+          chunk (post-loop probability and truth_ratio legs). Defaults to 32 when omitted; ``0`` or
+          negative disables chunking.
         """
         # Extract config
         metrics_config = kwargs.get("metrics", [])
