@@ -23,6 +23,13 @@ model:
 forget_split: forget10
 retain_split: retain90
 holdout_split: holdout10
+# TOFU six-way **multi-eval** (MDLM Phase 1/2): defaults match dllm SFT reference
+# (forget10 / retain90 / holdout10, per_device_eval_batch_size 32). Training still uses
+# ``forget_split`` / ``retain_split`` / ``holdout_split`` (e.g. forget01 + retain99 from CLI).
+# Override via Hydra or ``dllm unlearn`` YAML ``eval.tofu.multi_eval_*_split`` (see dllm docs).
+tofu_multi_eval_forget_split: forget10
+tofu_multi_eval_retain_split: retain90
+tofu_multi_eval_holdout_split: holdout10
 retain_logs_path: null
 question_key: "question"
 
@@ -33,8 +40,8 @@ eval:
     retain_logs_path: ${retain_logs_path}
     overwrite: true
     question_key: ${question_key}
-    # Small batch size for eval to avoid OOM with 8B diffusion model on 40GB GPU
-    batch_size: 1
+    # Standalone TOFU metrics evaluators; align with configs/eval/tofu.yaml (SFT uses 32).
+    batch_size: 32
 
 data:
   validation_cap: 256
@@ -61,7 +68,7 @@ data:
         args:
           hf_args:
             path: "locuslab/TOFU"
-            name: ${forget_split}
+            name: ${tofu_multi_eval_forget_split}
             split: "train"
           question_key: ${question_key}
     retain:
@@ -70,7 +77,7 @@ data:
         args:
           hf_args:
             path: "locuslab/TOFU"
-            name: ${retain_split}
+            name: ${tofu_multi_eval_retain_split}
             split: "train"
           question_key: ${question_key}
     holdout:
@@ -79,7 +86,7 @@ data:
         args:
           hf_args:
             path: "locuslab/TOFU"
-            name: ${holdout_split}
+            name: ${tofu_multi_eval_holdout_split}
             split: "train"
           question_key: ${question_key}
     real_authors:
@@ -114,6 +121,8 @@ data:
 
 trainer:
   args:
+    # HF Trainer eval dataloader (Phase 1 per-split loss); match dllm SFT ``per_device_eval_batch_size``.
+    per_device_eval_batch_size: 32
     # Use warmup_ratio from trainer/finetune.yaml (same as dllm sft); epoch warmup would
     # override via open-unlearning load_trainer_args and diverge from SFT schedules.
     warmup_epochs: 0
