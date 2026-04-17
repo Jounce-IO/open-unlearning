@@ -183,6 +183,7 @@ def test_exact_mem_post_loop_metric_names_excludes_list_template() -> None:
         metrics_to_run=metrics_to_run,
         loaded_metrics=loaded_metrics,
         step_metric_batch_allowlist=allow,
+        view_step_batch_allowlist=frozenset(),
         B=B,
         batch=batch,
         labels=labels,
@@ -433,3 +434,152 @@ def test_trajectory_should_empty_cuda_cache_respects_flag() -> None:
         assert _trajectory_should_empty_cuda_cache(None) is True
         assert _trajectory_should_empty_cuda_cache({"aggressive_cuda_empty_cache": False}) is False
         assert _trajectory_should_empty_cuda_cache({"aggressive_cuda_empty_cache": True}) is True
+
+
+def test_packed_shifted_probs_chunked_matches_single_call() -> None:
+    from evals.metrics.step_wise_score import compute_prob_packed_shifted_segments
+    from evals.metrics.trajectory_metrics import _packed_shifted_probs_chunked
+
+    torch.manual_seed(11)
+    device = torch.device("cpu")
+    seg_logits: list[torch.Tensor] = []
+    seg_labels: list[torch.Tensor] = []
+    for Li in (3, 5, 2, 4):
+        seg_logits.append(torch.randn(1, Li, 9))
+        lab = torch.randint(0, 9, (1, Li), dtype=torch.long)
+        lab[0, -1] = IGNORE_INDEX
+        seg_labels.append(lab)
+    ref = compute_prob_packed_shifted_segments(seg_logits, seg_labels, device, IGNORE_INDEX)
+    chunked = _packed_shifted_probs_chunked(
+        seg_logits, seg_labels, device, IGNORE_INDEX, chunk_max=2
+    )
+    assert len(chunked) == len(ref)
+    for a, b in zip(ref, chunked, strict=True):
+        assert abs(float(a["prob"]) - float(b["prob"])) < 1e-6
+        assert abs(float(a["avg_loss"]) - float(b["avg_loss"])) < 1e-5
+
+
+def test_shifted_ce_segments_lex_matches_individual_probs() -> None:
+    from evals.metrics.trajectory_metrics import _build_shifted_ce_segments_step_view_lex
+    from evals.metrics.trajectory_metrics import _prefetch_logits_by_step
+    from evals.metrics.step_wise_score import (
+        compute_prob_from_fixation_logits,
+        compute_prob_packed_shifted_segments,
+        trajectory_step_logits_to_prob_batch,
+    )
+
+    torch.manual_seed(12)
+    V, L, S = 13, 10, 5
+    R = torch.randn(V, L, S)
+    F = torch.randint(0, S, (L,), dtype=torch.long)
+    traj = {"R": R, "F": F, "S": S, "L": L}
+    steps = [1, 3]
+    include_views = ["full", "eos"]
+    gl = torch.randint(0, V, (L,), dtype=torch.long)
+    gl[0] = IGNORE_INDEX
+    L_eff = 6
+    gl_eos = gl[:L_eff].clone()
+
+    by_step = _prefetch_logits_by_step(traj, "steps", steps)
+    device = R.device
+    seg_log, seg_lab = _build_shifted_ce_segments_step_view_lex(
+        by_step, steps, include_views, gl, gl_eos, L_eff, device
+    )
+    packed = compute_prob_packed_shifted_segments(seg_log, seg_lab, device, IGNORE_INDEX)
+    assert len(packed) == len(steps) * len(include_views)
+    k = 0
+    for step in steps:
+        sl = by_step[int(step)]
+        log_b = trajectory_step_logits_to_prob_batch(sl)
+        for view in include_views:
+            if view == "full":
+                pr = compute_prob_from_fixation_logits(log_b, gl.unsqueeze(0), device, IGNORE_INDEX)[0]
+            else:
+                Ls = min(L_eff, log_b.shape[1])
+                pr = compute_prob_from_fixation_logits(
+                    log_b[:, :Ls, :], gl_eos[:Ls].unsqueeze(0), device, IGNORE_INDEX
+                )[0]
+            assert abs(float(packed[k]["prob"]) - float(pr["prob"])) < 1e-5
+            k += 1
+
+
+@pytest.mark.parametrize("traj_name", ["steps", "fixation_start", "fixation_end", "fixation_ratio"])
+def test_exact_mem_tv_stack_parity_all_traj_types(traj_name: str) -> None:
+    from evals.metrics.trajectory_metrics import (
+        _call_metric_at_step,
+        _exact_mem_tv_stack_logits_and_batch,
+        _prefetch_logits_by_step,
+    )
+
+    torch.manual_seed(13)
+    V, L, S = 11, 8, 9
+    R = torch.randn(V, L, S)
+    F = torch.randint(0, S, (L,), dtype=torch.long)
+    traj = {"R": R, "F": F, "S": S, "L": L}
+    steps = [2, 5]
+    include_views = ["full", "eos"]
+    labels = torch.randint(0, V, (1, L), dtype=torch.long)
+    labels[0, :1] = IGNORE_INDEX
+    L_eff = 5
+    batch_template = {
+        "input_ids": torch.zeros((1, L), dtype=torch.long),
+        "labels": labels,
+        "attention_mask": torch.ones((1, L), dtype=torch.long),
+        "index": torch.tensor([0], dtype=torch.long),
+    }
+    labels_eos = labels[:, :L_eff].clone()
+    batch_eos = {
+        "input_ids": batch_template["input_ids"][:, :L_eff],
+        "labels": labels_eos,
+        "attention_mask": torch.ones((1, L_eff), dtype=torch.long),
+        "index": batch_template["index"],
+    }
+    logits_by_step = _prefetch_logits_by_step(traj, traj_name, steps)
+    logits_tv, bt_exp = _exact_mem_tv_stack_logits_and_batch(
+        logits_by_step,
+        steps,
+        include_views,
+        batch_template,
+        batch_eos,
+        L_eff,
+        IGNORE_INDEX,
+    )
+    metric = METRICS_REGISTRY["exact_memorization"]
+    batched = _call_metric_at_step(
+        metric=metric,
+        logits=logits_tv,
+        batch_template=bt_exp,
+        tokenizer=None,
+        sample_labels=None,
+        sample_input_ids=torch.zeros(L, dtype=torch.long),
+        sample_prompt_len=0,
+        metric_config={},
+        sample_idx="0",
+        traj_name=traj_name,
+        sample_traj=traj,
+    )
+    assert isinstance(batched, list) and len(batched) == len(steps) * len(include_views)
+    j = 0
+    for step in steps:
+        lv = logits_by_step[int(step)]
+        for view in include_views:
+            bt = batch_template if view == "full" else batch_eos
+            logits_view = lv[:, :L_eff] if view == "eos" else lv
+            one = _call_metric_at_step(
+                metric=metric,
+                logits=logits_view,
+                batch_template=bt,
+                tokenizer=None,
+                sample_labels=None,
+                sample_input_ids=torch.zeros(L, dtype=torch.long),
+                sample_prompt_len=0,
+                metric_config={},
+                sample_idx="0",
+                traj_name=traj_name,
+                sample_traj=traj,
+                step=step,
+            )
+            assert isinstance(one, list) and one[0]["score"] is not None
+            assert batched[j]["score"] is not None
+            assert abs(float(batched[j]["score"]) - float(one[0]["score"])) < 1e-5
+            j += 1

@@ -1847,29 +1847,29 @@ class TestCallMetricAtStepComprehensive:
         )
         assert received_shape == (1, L, V)
     
-    def test_logits_2_l_v_raises_error(self):
-        """Test logits [2, L, V] → raises ValueError."""
+    def test_logits_2_l_v_probability_batched(self):
+        """Logits [2, L, V] are valid for trajectory batched probability (shifted CE over batch dim)."""
         V, L = 50, 5
-        logits = torch.randn(2, L, V)  # Batch size 2
+        logits = torch.randn(2, L, V)
         batch_template = {
             "input_ids": torch.zeros(1, L, dtype=torch.long),
             "labels": torch.zeros(1, L, dtype=torch.long),
         }
-        
+
         if "probability" in METRICS_REGISTRY:
             prob_metric = METRICS_REGISTRY["probability"]
-            with pytest.raises(ValueError, match="Unexpected logits shape"):
-                _call_metric_at_step(
-                    metric=prob_metric,
-                    logits=logits,
-                    batch_template=batch_template,
-                    tokenizer=Mock(),
-                    sample_labels=torch.zeros(L, dtype=torch.long),
-                    sample_input_ids=torch.zeros(L, dtype=torch.long),
-                    sample_prompt_len=0,
-                    metric_config={},
-                    sample_idx="0",
-                )
+            out = _call_metric_at_step(
+                metric=prob_metric,
+                logits=logits,
+                batch_template=batch_template,
+                tokenizer=Mock(),
+                sample_labels=torch.zeros(L, dtype=torch.long),
+                sample_input_ids=torch.zeros(L, dtype=torch.long),
+                sample_prompt_len=0,
+                metric_config={},
+                sample_idx="0",
+            )
+            assert isinstance(out, list) and len(out) == 2
     
     def test_logits_4d_raises_error(self):
         """Test logits [1, 1, L, V] (4D) → raises ValueError."""

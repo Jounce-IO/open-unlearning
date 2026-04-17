@@ -475,8 +475,17 @@ def _batch_template_has_list_tensors(batch_template: Dict[str, Any]) -> bool:
 
 def _trajectory_tc_allowlist_sets(
     trajectory_config: Optional[Any],
-) -> tuple[Dict[str, Any], FrozenSet[str], FrozenSet[str]]:
-    """Parse trajectory_config for step-batch allowlist and CPU-offload metric sets."""
+) -> tuple[Dict[str, Any], FrozenSet[str], FrozenSet[str], FrozenSet[str], Optional[int]]:
+    """Parse trajectory_config for step-batch allowlist, CPU-offload sets, and T×views batching.
+
+    ``trajectory_step_view_batch_allowlist`` (default empty): metric keys that may use one packed
+    or stacked pass per (sample, traj_name, metric) over all ``steps_to_use`` × ``include_views``.
+    Segment / row order is lexicographic ``(step, view)`` — for each step in ``steps_to_use`` order,
+    then each view in ``include_views`` order.
+
+    ``trajectory_step_view_batch_chunk_max`` (optional positive int): max number of packed shifted-CE
+    segments per GPU chunk (for ``probability`` / ``truth_ratio`` legs). None means no chunking.
+    """
     _tc_plain: Dict[str, Any] = {}
     if trajectory_config is not None:
         if OmegaConf.is_config(trajectory_config):
@@ -489,7 +498,226 @@ def _trajectory_tc_allowlist_sets(
     )
     _raw_cpu = _tc_plain.get("trajectory_cpu_offload_metrics") or ()
     cpu_off = frozenset(str(x) for x in (_raw_cpu if isinstance(_raw_cpu, (list, tuple)) else ()))
-    return _tc_plain, step_allow, cpu_off
+    _raw_tv = _tc_plain.get("trajectory_step_view_batch_allowlist") or ()
+    tv_allow = frozenset(str(x) for x in (_raw_tv if isinstance(_raw_tv, (list, tuple)) else ()))
+    _raw_chunk = _tc_plain.get("trajectory_step_view_batch_chunk_max")
+    chunk_max: Optional[int] = None
+    if _raw_chunk is not None:
+        try:
+            cmi = int(_raw_chunk)
+            if cmi > 0:
+                chunk_max = cmi
+        except (TypeError, ValueError):
+            chunk_max = None
+    return _tc_plain, step_allow, cpu_off, tv_allow, chunk_max
+
+
+def _trajectory_step_view_batch_metric_enabled(
+    metric_name: str, metric: Any, tv_allow: FrozenSet[str]
+) -> bool:
+    return bool(tv_allow) and (metric_name in tv_allow or metric.name in tv_allow)
+
+
+def _packed_shifted_probs_chunked(
+    seg_logits: List[torch.Tensor],
+    seg_labels: List[torch.Tensor],
+    device: torch.device,
+    ignore_index: int,
+    chunk_max: Optional[int],
+) -> List[Dict[str, float]]:
+    """Run :func:`_compute_prob_packed_shifted_segments` in fixed-size chunks when configured."""
+    if not seg_logits:
+        return []
+    if chunk_max is None or chunk_max <= 0 or len(seg_logits) <= chunk_max:
+        return _compute_prob_packed_shifted_segments(
+            seg_logits, seg_labels, device, ignore_index
+        )
+    out: List[Dict[str, float]] = []
+    for i in range(0, len(seg_logits), chunk_max):
+        out.extend(
+            _compute_prob_packed_shifted_segments(
+                seg_logits[i : i + chunk_max],
+                seg_labels[i : i + chunk_max],
+                device,
+                ignore_index,
+            )
+        )
+    return out
+
+
+def _pre_cfg_plain_tv(cfg_any: Any) -> dict[str, Any]:
+    if cfg_any is None:
+        return {}
+    if OmegaConf.is_config(cfg_any):
+        return OmegaConf.to_container(cfg_any, resolve=True) or {}
+    if isinstance(cfg_any, dict):
+        return dict(cfg_any)
+    return {}
+
+
+def _truth_ratio_tv_precompute_compatible(metric_cfg: Any) -> bool:
+    """Whether truth_ratio pre_compute matches the packed shifted-CE (correct+wrong) path."""
+    _pcfg = metric_cfg.get("pre_compute") if hasattr(metric_cfg, "get") else None
+    if OmegaConf.is_config(_pcfg):
+        _pcfg = OmegaConf.to_container(_pcfg, resolve=True) or {}
+    elif _pcfg is None:
+        _pcfg = {}
+    if not isinstance(_pcfg, dict):
+        return False
+    c_raw = _pcfg.get("correct")
+    w_raw = _pcfg.get("wrong")
+    ccfg = _pre_cfg_plain_tv(c_raw)
+    wcfg = _pre_cfg_plain_tv(w_raw)
+    if not c_raw or not w_raw:
+        return False
+    if str(ccfg.get("handler") or "probability") != "probability":
+        return False
+    if str(wcfg.get("handler") or "probability") != "probability":
+        return False
+    lf_c = ccfg.get("labels_field") or "labels"
+    lf_w = wcfg.get("labels_field") or "labels"
+    return lf_c != lf_w
+
+
+def _build_shifted_ce_segments_step_view_lex(
+    logits_by_step: Dict[int, torch.Tensor],
+    steps_to_use: List[int],
+    include_views: List[str],
+    labels_full_1l: torch.Tensor,
+    labels_eos_1l: Optional[torch.Tensor],
+    L_eff: int,
+    device: torch.device,
+) -> tuple[List[torch.Tensor], List[torch.Tensor]]:
+    """Build (logits, labels) segment lists in (step, view) lex order for packed shifted CE."""
+    lc_full = labels_full_1l.to(device=device, dtype=torch.long).contiguous()
+    lc_eos = (
+        labels_eos_1l.to(device=device, dtype=torch.long).contiguous()
+        if labels_eos_1l is not None
+        else None
+    )
+    seg_logits, seg_lc, _seg_lw = _build_shifted_ce_segments_step_view_lex_dual(
+        logits_by_step,
+        steps_to_use,
+        include_views,
+        lc_full,
+        lc_eos,
+        lc_full,
+        lc_eos,
+        L_eff,
+        device,
+    )
+    return seg_logits, seg_lc
+
+
+def _build_shifted_ce_segments_step_view_lex_dual(
+    logits_by_step: Dict[int, torch.Tensor],
+    steps_to_use: List[int],
+    include_views: List[str],
+    labels_a_full_1l: torch.Tensor,
+    labels_a_eos_1l: Optional[torch.Tensor],
+    labels_b_full_1l: torch.Tensor,
+    labels_b_eos_1l: Optional[torch.Tensor],
+    L_eff: int,
+    device: torch.device,
+) -> tuple[List[torch.Tensor], List[torch.Tensor], List[torch.Tensor]]:
+    """Shared logits segments with two label streams (e.g. truth_ratio correct vs wrong)."""
+    seg_logits: List[torch.Tensor] = []
+    seg_la: List[torch.Tensor] = []
+    seg_lb: List[torch.Tensor] = []
+    la_f = labels_a_full_1l.to(device=device, dtype=torch.long).contiguous()
+    lb_f = labels_b_full_1l.to(device=device, dtype=torch.long).contiguous()
+    la_e = (
+        labels_a_eos_1l.to(device=device, dtype=torch.long).contiguous()
+        if labels_a_eos_1l is not None
+        else None
+    )
+    lb_e = (
+        labels_b_eos_1l.to(device=device, dtype=torch.long).contiguous()
+        if labels_b_eos_1l is not None
+        else None
+    )
+    for step in steps_to_use:
+        sl = logits_by_step[int(step)]
+        log_b = trajectory_step_logits_to_prob_batch(sl).contiguous()
+        for view in include_views:
+            if view == "full" or view not in ("full", "eos"):
+                seg_logits.append(log_b)
+                seg_la.append(la_f.unsqueeze(0))
+                seg_lb.append(lb_f.unsqueeze(0))
+            elif view == "eos":
+                if la_e is None or lb_e is None:
+                    raise ValueError(
+                        "trajectory_step_view_batch: eos view requires sliced label tensors"
+                    )
+                Ls = min(L_eff, int(log_b.shape[1]))
+                seg_logits.append(log_b[:, :Ls, :].contiguous())
+                seg_la.append(la_e[:Ls].unsqueeze(0).contiguous())
+                seg_lb.append(lb_e[:Ls].unsqueeze(0).contiguous())
+    return seg_logits, seg_la, seg_lb
+
+
+def _exact_mem_tv_stack_logits_and_batch(
+    logits_by_step: Dict[int, torch.Tensor],
+    steps_to_use: List[int],
+    include_views: List[str],
+    batch_template_full: Dict[str, Any],
+    batch_template_eos: Dict[str, Any],
+    L_eff: int,
+    ignore_index: int,
+) -> tuple[torch.Tensor, Dict[str, Any]]:
+    """Stack (step, view) lexicographic rows into ``[TV, L, V]`` + expanded batch for one ``_call_metric_at_step``."""
+    lab_full = batch_template_full["labels"]
+    if not isinstance(lab_full, torch.Tensor):
+        raise ValueError("exact_mem tv batch: batch_template requires tensor labels")
+    lab_full_1 = lab_full.squeeze(0) if lab_full.dim() > 1 else lab_full
+    L_full = int(lab_full_1.shape[0])
+    device = lab_full_1.device
+    dtype = logits_by_step[int(steps_to_use[0])].dtype
+    pad_logit = torch.finfo(torch.float32).min / 4
+    lab_eos_t = batch_template_eos.get("labels")
+    lab_eos_1: Optional[torch.Tensor] = None
+    if isinstance(lab_eos_t, torch.Tensor):
+        lab_eos_1 = lab_eos_t.squeeze(0) if lab_eos_t.dim() > 1 else lab_eos_t
+
+    rows_logits: List[torch.Tensor] = []
+    rows_labels: List[torch.Tensor] = []
+    for step in steps_to_use:
+        sl = logits_by_step[int(step)]
+        lv = trajectory_step_logits_to_prob_batch(sl).squeeze(0).to(device=device, dtype=dtype)
+        for view in include_views:
+            if view == "full" or view not in ("full", "eos"):
+                rows_logits.append(lv)
+                rows_labels.append(lab_full_1.to(device=device))
+            else:
+                Ls = min(L_eff, int(lv.shape[0]))
+                row_l = torch.full(
+                    (L_full, lv.shape[1]),
+                    pad_logit,
+                    device=device,
+                    dtype=lv.dtype,
+                )
+                row_l[:Ls] = lv[:Ls]
+                row_lab = torch.full(
+                    (L_full,),
+                    ignore_index,
+                    dtype=lab_full_1.dtype,
+                    device=device,
+                )
+                if lab_eos_1 is not None:
+                    le = lab_eos_1.to(device=device)
+                    row_lab[:Ls] = le[:Ls]
+                rows_logits.append(row_l)
+                rows_labels.append(row_lab)
+    logits_tv = torch.stack(rows_logits, dim=0)
+    tv = logits_tv.shape[0]
+    bt_exp = dict(batch_template_full)
+    bt_exp["labels"] = torch.stack(rows_labels, dim=0)
+    for key, val in list(bt_exp.items()):
+        if key == "labels" or not isinstance(val, torch.Tensor):
+            continue
+        if val.dim() >= 1 and val.shape[0] == 1:
+            bt_exp[key] = val.expand(tv, *val.shape[1:]).contiguous()
+    return logits_tv, bt_exp
 
 
 def _trajectory_build_sample_batch_template(
@@ -639,6 +867,7 @@ def _trajectory_exact_mem_post_loop_metric_names(
     metrics_to_run: List[str],
     loaded_metrics: Dict[str, Any],
     step_metric_batch_allowlist: FrozenSet[str],
+    view_step_batch_allowlist: FrozenSet[str],
     B: int,
     batch: Dict[str, Any],
     labels: Optional[torch.Tensor],
@@ -650,7 +879,7 @@ def _trajectory_exact_mem_post_loop_metric_names(
     prompt_only_input_ids: bool,
     tokenizer: Any,
 ) -> FrozenSet[str]:
-    """Metric keys whose allowlisted exact_memorization on ``steps`` runs in the post-sample loop."""
+    """Metric keys whose allowlisted exact_memorization runs in the post-sample loop (all traj types)."""
     out: set[str] = set()
     for metric_name in metrics_to_run:
         mi = loaded_metrics[metric_name]
@@ -665,7 +894,9 @@ def _trajectory_exact_mem_post_loop_metric_names(
             _pcfg = {}
         if isinstance(_pcfg, dict) and len(_pcfg) > 0:
             continue
-        if metric_name not in step_metric_batch_allowlist and metric.name not in step_metric_batch_allowlist:
+        in_step = metric_name in step_metric_batch_allowlist or metric.name in step_metric_batch_allowlist
+        in_view = metric_name in view_step_batch_allowlist or metric.name in view_step_batch_allowlist
+        if not in_step and not in_view:
             continue
         ok_all = True
         for b in range(B):
@@ -796,6 +1027,7 @@ def _trajectory_append_post_loop_rouge(
 
 def _trajectory_append_post_loop_exact_mem_allowlist(
     *,
+    trajectory_names: List[str],
     exact_mem_post_loop_metrics: FrozenSet[str],
     steps_to_use: List[int],
     include_views: List[str],
@@ -822,95 +1054,151 @@ def _trajectory_append_post_loop_exact_mem_allowlist(
     batch_idx: int,
     rouge_scorer_shared: Any,
     guardrail_config_with_pools: Optional[dict],
+    view_step_batch_allowlist: FrozenSet[str],
 ) -> None:
-    """Allowlisted ``exact_memorization`` on ``steps``: batched over T per sample, all B in post-loop."""
+    """Allowlisted ``exact_memorization``: batched over T (and optionally T×views) per sample, all B in post-loop."""
     if not exact_mem_post_loop_metrics:
         return
-    traj_name = "steps"
     for metric_name in metrics_to_run:
         if metric_name not in exact_mem_post_loop_metrics:
             continue
         metric_info = loaded_metrics[metric_name]
         metric = metric_info["metric"]
         metric_cfg = metric_info["config"]
+        tv_on = _trajectory_step_view_batch_metric_enabled(
+            metric_name, metric, view_step_batch_allowlist
+        )
         gpu_set_phase(
             "trajectory_metric",
             metric=metric_name,
             batch_idx=batch_idx,
             step=-1,
         )
-        for b in range(B):
-            batch_template, ground_truth_str, idx_str = _trajectory_build_sample_batch_template(
-                b,
-                batch,
-                labels,
-                input_ids,
-                indices,
-                prompt_starts,
-                prompt_lens,
-                L,
-                prompt_only_input_ids,
-                tokenizer,
-            )
-            sample_traj = {"R": R[b], "F": F[b], "S": S, "L": L}
-            logits_by_step = _prefetch_logits_by_step(sample_traj, traj_name, steps_to_use)
-            L_eff_slice = min(int(effective_lengths[b]), batch_template["input_ids"].shape[1])
-            batch_template_eos = _slice_batch_template_to_length(batch_template, L_eff_slice)
-            kwargs_clean = {k: v for k, v in kwargs.items() if k != "tokenizer"}
-            if primary_data is not None:
-                kwargs_clean["data"] = primary_data
-            kwargs_clean["ground_truth"] = ground_truth_str
-            kwargs_clean["rouge_scorer"] = rouge_scorer_shared
-            kwargs_clean["sample_traj"] = sample_traj
-            kwargs_clean["step"] = steps_to_use[0]
-            kwargs_clean["step_index"] = 0
-            if trajectory_config is not None:
-                kwargs_clean["trajectory_config"] = trajectory_config
-            if guardrail_config_with_pools is not None:
-                kwargs_clean["guardrail_config"] = guardrail_config_with_pools
+        for traj_name in trajectory_names:
+            for b in range(B):
+                batch_template, ground_truth_str, idx_str = _trajectory_build_sample_batch_template(
+                    b,
+                    batch,
+                    labels,
+                    input_ids,
+                    indices,
+                    prompt_starts,
+                    prompt_lens,
+                    L,
+                    prompt_only_input_ids,
+                    tokenizer,
+                )
+                sample_traj = {"R": R[b], "F": F[b], "S": S, "L": L}
+                logits_by_step = _prefetch_logits_by_step(sample_traj, traj_name, steps_to_use)
+                L_eff_slice = min(int(effective_lengths[b]), batch_template["input_ids"].shape[1])
+                batch_template_eos = _slice_batch_template_to_length(batch_template, L_eff_slice)
+                kwargs_clean = {k: v for k, v in kwargs.items() if k != "tokenizer"}
+                if primary_data is not None:
+                    kwargs_clean["data"] = primary_data
+                kwargs_clean["ground_truth"] = ground_truth_str
+                kwargs_clean["rouge_scorer"] = rouge_scorer_shared
+                kwargs_clean["sample_traj"] = sample_traj
+                kwargs_clean["step"] = steps_to_use[0]
+                kwargs_clean["step_index"] = 0
+                if trajectory_config is not None:
+                    kwargs_clean["trajectory_config"] = trajectory_config
+                if guardrail_config_with_pools is not None:
+                    kwargs_clean["guardrail_config"] = guardrail_config_with_pools
 
-            for view in include_views:
-                bt = batch_template if view == "full" else batch_template_eos
-                leff = L_eff_slice if view == "eos" else None
-                logits_batched = _stack_step_logits_for_prob_batch(
-                    logits_by_step, steps_to_use, leff
-                )
-                kwargs_metric = dict(kwargs_clean)
-                kwargs_metric["traj_name"] = traj_name
-                result = _call_metric_at_step(
-                    metric=metric,
-                    logits=logits_batched,
-                    batch_template=bt,
-                    tokenizer=tokenizer,
-                    sample_labels=labels[b] if labels is not None else None,
-                    sample_input_ids=input_ids[b],
-                    sample_prompt_len=prompt_lens[b],
-                    metric_config=metric_cfg,
-                    sample_idx=idx_str,
-                    **kwargs_metric,
-                )
-                if not isinstance(result, list) or len(result) != len(steps_to_use):
-                    raise RuntimeError(
-                        "batched exact_memorization post-loop: expected list of length "
-                        f"{len(steps_to_use)}, got {type(result).__name__} len="
-                        f"{len(result) if isinstance(result, list) else 'n/a'}"
+                if tv_on:
+                    logits_tv, bt_exp = _exact_mem_tv_stack_logits_and_batch(
+                        logits_by_step,
+                        steps_to_use,
+                        include_views,
+                        batch_template,
+                        batch_template_eos,
+                        L_eff_slice,
+                        IGNORE_INDEX,
                     )
-                for j, step in enumerate(steps_to_use):
-                    if step not in step_values_by_view[view][traj_name]:
-                        step_values_by_view[view][traj_name][step] = {
-                            m: [] for m in loaded_metrics.keys()
-                        }
-                    rd = result[j]
-                    metric_value = None
-                    if isinstance(rd, dict):
-                        if "score" in rd:
-                            metric_value = rd["score"]
-                        elif "prob" in rd:
-                            metric_value = rd["prob"]
-                    if metric_value is not None:
-                        step_values_by_view[view][traj_name][step][metric_name].append(
-                            metric_value
+                    kwargs_metric = dict(kwargs_clean)
+                    kwargs_metric["traj_name"] = traj_name
+                    result = _call_metric_at_step(
+                        metric=metric,
+                        logits=logits_tv,
+                        batch_template=bt_exp,
+                        tokenizer=tokenizer,
+                        sample_labels=labels[b] if labels is not None else None,
+                        sample_input_ids=input_ids[b],
+                        sample_prompt_len=prompt_lens[b],
+                        metric_config=metric_cfg,
+                        sample_idx=idx_str,
+                        **kwargs_metric,
+                    )
+                    tv_expected = len(steps_to_use) * len(include_views)
+                    if not isinstance(result, list) or len(result) != tv_expected:
+                        raise RuntimeError(
+                            "batched exact_memorization post-loop (T×views): expected list of length "
+                            f"{tv_expected}, got {type(result).__name__} len="
+                            f"{len(result) if isinstance(result, list) else 'n/a'}"
                         )
+                    j = 0
+                    for step in steps_to_use:
+                        for view in include_views:
+                            if step not in step_values_by_view[view][traj_name]:
+                                step_values_by_view[view][traj_name][step] = {
+                                    m: [] for m in loaded_metrics.keys()
+                                }
+                            rd = result[j]
+                            j += 1
+                            metric_value = None
+                            if isinstance(rd, dict):
+                                if "score" in rd:
+                                    metric_value = rd["score"]
+                                elif "prob" in rd:
+                                    metric_value = rd["prob"]
+                            if metric_value is not None:
+                                step_values_by_view[view][traj_name][step][metric_name].append(
+                                    metric_value
+                                )
+                    continue
+
+                for view in include_views:
+                    bt = batch_template if view == "full" else batch_template_eos
+                    leff = L_eff_slice if view == "eos" else None
+                    logits_batched = _stack_step_logits_for_prob_batch(
+                        logits_by_step, steps_to_use, leff
+                    )
+                    kwargs_metric = dict(kwargs_clean)
+                    kwargs_metric["traj_name"] = traj_name
+                    result = _call_metric_at_step(
+                        metric=metric,
+                        logits=logits_batched,
+                        batch_template=bt,
+                        tokenizer=tokenizer,
+                        sample_labels=labels[b] if labels is not None else None,
+                        sample_input_ids=input_ids[b],
+                        sample_prompt_len=prompt_lens[b],
+                        metric_config=metric_cfg,
+                        sample_idx=idx_str,
+                        **kwargs_metric,
+                    )
+                    if not isinstance(result, list) or len(result) != len(steps_to_use):
+                        raise RuntimeError(
+                            "batched exact_memorization post-loop: expected list of length "
+                            f"{len(steps_to_use)}, got {type(result).__name__} len="
+                            f"{len(result) if isinstance(result, list) else 'n/a'}"
+                        )
+                    for j, step in enumerate(steps_to_use):
+                        if step not in step_values_by_view[view][traj_name]:
+                            step_values_by_view[view][traj_name][step] = {
+                                m: [] for m in loaded_metrics.keys()
+                            }
+                        rd = result[j]
+                        metric_value = None
+                        if isinstance(rd, dict):
+                            if "score" in rd:
+                                metric_value = rd["score"]
+                            elif "prob" in rd:
+                                metric_value = rd["prob"]
+                        if metric_value is not None:
+                            step_values_by_view[view][traj_name][step][metric_name].append(
+                                metric_value
+                            )
         if _trajectory_should_empty_cuda_cache(trajectory_config):
             torch.cuda.empty_cache()
 
@@ -3126,10 +3414,11 @@ def _call_metric_at_step(
     pre_compute_config = metric_config.get("pre_compute", {})
     pre_compute_results = {}
     if pre_compute_config:
-        if batched_steps:
+        if batched_steps and not kwargs.get("trajectory_allow_batched_pre_compute"):
             raise ValueError(
                 "Batched trajectory logits (shape[0]>1) are not supported with pre_compute; "
-                "call _call_metric_at_step per step for this metric."
+                "call _call_metric_at_step per step for this metric, or pass "
+                "trajectory_allow_batched_pre_compute=True for an explicitly allowlisted batched path."
             )
         if sample_idx is None:
             sample_idx = "0"  # Default index
@@ -3493,6 +3782,14 @@ def trajectory_metrics(model, **kwargs):
         Note: Metrics that require pre_compute (like truth_ratio) will need their
         pre_compute metrics to be computed at each step. This is handled automatically
         if pre_compute configs are provided in the metric configs.
+
+        trajectory_config (T×views batching, optional, default off):
+        - trajectory_step_view_batch_allowlist: list of metric keys (e.g. exact_memorization,
+          truth_ratio, extraction_strength) allowed to use one packed or stacked pass per
+          (sample, traj_name, metric) over steps × include_views. Row / segment order is
+          lexicographic (step, then view).
+        - trajectory_step_view_batch_chunk_max: positive int caps packed shifted-CE segment
+          count per GPU chunk (post-loop probability and truth_ratio legs).
         """
         # Extract config
         metrics_config = kwargs.get("metrics", [])
@@ -4303,13 +4600,18 @@ def trajectory_metrics(model, **kwargs):
                         )
                         _gen_labels_for_packed_prob.append(gl)
 
-                _, _step_metric_batch_allowlist, _cpu_offload_metrics = (
-                    _trajectory_tc_allowlist_sets(trajectory_config)
-                )
+                (
+                    _,
+                    _step_metric_batch_allowlist,
+                    _cpu_offload_metrics,
+                    _view_step_batch_allowlist,
+                    _tv_chunk_max,
+                ) = _trajectory_tc_allowlist_sets(trajectory_config)
                 exact_mem_post_loop_metrics = _trajectory_exact_mem_post_loop_metric_names(
                     metrics_to_run=metrics_to_run,
                     loaded_metrics=loaded_metrics,
                     step_metric_batch_allowlist=_step_metric_batch_allowlist,
+                    view_step_batch_allowlist=_view_step_batch_allowlist,
                     B=B,
                     batch=batch,
                     labels=labels,
@@ -4438,7 +4740,7 @@ def trajectory_metrics(model, **kwargs):
 
                                 if metric_name == "privleak" and trajectories_by_key is not None:
                                     continue
-                                if metric_name in exact_mem_post_loop_metrics and traj_name == "steps":
+                                if metric_name in exact_mem_post_loop_metrics:
                                     continue
                                 if metric_name in rouge_metrics_in_run or metric_name == "probability":
                                     continue
@@ -4453,8 +4755,251 @@ def trajectory_metrics(model, **kwargs):
                                 elif _pcfg is None:
                                     _pcfg = {}
                                 _pre_empty = not (isinstance(_pcfg, dict) and len(_pcfg) > 0)
+                                _tv_on = _trajectory_step_view_batch_metric_enabled(
+                                    metric_name, metric, _view_step_batch_allowlist
+                                )
+                                _use_cpu_exact = (
+                                    executor is not None
+                                    and (
+                                        metric_name in _cpu_offload_metrics
+                                        or metric.name in _cpu_offload_metrics
+                                    )
+                                    and metric.name == "exact_memorization"
+                                )
+
+                                if (
+                                    _tv_on
+                                    and metric.name == "truth_ratio"
+                                    and labels is not None
+                                    and _truth_ratio_tv_precompute_compatible(metric_cfg)
+                                    and not _use_cpu_exact
+                                    and "labels_correct" in batch_template
+                                    and "labels_wrong" in batch_template
+                                ):
+                                    gpu_set_phase(
+                                        "trajectory_metric",
+                                        metric=metric_name,
+                                        batch_idx=batch_idx,
+                                        step=-1,
+                                    )
+                                    lc_t = batch_template["labels_correct"]
+                                    lw_t = batch_template["labels_wrong"]
+                                    lc_full_1 = (
+                                        lc_t.squeeze(0) if isinstance(lc_t, torch.Tensor) and lc_t.dim() > 1 else lc_t
+                                    )
+                                    lw_full_1 = (
+                                        lw_t.squeeze(0) if isinstance(lw_t, torch.Tensor) and lw_t.dim() > 1 else lw_t
+                                    )
+                                    lc_eos_t = batch_template_eos.get("labels_correct")
+                                    lw_eos_t = batch_template_eos.get("labels_wrong")
+                                    lc_eos_1 = (
+                                        lc_eos_t.squeeze(0)
+                                        if isinstance(lc_eos_t, torch.Tensor) and lc_eos_t.dim() > 1
+                                        else lc_eos_t
+                                        if isinstance(lc_eos_t, torch.Tensor)
+                                        else None
+                                    )
+                                    lw_eos_1 = (
+                                        lw_eos_t.squeeze(0)
+                                        if isinstance(lw_eos_t, torch.Tensor) and lw_eos_t.dim() > 1
+                                        else lw_eos_t
+                                        if isinstance(lw_eos_t, torch.Tensor)
+                                        else None
+                                    )
+                                    device_tv = logits_by_step[int(steps_to_use[0])].device
+                                    seg_log, seg_lc, seg_lw = _build_shifted_ce_segments_step_view_lex_dual(
+                                        logits_by_step,
+                                        steps_to_use,
+                                        include_views,
+                                        lc_full_1,
+                                        lc_eos_1,
+                                        lw_full_1,
+                                        lw_eos_1,
+                                        L_eff_slice,
+                                        device_tv,
+                                    )
+                                    res_c = _packed_shifted_probs_chunked(
+                                        seg_log, seg_lc, device_tv, IGNORE_INDEX, _tv_chunk_max
+                                    )
+                                    res_w = _packed_shifted_probs_chunked(
+                                        seg_log, seg_lw, device_tv, IGNORE_INDEX, _tv_chunk_max
+                                    )
+                                    tv_n = len(steps_to_use) * len(include_views)
+                                    if len(res_c) != tv_n or len(res_w) != tv_n:
+                                        raise RuntimeError(
+                                            f"truth_ratio T×V packed: expected {tv_n} segments, "
+                                            f"got correct={len(res_c)} wrong={len(res_w)}"
+                                        )
+                                    agg = metric_cfg.get("aggregator", "closer_to_1_better")
+                                    ji = 0
+                                    for step in steps_to_use:
+                                        for view in include_views:
+                                            sc = res_c[ji]
+                                            sw = res_w[ji]
+                                            ji += 1
+                                            prob_c = sc.get("prob") if isinstance(sc, dict) else None
+                                            al_c = sc.get("avg_loss") if isinstance(sc, dict) else None
+                                            prob_w = sw.get("prob") if isinstance(sw, dict) else None
+                                            al_w = sw.get("avg_loss") if isinstance(sw, dict) else None
+                                            pre_c = {
+                                                "agg_value": prob_c,
+                                                "value_by_index": {
+                                                    idx_str: {"prob": prob_c, "avg_loss": al_c},
+                                                },
+                                            }
+                                            pre_w = {
+                                                "agg_value": prob_w,
+                                                "value_by_index": {
+                                                    idx_str: {"prob": prob_w, "avg_loss": al_w},
+                                                },
+                                            }
+                                            tr_out = metric._metric_fn(
+                                                None,
+                                                collators=kwargs.get("collators"),
+                                                batch_size=kwargs.get("batch_size", 1),
+                                                generation_args=kwargs.get("generation_args", {}),
+                                                aggregator=agg,
+                                                pre_compute={"correct": pre_c, "wrong": pre_w},
+                                            )
+                                            metric_value = None
+                                            if isinstance(tr_out, dict) and tr_out.get("agg_value") is not None:
+                                                metric_value = tr_out["agg_value"]
+                                            if metric_value is not None and not (
+                                                isinstance(metric_value, float) and np.isnan(metric_value)
+                                            ):
+                                                step_values_by_view[view][traj_name][step][
+                                                    metric_name
+                                                ].append(metric_value)
+                                    if _trajectory_should_empty_cuda_cache(trajectory_config):
+                                        torch.cuda.empty_cache()
+                                    continue
+
+                                if (
+                                    _tv_on
+                                    and metric.name == "extraction_strength"
+                                    and trajectory_config is not None
+                                    and trajectory_config.get("use_generalized_sequence_probability", True)
+                                    and not _use_cpu_exact
+                                ):
+                                    gpu_set_phase(
+                                        "trajectory_metric",
+                                        metric=metric_name,
+                                        batch_idx=batch_idx,
+                                        step=-1,
+                                    )
+                                    R_loc = sample_traj["R"]
+                                    F_loc = sample_traj["F"]
+                                    S_val = int(sample_traj["S"])
+                                    logit_alignment = trajectory_config.get("logit_alignment", "causal")
+                                    F_sq = F_loc.squeeze(0) if F_loc.dim() > 1 else F_loc
+                                    for step in steps_to_use:
+                                        fixation_logits = build_effective_step_fixation_logits(
+                                            R_loc, F_loc, int(step)
+                                        ).squeeze(0)
+                                        for view in include_views:
+                                            lab_bt = batch_template if view == "full" else batch_template_eos
+                                            lab = lab_bt.get("labels")
+                                            if lab is None:
+                                                continue
+                                            lab_1 = lab.squeeze(0) if lab.dim() > 1 else lab
+                                            fl = fixation_logits
+                                            if view == "eos":
+                                                Ls = min(L_eff_slice, int(fl.shape[0]))
+                                                fl = fl[:Ls, :]
+                                                lab_1 = lab_1[:Ls]
+                                            es_val = extraction_strength_from_fixation(
+                                                fl.float(),
+                                                lab_1,
+                                                F_sq,
+                                                S_val,
+                                                logit_alignment,
+                                                IGNORE_INDEX,
+                                            )
+                                            step_values_by_view[view][traj_name][step][metric_name].append(
+                                                float(es_val)
+                                            )
+                                    if _trajectory_should_empty_cuda_cache(trajectory_config):
+                                        torch.cuda.empty_cache()
+                                    continue
+
+                                _can_em_tv = (
+                                    _tv_on
+                                    and metric.name == "exact_memorization"
+                                    and _pre_empty
+                                    and not _has_list_bt
+                                    and not _use_cpu_exact
+                                    and metric_name not in exact_mem_post_loop_metrics
+                                )
+                                if _can_em_tv:
+                                    gpu_set_phase(
+                                        "trajectory_metric",
+                                        metric=metric_name,
+                                        batch_idx=batch_idx,
+                                        step=-1,
+                                    )
+                                    logits_tv, bt_exp = _exact_mem_tv_stack_logits_and_batch(
+                                        logits_by_step,
+                                        steps_to_use,
+                                        include_views,
+                                        batch_template,
+                                        batch_template_eos,
+                                        L_eff_slice,
+                                        IGNORE_INDEX,
+                                    )
+                                    kwargs_clean = {k: v for k, v in kwargs.items() if k != "tokenizer"}
+                                    if primary_data is not None:
+                                        kwargs_clean["data"] = primary_data
+                                    kwargs_clean["ground_truth"] = ground_truth_str
+                                    kwargs_clean["rouge_scorer"] = rouge_scorer_shared
+                                    kwargs_clean["sample_traj"] = sample_traj
+                                    kwargs_clean["step"] = steps_to_use[0]
+                                    kwargs_clean["step_index"] = 0
+                                    if trajectory_config is not None:
+                                        kwargs_clean["trajectory_config"] = trajectory_config
+                                    if guardrail_config_with_pools is not None:
+                                        kwargs_clean["guardrail_config"] = guardrail_config_with_pools
+                                    kwargs_metric = dict(kwargs_clean)
+                                    kwargs_metric["traj_name"] = traj_name
+                                    result = _call_metric_at_step(
+                                        metric=metric,
+                                        logits=logits_tv,
+                                        batch_template=bt_exp,
+                                        tokenizer=tokenizer,
+                                        sample_labels=sample_labels,
+                                        sample_input_ids=sample_input_ids,
+                                        sample_prompt_len=sample_prompt_len,
+                                        metric_config=metric_cfg,
+                                        sample_idx=idx_str,
+                                        **kwargs_metric,
+                                    )
+                                    tv_expected = len(steps_to_use) * len(include_views)
+                                    if not isinstance(result, list) or len(result) != tv_expected:
+                                        raise RuntimeError(
+                                            "batched exact_memorization (T×views): expected list of length "
+                                            f"{tv_expected}, got {type(result).__name__} len="
+                                            f"{len(result) if isinstance(result, list) else 'n/a'}"
+                                        )
+                                    j = 0
+                                    for step in steps_to_use:
+                                        for view in include_views:
+                                            rd = result[j]
+                                            j += 1
+                                            metric_value = None
+                                            if isinstance(rd, dict):
+                                                if "score" in rd:
+                                                    metric_value = rd["score"]
+                                                elif "prob" in rd:
+                                                    metric_value = rd["prob"]
+                                            if metric_value is not None:
+                                                step_values_by_view[view][traj_name][step][
+                                                    metric_name
+                                                ].append(metric_value)
+                                    if _trajectory_should_empty_cuda_cache(trajectory_config):
+                                        torch.cuda.empty_cache()
+                                    continue
+
                                 can_batch_exact = (
-                                    traj_name == "steps"
+                                    not _tv_on
                                     and (
                                         metric_name in _step_metric_batch_allowlist
                                         or metric.name in _step_metric_batch_allowlist
@@ -4462,6 +5007,7 @@ def trajectory_metrics(model, **kwargs):
                                     and metric.name == "exact_memorization"
                                     and _pre_empty
                                     and not _has_list_bt
+                                    and not _use_cpu_exact
                                 )
 
                                 if can_batch_exact:
@@ -4702,6 +5248,7 @@ def trajectory_metrics(model, **kwargs):
                     kwargs=kwargs,
                 )
                 _trajectory_append_post_loop_exact_mem_allowlist(
+                    trajectory_names=trajectory_names,
                     exact_mem_post_loop_metrics=exact_mem_post_loop_metrics,
                     steps_to_use=steps_to_use,
                     include_views=include_views,
@@ -4728,17 +5275,18 @@ def trajectory_metrics(model, **kwargs):
                     batch_idx=batch_idx,
                     rouge_scorer_shared=rouge_scorer_shared,
                     guardrail_config_with_pools=guardrail_config_with_pools,
+                    view_step_batch_allowlist=_view_step_batch_allowlist,
                 )
 
-                # Packed generalized sequence probability (full + eos): same shifted CE as
-                # ``compute_prob_from_fixation_logits``, one flat cross_entropy per (traj_name, step, view).
+                # Packed generalized sequence probability: one packed shifted CE per traj_name over
+                # ``B * len(steps_to_use) * len(include_views)`` segments (lexicographic step, view, batch).
                 if "probability" in metrics_to_run and labels is not None and _gen_labels_for_packed_prob:
                     device_prob = R.device
                     for traj_name in trajectory_names:
+                        seg_logits: list[torch.Tensor] = []
+                        seg_labels: list[torch.Tensor] = []
                         for step in steps_to_use:
                             for view in include_views:
-                                seg_logits: list[torch.Tensor] = []
-                                seg_labels: list[torch.Tensor] = []
                                 for b in range(B):
                                     gl = _gen_labels_for_packed_prob[b]
                                     L_eff_bp = int(effective_lengths[b])
@@ -4761,14 +5309,24 @@ def trajectory_metrics(model, **kwargs):
                                             logits_step[:, :Ls, :].contiguous()
                                         )
                                         seg_labels.append(gl_dev[:Ls].unsqueeze(0))
-                                if step not in step_values_by_view[view][traj_name]:
-                                    step_values_by_view[view][traj_name][step] = {
-                                        m: [] for m in loaded_metrics.keys()
-                                    }
-                                probs_out = _compute_prob_packed_shifted_segments(
-                                    seg_logits, seg_labels, device_prob, IGNORE_INDEX
-                                )
-                                for pr in probs_out:
+                        probs_out = _packed_shifted_probs_chunked(
+                            seg_logits, seg_labels, device_prob, IGNORE_INDEX, _tv_chunk_max
+                        )
+                        k = 0
+                        for step in steps_to_use:
+                            for view in include_views:
+                                for b in range(B):
+                                    if k >= len(probs_out):
+                                        raise RuntimeError(
+                                            "post-loop packed probability: segment index out of range "
+                                            f"(traj={traj_name!r})"
+                                        )
+                                    pr = probs_out[k]
+                                    k += 1
+                                    if step not in step_values_by_view[view][traj_name]:
+                                        step_values_by_view[view][traj_name][step] = {
+                                            m: [] for m in loaded_metrics.keys()
+                                        }
                                     if pr and "prob" in pr:
                                         step_values_by_view[view][traj_name][step][
                                             "probability"
