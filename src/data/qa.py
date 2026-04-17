@@ -23,12 +23,43 @@ class QADataset(Dataset):
         few_shot_dataset_hf_args=None,
         max_length=512,
         predict_with_generate=False,
+        match_dllm_sft_eval_rows: bool = False,
     ):
         super(QADataset, self).__init__()
         self.tokenizer = tokenizer
         self.max_length = max_length
-        self.data = load_hf_dataset(**hf_args)
-        self.data = add_dataset_index(self.data)
+        _match_rows = (
+            match_dllm_sft_eval_rows
+            if isinstance(match_dllm_sft_eval_rows, bool)
+            else str(match_dllm_sft_eval_rows).lower().strip() in ("1", "true", "yes", "on")
+        )
+        raw = load_hf_dataset(**hf_args)
+        # dllm ``load_dataset_tofu`` keeps 95% of rows for the exposed ``train`` split (seed=42);
+        # ``dllm.tools.sft`` multi-eval evaluates on that train slice. Without this, OU used the
+        # full HF split → different rows / ROUGE vs vivid SFT checkpoint-31000.
+        if _match_rows:
+            path_l = ""
+            try:
+                from omegaconf import OmegaConf
+
+                if OmegaConf.is_config(hf_args):
+                    path_l = str(OmegaConf.select(hf_args, "path") or "").lower()
+                elif isinstance(hf_args, dict):
+                    path_l = str(hf_args.get("path", "") or "").lower()
+            except Exception:
+                try:
+                    path_l = str(getattr(hf_args, "path", "") or "").lower()
+                except Exception:
+                    path_l = ""
+            if "locuslab/tofu" in path_l and hasattr(raw, "train_test_split"):
+                raw = raw.train_test_split(test_size=0.05, seed=42)["train"]
+            elif _match_rows and "locuslab/tofu" in path_l:
+                logger.warning(
+                    "match_dllm_sft_eval_rows=True but dataset has no train_test_split; "
+                    "using full split (path=%r)",
+                    path_l or hf_args,
+                )
+        self.data = add_dataset_index(raw)
         self.fs_data = None
         if few_shot_dataset_hf_args is not None:
             raw_data = load_hf_dataset(**few_shot_dataset_hf_args)

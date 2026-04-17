@@ -71,6 +71,8 @@ data:
             name: ${tofu_multi_eval_forget_split}
             split: "train"
           question_key: ${question_key}
+          # Same 95/5 row set as ``dllm.data.load_dataset_tofu`` (SFT multi-eval).
+          match_dllm_sft_eval_rows: true
     retain:
       TOFU_QA_retain:
         handler: QADataset
@@ -80,6 +82,7 @@ data:
             name: ${tofu_multi_eval_retain_split}
             split: "train"
           question_key: ${question_key}
+          match_dllm_sft_eval_rows: true
     holdout:
       TOFU_QA_holdout:
         handler: QADataset
@@ -89,6 +92,7 @@ data:
             name: ${tofu_multi_eval_holdout_split}
             split: "train"
           question_key: ${question_key}
+          match_dllm_sft_eval_rows: true
     real_authors:
       TOFU_QA_real_authors:
         handler: QADataset
@@ -98,6 +102,7 @@ data:
             name: "real_authors_perturbed"
             split: "train"
           question_key: ${question_key}
+          match_dllm_sft_eval_rows: true
     world_facts:
       TOFU_QA_world_facts:
         handler: QADataset
@@ -107,6 +112,7 @@ data:
             name: "world_facts_perturbed"
             split: "train"
           question_key: ${question_key}
+          match_dllm_sft_eval_rows: true
     utility:
       MMLU_utility:
         handler: MMLUUtilityDataset
