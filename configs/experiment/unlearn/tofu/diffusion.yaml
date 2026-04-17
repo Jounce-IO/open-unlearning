@@ -118,6 +118,8 @@ data:
           question_key: question
           answer_key: answer
           max_length: 512
+          # Match dllm SFT multi-eval utility (``verbalized_reference:true`` in ``dllm.tools.sft``).
+          verbalized_reference: true
 
 trainer:
   args:
