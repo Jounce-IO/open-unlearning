@@ -4110,6 +4110,17 @@ def trajectory_metrics(model, **kwargs):
         elif isinstance(data, dict) and "forget" in data and not multi_dataset:
             primary_data = data["forget"]
             secondary_data = data.get("holdout")
+        elif (
+            isinstance(data, dict)
+            and "forget" not in data
+            and not multi_dataset
+            and len(data) == 1
+            and next(iter(data.keys())) in ("retain", "ra", "wf")
+        ):
+            # Single-dataset MU trajectory pass (no forget leg): run the main loop on that set.
+            _only_key = next(iter(data.keys()))
+            primary_data = data[_only_key]
+            secondary_data = None
         else:
             primary_data = data if not multi_dataset else None
             secondary_data = None

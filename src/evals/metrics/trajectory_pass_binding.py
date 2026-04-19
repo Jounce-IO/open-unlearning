@@ -104,6 +104,60 @@ _PASS_SPECS: dict[str, PassSpec] = {
             "trajectory_forget_Truth_Ratio",
         ),
     ),
+    "retain__unguided": _spec(
+        "retain__unguided",
+        ("retain",),
+        ("rouge",),
+        "unguided",
+        ("trajectory_retain_Q_A_ROUGE",),
+    ),
+    "retain__guided_native": _spec(
+        "retain__guided_native",
+        ("retain",),
+        ("probability", "extraction_strength", "truth_ratio"),
+        "guided_native",
+        (
+            "trajectory_retain_Q_A_Prob",
+            "trajectory_retain_extraction_strength",
+            "trajectory_retain_Truth_Ratio",
+        ),
+    ),
+    "ra__unguided": _spec(
+        "ra__unguided",
+        ("ra",),
+        ("rouge",),
+        "unguided",
+        ("trajectory_ra_Q_A_ROUGE",),
+    ),
+    "ra__guided_native": _spec(
+        "ra__guided_native",
+        ("ra",),
+        ("probability", "extraction_strength", "truth_ratio"),
+        "guided_native",
+        (
+            "trajectory_ra_Q_A_Prob_normalised",
+            "trajectory_ra_extraction_strength",
+            "trajectory_ra_Truth_Ratio",
+        ),
+    ),
+    "wf__unguided": _spec(
+        "wf__unguided",
+        ("wf",),
+        ("rouge",),
+        "unguided",
+        ("trajectory_wf_Q_A_ROUGE",),
+    ),
+    "wf__guided_native": _spec(
+        "wf__guided_native",
+        ("wf",),
+        ("probability", "extraction_strength", "truth_ratio"),
+        "guided_native",
+        (
+            "trajectory_wf_Q_A_Prob_normalised",
+            "trajectory_wf_extraction_strength",
+            "trajectory_wf_Truth_Ratio",
+        ),
+    ),
 }
 
 _fg = _PASS_SPECS["forget__guided_native"]
@@ -113,6 +167,30 @@ _PASS_SPECS["forget__guided_skew"] = PassSpec(
     internal_metric_keys=_fg.internal_metric_keys,
     evaluation_mode="guided_skew",
     display_names_emitted=_fg.display_names_emitted,
+)
+_rg = _PASS_SPECS["retain__guided_native"]
+_PASS_SPECS["retain__guided_skew"] = PassSpec(
+    pass_id="retain__guided_skew",
+    dataset_access_keys=_rg.dataset_access_keys,
+    internal_metric_keys=_rg.internal_metric_keys,
+    evaluation_mode="guided_skew",
+    display_names_emitted=_rg.display_names_emitted,
+)
+_rga = _PASS_SPECS["ra__guided_native"]
+_PASS_SPECS["ra__guided_skew"] = PassSpec(
+    pass_id="ra__guided_skew",
+    dataset_access_keys=_rga.dataset_access_keys,
+    internal_metric_keys=_rga.internal_metric_keys,
+    evaluation_mode="guided_skew",
+    display_names_emitted=_rga.display_names_emitted,
+)
+_wg = _PASS_SPECS["wf__guided_native"]
+_PASS_SPECS["wf__guided_skew"] = PassSpec(
+    pass_id="wf__guided_skew",
+    dataset_access_keys=_wg.dataset_access_keys,
+    internal_metric_keys=_wg.internal_metric_keys,
+    evaluation_mode="guided_skew",
+    display_names_emitted=_wg.display_names_emitted,
 )
 
 
