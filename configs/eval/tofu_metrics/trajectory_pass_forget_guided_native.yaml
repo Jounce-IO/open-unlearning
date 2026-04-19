@@ -27,6 +27,8 @@ trajectory_config:
   logits_source: sampler
   return_logits: true
   return_fixation_steps: true
+  trajectory_step_prefetch_max_steps: 16
+  trajectory_logits_storage: dense_r
   include_views: [full, eos]
   use_generalized_sequence_probability: true
   logit_alignment: causal

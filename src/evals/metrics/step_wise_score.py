@@ -153,6 +153,33 @@ def build_fixation_logits_from_R_F(
     return gathered.permute(0, 2, 1)
 
 
+def build_effective_step_fixation_logits_from_history(
+    lh: list[torch.Tensor], F: torch.Tensor, report_step: int
+) -> torch.Tensor:
+    """Same semantics as :func:`build_effective_step_fixation_logits` using list-backed logits.
+
+    ``lh[s]`` is ``[B, L, V]`` per diffusion step ``s``. ``F`` is ``[B, L]`` or ``[L]`` (single row).
+    """
+    if F.dim() == 1:
+        F = F.unsqueeze(0)
+    S = len(lh)
+    if S <= 0:
+        raise ValueError("logits history must be non-empty")
+    B, L, _V = lh[0].shape
+    report_step_clamped = min(max(0, report_step), S - 1) if S > 0 else 0
+    s_eff = torch.minimum(
+        torch.full_like(F, report_step_clamped, device=F.device, dtype=F.dtype),
+        F.clamp(0, S - 1),
+    )
+    out = torch.empty(B, L, lh[0].shape[2], device=lh[0].device, dtype=lh[0].dtype)
+    for s in range(S):
+        mask = s_eff == s
+        if mask.any():
+            contrib = lh[s]
+            out[mask] = contrib[mask]
+    return out
+
+
 def build_effective_step_fixation_logits(
     R: torch.Tensor, F: torch.Tensor, report_step: int
 ) -> torch.Tensor:

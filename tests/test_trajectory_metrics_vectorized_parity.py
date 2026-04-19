@@ -14,6 +14,7 @@ sys.path.insert(0, str(repo_root / "src"))
 
 from evals.metrics.trajectory_metrics import (
     _call_metric_at_step,
+    _chunked_reporting_steps,
     _get_logits_at_step,
     _prefetch_logits_by_step,
     _stack_step_logits_for_prob_batch,
@@ -34,6 +35,23 @@ def test_prefetch_steps_logits_matches_get_logits_at_step() -> None:
     assert set(by_step.keys()) == set(steps)
     for s in steps:
         assert torch.equal(by_step[s], _get_logits_at_step(traj, "steps", s))
+
+
+def test_chunked_prefetch_reassembles_full_steps() -> None:
+    """Windowed ``_prefetch_logits_by_step`` agrees with one-shot prefetch (``steps`` trajectory)."""
+    torch.manual_seed(2)
+    V, L, S = 11, 7, 13
+    R = torch.randn(V, L, S)
+    F = torch.randint(0, S, (L,), dtype=torch.long)
+    traj = {"R": R, "F": F, "S": S, "L": L}
+    steps = list(range(0, S, 2))
+    full = _prefetch_logits_by_step(traj, "steps", steps)
+    merged: dict[int, torch.Tensor] = {}
+    for w in _chunked_reporting_steps(steps, 3):
+        merged.update(_prefetch_logits_by_step(traj, "steps", w))
+    assert set(merged.keys()) == set(full.keys())
+    for s in steps:
+        assert torch.equal(merged[int(s)], full[int(s)])
 
 
 def test_stack_step_logits_shape() -> None:
@@ -235,6 +253,7 @@ def test_post_loop_rouge_append_order_b2_executor_none() -> None:
         steps_to_use=steps_to_use,
         include_views=["full"],
         R=R,
+        lh=None,
         F=F,
         S=S,
         L=L,
