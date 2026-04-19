@@ -4571,6 +4571,15 @@ def trajectory_metrics(model, **kwargs):
                     _step_prefetch_max,
                     _logits_storage,
                 ) = _trajectory_tc_allowlist_sets(trajectory_config)
+                if rank == 0 and batch_idx == 0:
+                    logger.info(
+                        "trajectory_metrics_effective: tv_chunk_max=%s step_prefetch_max=%s "
+                        "logits_storage=%s dataloader_batch_B=%s",
+                        _tv_chunk_max,
+                        _step_prefetch_max,
+                        _logits_storage,
+                        B,
+                    )
                 _log_traj_peak = bool(_tc_plain.get("trajectory_log_peak_memory_mb"))
                 if _log_traj_peak and torch.cuda.is_available():
                     logger.info(

@@ -261,6 +261,31 @@ class TestComputeProbPackedShiftedSegments:
             assert abs(a["prob"] - b["prob"]) < 1e-5
             assert abs(a["avg_loss"] - b["avg_loss"]) < 1e-5
 
+    def test_packed_row_chunking_matches_monolithic(self):
+        """Row-batched CE inside compute_prob_packed_shifted_segments matches one-shot CE."""
+        torch.manual_seed(2)
+        V = 17
+        device = torch.device("cpu")
+        seg_logits = []
+        seg_labels = []
+        for Tb in (4, 9, 3, 7):
+            log = torch.randn(1, Tb, V)
+            lab = torch.randint(0, V, (1, Tb))
+            lab[:, 0] = -100
+            seg_logits.append(log)
+            seg_labels.append(lab)
+        ref = compute_prob_packed_shifted_segments(
+            seg_logits, seg_labels, device, ignore_index=-100, max_ce_logits_rows=10_000
+        )
+        for cap in (1, 2, 3, 7, 64):
+            packed = compute_prob_packed_shifted_segments(
+                seg_logits, seg_labels, device, ignore_index=-100, max_ce_logits_rows=cap
+            )
+            assert len(packed) == len(ref)
+            for a, b in zip(ref, packed, strict=True):
+                assert abs(float(a["prob"]) - float(b["prob"])) < 1e-6
+                assert abs(float(a["avg_loss"]) - float(b["avg_loss"])) < 1e-5
+
 
 class TestEvalRougeRecallBatch:
     """Test eval_rouge_recall_batch: same (gen, gt) pairs -> same scores; use_stemmer option."""

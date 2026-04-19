@@ -5,7 +5,7 @@ defaults:
   - ../../collator@collators: DataCollatorForSupervisedDatasetwithIndex
 
 handler: trajectory_metrics
-batch_size: 4
+batch_size: 1
 sort_by_length: true
 trajectory_pass_id: forget__guided_native
 metrics:
@@ -27,10 +27,11 @@ trajectory_config:
   logits_source: sampler
   return_logits: true
   return_fixation_steps: true
-  trajectory_step_prefetch_max_steps: 16
-  trajectory_logits_storage: dense_r
+  trajectory_step_prefetch_max_steps: 4
+  trajectory_logits_storage: list_history
   # Declared so Hydra accepts overrides without + (e.g. ablation chunk_max=1).
-  trajectory_step_view_batch_chunk_max: 32
+  # Small value caps packed shifted-CE workspace on large-vocab dLLMs (A100-40).
+  trajectory_step_view_batch_chunk_max: 1
   include_views: [full, eos]
   use_generalized_sequence_probability: true
   logit_alignment: causal
