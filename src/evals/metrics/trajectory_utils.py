@@ -10,7 +10,7 @@ This module provides functions to:
 """
 
 import torch
-from typing import List, Optional, Union
+from typing import List, Literal, Optional, Union
 
 
 def stack_logits_history(logits_history: List[torch.Tensor]) -> torch.Tensor:
@@ -33,6 +33,162 @@ def stack_logits_history(logits_history: List[torch.Tensor]) -> torch.Tensor:
     S, B, L, V = stacked.shape
     R = stacked.permute(1, 3, 2, 0)  # [B, V, L, S]
     return R
+
+
+def _slice_logits_history_to_generated(
+    logits_history: List[torch.Tensor],
+    fixation_steps: torch.Tensor,
+    prompt_lens: Union[List[int], torch.Tensor],
+) -> tuple[List[torch.Tensor], torch.Tensor, int, int]:
+    """Slice per-diffusion-step logits to the generated region (same geometry as ``trajectories_from_logits``).
+
+    Returns:
+        lh_sliced: length-``S`` list of ``[B, L, V]`` tensors (generated region only).
+        F: ``[B, L]`` fixation indices in generated coordinates.
+        S: number of diffusion steps (``len(logits_history)``).
+        L: generated sequence length (``lh_sliced[0].shape[1]``).
+    """
+    if not logits_history:
+        raise ValueError("logits_history cannot be empty")
+    if fixation_steps.dim() != 2:
+        raise ValueError(
+            f"fixation_steps must be 2-d [B, T_full], got shape {fixation_steps.shape}"
+        )
+    S = len(logits_history)
+    B = logits_history[0].shape[0]
+    if isinstance(prompt_lens, torch.Tensor):
+        prompt_lens = prompt_lens.tolist()
+    if len(prompt_lens) != B:
+        raise ValueError(
+            f"prompt_lens length {len(prompt_lens)} must match batch size B={B}"
+        )
+    L_logits = logits_history[0].shape[1]
+    T_fixation = fixation_steps.shape[1]
+    max_prompt_len = max(prompt_lens)
+
+    if L_logits < T_fixation:
+        L = L_logits
+        lh_sliced = [t.contiguous() for t in logits_history]
+        F_list = []
+        for b in range(B):
+            F_full = fixation_steps[b]
+            slice_F = F_full[max_prompt_len : max_prompt_len + L]
+            if slice_F.shape[0] >= L:
+                F_b = slice_F[:L]
+            else:
+                F_b = torch.cat(
+                    [
+                        slice_F,
+                        torch.full(
+                            (L - slice_F.shape[0],),
+                            S - 1,
+                            dtype=torch.long,
+                            device=F_full.device,
+                        ),
+                    ]
+                )
+            F_list.append(F_b)
+        F = torch.stack(F_list, dim=0)
+        return lh_sliced, F, S, L
+
+    generated_len = T_fixation - max_prompt_len
+    L = generated_len
+    lh_sliced = []
+    for t in logits_history:
+        lh_sliced.append(t[:, max_prompt_len : max_prompt_len + L, :].contiguous())
+    F_list = []
+    for b in range(B):
+        F_full = fixation_steps[b]
+        if F_full.shape[0] > max_prompt_len:
+            slice_F = F_full[max_prompt_len : max_prompt_len + L]
+            if slice_F.shape[0] >= L:
+                F_b = slice_F[:L]
+            else:
+                F_b = torch.cat(
+                    [
+                        slice_F,
+                        torch.full(
+                            (L - slice_F.shape[0],),
+                            S - 1,
+                            dtype=torch.long,
+                            device=F_full.device,
+                        ),
+                    ]
+                )
+        else:
+            F_b = torch.full((L,), S - 1, dtype=torch.long, device=F_full.device)
+        F_list.append(F_b)
+    F = torch.stack(F_list, dim=0)
+    return lh_sliced, F, S, L
+
+
+def gather_vl_from_logits_history(
+    lh: List[torch.Tensor],
+    batch_idx: int,
+    diffusion_indices_1d: torch.Tensor,
+) -> torch.Tensor:
+    """``diffusion_indices_1d`` shape ``[L]`` with values in ``[0, S-1]``; returns ``[V, L]``."""
+    if diffusion_indices_1d.dim() != 1:
+        raise ValueError("diffusion_indices_1d must be 1-d [L]")
+    device = diffusion_indices_1d.device
+    dtype = lh[0].dtype
+    L = diffusion_indices_1d.shape[0]
+    V = lh[0].shape[2]
+    out_lv = torch.empty(L, V, device=device, dtype=dtype)
+    S = len(lh)
+    for s in range(S):
+        mask = diffusion_indices_1d == s
+        if mask.any():
+            slv = lh[s][batch_idx][mask]
+            out_lv[mask] = slv
+    return out_lv.transpose(0, 1)
+
+
+def compute_fixation_start_from_history(
+    lh: List[torch.Tensor],
+    batch_idx: int,
+    step_index: int,
+    fixation_indices: torch.Tensor,
+    S: int,
+) -> torch.Tensor:
+    """Same semantics as :func:`compute_fixation_start_trajectory` using list-backed logits."""
+    if fixation_indices.dim() != 1:
+        raise ValueError("fixation_indices must be [L]")
+    device = fixation_indices.device
+    s_t = torch.tensor(step_index, device=device, dtype=torch.long)
+    source_step = torch.minimum(s_t, fixation_indices)
+    source_step = torch.clamp(source_step, 0, S - 1)
+    return gather_vl_from_logits_history(lh, batch_idx, source_step)
+
+
+def compute_fixation_end_from_history(
+    lh: List[torch.Tensor],
+    batch_idx: int,
+    step_index: int,
+    fixation_indices: torch.Tensor,
+    S: int,
+) -> torch.Tensor:
+    if fixation_indices.dim() != 1:
+        raise ValueError("fixation_indices must be [L]")
+    source_step = fixation_indices - (S - 1) + step_index
+    source_step = torch.clamp(source_step, 0, S - 1)
+    return gather_vl_from_logits_history(lh, batch_idx, source_step)
+
+
+def compute_fixation_ratio_from_history(
+    lh: List[torch.Tensor],
+    batch_idx: int,
+    step_index: int,
+    fixation_indices: torch.Tensor,
+    S: int,
+) -> torch.Tensor:
+    if fixation_indices.dim() != 1:
+        raise ValueError("fixation_indices must be [L]")
+    if S <= 1:
+        return lh[0][batch_idx].transpose(0, 1)
+    ratio_step = (fixation_indices * step_index) // (S - 1)
+    ratio_step = torch.clamp(ratio_step, 0, S - 1)
+    return gather_vl_from_logits_history(lh, batch_idx, ratio_step)
 
 
 def compute_trajectories(
@@ -231,6 +387,7 @@ def trajectories_from_logits(
     fixation_steps: torch.Tensor,
     prompt_lens: Union[List[int], torch.Tensor],
     return_trajectory_tensors: bool = True,
+    output_layout: Literal["dense_r", "list_history"] = "dense_r",
 ) -> dict:
     """
     Compute the four trajectory tensors from raw logits and fixation data (model-free).
@@ -262,6 +419,10 @@ def trajectories_from_logits(
         "fixation_end", "fixation_ratio", "S", "L".
         If return_trajectory_tensors=False: dict with "R", "F", "S", "L" only.
 
+        output_layout: ``dense_r`` (default) stacks logits to ``R`` ``[B,V,L,S]``.
+        ``list_history`` returns ``lh`` (length-``S`` list of ``[B,L,V]``) instead of ``R``,
+        avoiding an intermediate full stacked tensor before slicing.
+
     Invariant: out["L"] is the single source of truth for generated sequence length and
     satisfies out["L"] == out["R"].shape[2]. The probability metric assumes
     logits.shape[1] == batch["labels"].shape[1] and asserts it.
@@ -272,95 +433,36 @@ def trajectories_from_logits(
         raise ValueError(
             f"fixation_steps must be 2-d [B, T_full], got shape {fixation_steps.shape}"
         )
+    if output_layout not in ("dense_r", "list_history"):
+        raise ValueError(f"output_layout must be 'dense_r' or 'list_history', got {output_layout!r}")
 
-    R_full = stack_logits_history(logits_history)  # [B, V, T_full, S]
-    B, V, T_full, S = R_full.shape
-    if isinstance(prompt_lens, torch.Tensor):
-        prompt_lens = prompt_lens.tolist()
-    if len(prompt_lens) != B:
-        raise ValueError(
-            f"prompt_lens length {len(prompt_lens)} must match batch size B={B}"
+    lh_sliced, F, S, L = _slice_logits_history_to_generated(
+        logits_history, fixation_steps, prompt_lens
+    )
+
+    if return_trajectory_tensors:
+        R = stack_logits_history(lh_sliced)
+        T_steps, T_fixation_start, T_fixation_end, T_fixation_ratio = compute_trajectories(
+            R, F, S
         )
+        return {
+            "steps": T_steps,
+            "fixation_start": T_fixation_start,
+            "fixation_end": T_fixation_end,
+            "fixation_ratio": T_fixation_ratio,
+            "S": S,
+            "L": L,
+        }
 
-    L_logits = logits_history[0].shape[1]
-    T_fixation = fixation_steps.shape[1]
-    max_prompt_len = max(prompt_lens)
+    if output_layout == "list_history":
+        return {"lh": lh_sliced, "F": F, "S": S, "L": L}
 
-    if L_logits < T_fixation:
-        # Generated-only: logits are [B, L_gen, V]; fixation_steps is [B, T_full].
-        R = R_full
-        L = L_logits
-        F_list = []
-        for b in range(B):
-            F_full = fixation_steps[b]
-            slice_F = F_full[max_prompt_len : max_prompt_len + L]
-            if slice_F.shape[0] >= L:
-                F_b = slice_F[:L]
-            else:
-                F_b = torch.cat(
-                    [
-                        slice_F,
-                        torch.full(
-                            (L - slice_F.shape[0],),
-                            S - 1,
-                            dtype=torch.long,
-                            device=F_full.device,
-                        ),
-                    ]
-                )
-            F_list.append(F_b)
-        F = torch.stack(F_list, dim=0)  # [B, L]
-    else:
-        # Full-sequence: slice R and F to generated region.
-        generated_len = T_full - max_prompt_len
-        R = R_full[:, :, max_prompt_len : max_prompt_len + generated_len, :]  # [B, V, L, S]
-        _, _, L, _ = R.shape
-
-        F_list = []
-        for b in range(B):
-            F_full = fixation_steps[b]
-            if F_full.shape[0] > max_prompt_len:
-                slice_F = F_full[max_prompt_len : max_prompt_len + L]
-                if slice_F.shape[0] >= L:
-                    F_b = slice_F[:L]
-                else:
-                    F_b = torch.cat(
-                        [
-                            slice_F,
-                            torch.full(
-                                (L - slice_F.shape[0],),
-                                S - 1,
-                                dtype=torch.long,
-                                device=F_full.device,
-                            ),
-                        ]
-                    )
-            else:
-                F_b = torch.full(
-                    (L,), S - 1, dtype=torch.long, device=F_full.device
-                )
-            F_list.append(F_b)
-        F = torch.stack(F_list, dim=0)  # [B, L]
-
+    R = stack_logits_history(lh_sliced)
     assert L == R.shape[2], (
         "trajectories_from_logits invariant: L must equal R.shape[2]; got L=%s, R.shape=%s"
         % (L, R.shape)
     )
-
-    if not return_trajectory_tensors:
-        return {"R": R, "F": F, "S": S, "L": L}
-
-    T_steps, T_fixation_start, T_fixation_end, T_fixation_ratio = compute_trajectories(
-        R, F, S
-    )
-    return {
-        "steps": T_steps,
-        "fixation_start": T_fixation_start,
-        "fixation_end": T_fixation_end,
-        "fixation_ratio": T_fixation_ratio,
-        "S": S,
-        "L": L,
-    }
+    return {"R": R, "F": F, "S": S, "L": L}
 
 
 def effective_lengths_from_eos(

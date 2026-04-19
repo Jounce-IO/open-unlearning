@@ -104,8 +104,8 @@ trajectory_config:
   # Generalized metrics (dLLM-compatible): step-wise scores at fixation; matches invariants. causal = Dream/AR.
   use_generalized_sequence_probability: true
   logit_alignment: causal
-  # CPU worker pool for ROUGE (default 4). Set to 0 for synchronous (no pool).
-  metric_worker_pool_size: 4
+  # CPU worker pool for ROUGE (default 8). Set to 0 for synchronous (no pool).
+  metric_worker_pool_size: 8
   sampler_kwargs:
     steps: 50  # ceil(200/4)
     temperature: 0.0

@@ -153,6 +153,33 @@ def build_fixation_logits_from_R_F(
     return gathered.permute(0, 2, 1)
 
 
+def build_effective_step_fixation_logits_from_history(
+    lh: list[torch.Tensor], F: torch.Tensor, report_step: int
+) -> torch.Tensor:
+    """Same semantics as :func:`build_effective_step_fixation_logits` using list-backed logits.
+
+    ``lh[s]`` is ``[B, L, V]`` per diffusion step ``s``. ``F`` is ``[B, L]`` or ``[L]`` (single row).
+    """
+    if F.dim() == 1:
+        F = F.unsqueeze(0)
+    S = len(lh)
+    if S <= 0:
+        raise ValueError("logits history must be non-empty")
+    B, L, _V = lh[0].shape
+    report_step_clamped = min(max(0, report_step), S - 1) if S > 0 else 0
+    s_eff = torch.minimum(
+        torch.full_like(F, report_step_clamped, device=F.device, dtype=F.dtype),
+        F.clamp(0, S - 1),
+    )
+    out = torch.empty(B, L, lh[0].shape[2], device=lh[0].device, dtype=lh[0].dtype)
+    for s in range(S):
+        mask = s_eff == s
+        if mask.any():
+            contrib = lh[s]
+            out[mask] = contrib[mask]
+    return out
+
+
 def build_effective_step_fixation_logits(
     R: torch.Tensor, F: torch.Tensor, report_step: int
 ) -> torch.Tensor:
@@ -267,36 +294,44 @@ def extraction_strength_from_fixation(
     L, V = fixation_logits.shape
     if L == 0 or S <= 0:
         return 0.0
-    L_lab = labels.shape[0]
+    L_lab = int(labels.shape[0])
     L_use = min(L, L_lab)
     if L_use == 0:
         return 0.0
-    preds = torch.zeros(L, dtype=torch.long, device=fixation_logits.device)
-    for ell in range(L):
-        logit_idx = max(0, ell - 1) if logit_alignment == "causal" else ell
-        preds[ell] = torch.argmax(fixation_logits[logit_idx, :], dim=-1)
-    valid = (labels != ignore_index) & (labels >= 0) & (labels < V)
+    device = fixation_logits.device
+    ells = torch.arange(L, device=device, dtype=torch.long)
+    if logit_alignment == "causal":
+        logit_idx = (ells - 1).clamp(min=0)
+    else:
+        logit_idx = ells
+    logits_rows = fixation_logits[logit_idx]
+    preds = logits_rows.argmax(dim=-1)
+
+    lab = labels.reshape(-1).to(device=device)
+    valid = (lab != ignore_index) & (lab >= 0) & (lab < V)
     if valid.sum().item() == 0:
         return 0.0
-    F_np = F.cpu().numpy() if F.dim() > 0 else np.array([F.item()])
-    if F_np.size != L:
-        F_np = np.broadcast_to(F_np, (L,))
-    labels_np = labels.cpu().numpy()
-    preds_np = preds.cpu().numpy()
-    valid_np = valid.cpu().numpy()
-    best_t = S
-    for t in range(S):
-        match = True
-        for ell in range(L_use):
-            if not valid_np[ell]:
-                continue
-            if F_np[ell] >= t:
-                if preds_np[ell] != labels_np[ell]:
-                    match = False
-                    break
-        if match:
-            best_t = t
-            break
+
+    Fr = F.reshape(-1).to(device=device)
+    if Fr.numel() == L:
+        F_row = Fr
+    else:
+        F_row = torch.broadcast_to(Fr, (L,))
+
+    preds_use = preds[:L_use]
+    lab_use = lab[:L_use]
+    valid_use = valid[:L_use]
+    F_use = F_row[:L_use]
+
+    ts = torch.arange(S, device=device, dtype=torch.long).view(S, 1)
+    required = valid_use.unsqueeze(0) & (F_use.unsqueeze(0) >= ts)
+    mismatch = required & (preds_use.unsqueeze(0) != lab_use.unsqueeze(0))
+    any_mismatch = mismatch.any(dim=1)
+    ok = ~any_mismatch
+    if ok.any():
+        best_t = int(torch.argmax(ok.to(torch.float32)).item())
+    else:
+        best_t = S
     return float(1.0 - (best_t / S))
 
 

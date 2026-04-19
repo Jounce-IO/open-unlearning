@@ -436,7 +436,7 @@ class TestBatchAcrossSteps:
     """TDD tests for batch metric computation across steps."""
 
     def test_trajectory_metrics_rouge_called_once_per_sample_per_traj_type(self):
-        """For one sample and one traj_type, eval_rouge_recall_batch is called once with list length S."""
+        """Post-loop ROUGE: one eval_rouge_recall_batch per (traj, step, view); each call batches B gen strings."""
         from evals.metrics.trajectory_metrics import trajectory_metrics
 
         S = 4
@@ -466,7 +466,7 @@ class TestBatchAcrossSteps:
         model.sampler = sampler
         tokenizer = Mock()
         tokenizer.decode = Mock(return_value="decoded")
-        tokenizer.batch_decode = Mock(return_value=["decoded"] * S)
+        tokenizer.batch_decode = Mock(side_effect=lambda rows, **kwargs: ["decoded"] * len(rows))
         tokenizer.eos_token_id = 2
 
         class MockDataset:
@@ -524,13 +524,15 @@ class TestBatchAcrossSteps:
             assert mock_rouge_batch.call_count >= 1, (
                 "eval_rouge_recall_batch must be called when ROUGE runs in main process (metric_worker_pool_size=0)"
             )
+            # Default: 4 trajectory types × 2 views × S diffusion steps (see trajectory_metrics defaults).
+            assert mock_rouge_batch.call_count == 4 * 2 * S
             for call in mock_rouge_batch.call_args_list:
                 gen_texts, ground_truths = call[0][0], call[0][1]
-                assert len(gen_texts) == S
-                assert len(ground_truths) == S
+                assert len(gen_texts) == 1
+                assert len(ground_truths) == 1
 
     def test_rouge_path_uses_batch_decode_not_decode_per_step(self):
-        """ROUGE path uses tokenizer.batch_decode once per (sample, traj_name) with list length S; decode only for ground_truth."""
+        """Post-loop ROUGE uses tokenizer.batch_decode once per (traj, step, view) over batch rows (B token lists)."""
         from evals.metrics.trajectory_metrics import trajectory_metrics
 
         S = 4
@@ -560,7 +562,7 @@ class TestBatchAcrossSteps:
         model.sampler = sampler
         tokenizer = Mock()
         tokenizer.decode = Mock(return_value="ground_truth_decoded")
-        tokenizer.batch_decode = Mock(return_value=["decoded"] * S)
+        tokenizer.batch_decode = Mock(side_effect=lambda rows, **kwargs: ["decoded"] * len(rows))
         tokenizer.eos_token_id = 2
 
         class MockDataset:
@@ -593,7 +595,6 @@ class TestBatchAcrossSteps:
         with patch("evals.metrics.trajectory_metrics.eval_rouge_recall_batch") as mock_rouge_batch:
             mock_rouge_batch.return_value = [
                 {"rouge1_recall": 0.5, "rougeL_f1": 0.6, "rougeL_recall": 0.7}
-                for _ in range(S)
             ]
             raw_fn(
                 model,
@@ -614,11 +615,10 @@ class TestBatchAcrossSteps:
                     },
                 },
             )
-            assert tokenizer.batch_decode.call_count >= 1
+            assert tokenizer.batch_decode.call_count == 4 * 2 * S
             for call in tokenizer.batch_decode.call_args_list:
                 token_lists = call[0][0]
-                assert len(token_lists) == S
-            # decode is used for ground truth and logging; batch_decode is used for step-wise generated texts
+                assert len(token_lists) == 1
             assert tokenizer.decode.call_count >= 1
 
 
