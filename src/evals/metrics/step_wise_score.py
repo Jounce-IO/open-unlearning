@@ -13,6 +13,7 @@ or their geometric mean; they are agnostic to model type or alignment.
 from __future__ import annotations
 
 import logging
+import os
 from typing import Any, Dict, List, Optional, Protocol, Sequence
 
 import numpy as np
@@ -335,11 +336,78 @@ def extraction_strength_from_fixation(
     return float(1.0 - (best_t / S))
 
 
+def _default_max_ce_logits_rows(vocab: int) -> int:
+    """Upper bound on shifted-token rows per ``cross_entropy`` forward (float32 ``[N,V]`` logits).
+
+    Bounds peak GPU memory for large ``V`` (e.g. LLaDA vocab ~128k) when many segments are
+    packed. Override with env ``TRAJECTORY_PACKED_CE_BUDGET_BYTES`` (default ~380MB logits).
+    """
+    try:
+        budget = int(os.environ.get("TRAJECTORY_PACKED_CE_BUDGET_BYTES", "380000000"))
+    except ValueError:
+        budget = 380_000_000
+    v = max(int(vocab), 1)
+    per_vocab = max(1, budget // (4 * v))
+    return max(64, min(8192, per_vocab))
+
+
+def _cross_entropy_packed_shifted_rows(
+    flat_logits_parts: List[torch.Tensor],
+    flat_labels_parts: List[torch.Tensor],
+    ignore_index: int,
+    max_rows: int,
+) -> torch.Tensor:
+    """Run ``cross_entropy`` on row chunks without concatenating all logits into one tensor."""
+    max_rows = max(1, int(max_rows))
+    all_chunks: list[torch.Tensor] = []
+    buf_l: list[torch.Tensor] = []
+    buf_y: list[torch.Tensor] = []
+    cur = 0
+
+    def flush() -> None:
+        nonlocal cur, buf_l, buf_y
+        if cur == 0:
+            return
+        logits_cat = torch.cat(buf_l, dim=0)
+        labels_cat = torch.cat(buf_y, dim=0)
+        losses = torch.nn.functional.cross_entropy(
+            logits_cat,
+            labels_cat,
+            ignore_index=ignore_index,
+            reduction="none",
+        )
+        all_chunks.append(losses)
+        del logits_cat, labels_cat
+        buf_l.clear()
+        buf_y.clear()
+        cur = 0
+
+    for pl, pyl in zip(flat_logits_parts, flat_labels_parts, strict=True):
+        r = 0
+        n = pl.shape[0]
+        while r < n:
+            if cur >= max_rows:
+                flush()
+            space = max_rows - cur
+            need = min(n - r, space)
+            if need <= 0:
+                flush()
+                continue
+            buf_l.append(pl[r : r + need])
+            buf_y.append(pyl[r : r + need])
+            cur += need
+            r += need
+    flush()
+    return torch.cat(all_chunks, dim=0)
+
+
 def compute_prob_packed_shifted_segments(
     segment_fixation_logits: Sequence[torch.Tensor],
     segment_labels: Sequence[torch.Tensor],
     device: torch.device,
     ignore_index: int = IGNORE_INDEX,
+    *,
+    max_ce_logits_rows: Optional[int] = None,
 ) -> List[Dict[str, float]]:
     """Per-segment ``prob`` / ``avg_loss`` from packed shifted-token cross-entropy.
 
@@ -348,9 +416,9 @@ def compute_prob_packed_shifted_segments(
     (e.g. full length ``L`` or eos prefix). Segments may have different ``T_i`` (ragged).
 
     Implements the same shift, ``min(T_logits, T_labels)``, dtype promotion, and
-    ``ignore_index`` handling as :func:`compute_prob_from_fixation_logits`, then packs
-    all shifted rows into one ``[T_total, V]`` tensor and one ``cross_entropy`` pass,
-    reducing with per-segment lengths (no batch-padding to a common ``T``).
+    ``ignore_index`` handling as :func:`compute_prob_from_fixation_logits`, then runs
+    ``cross_entropy`` over row chunks (bounded by ``max_ce_logits_rows`` or an automatic
+    budget from ``V``) so peak memory stays ~``O(max_rows * V)`` instead of ``O(T_total * V)``.
 
     Returns one dict per segment, same contract as ``compute_prob_from_fixation_logits``.
     """
@@ -398,14 +466,19 @@ def compute_prob_packed_shifted_segments(
         if not flat_logits_parts:
             return [{"prob": 1.0, "avg_loss": 0.0} for _ in seg_shift_lens]
 
-        logits_cat = torch.cat(flat_logits_parts, dim=0)
-        labels_cat = torch.cat(flat_labels_parts, dim=0)
-        token_losses = torch.nn.functional.cross_entropy(
-            logits_cat,
-            labels_cat,
-            ignore_index=ignore_index,
-            reduction="none",
+        v0 = int(flat_logits_parts[0].shape[-1])
+        row_cap = (
+            max(1, int(max_ce_logits_rows))
+            if max_ce_logits_rows is not None
+            else _default_max_ce_logits_rows(v0)
         )
+        token_losses = _cross_entropy_packed_shifted_rows(
+            flat_logits_parts,
+            flat_labels_parts,
+            ignore_index,
+            row_cap,
+        )
+        labels_cat = torch.cat(flat_labels_parts, dim=0)
 
         out: List[Dict[str, float]] = []
         offset = 0
@@ -427,7 +500,7 @@ def compute_prob_packed_shifted_segments(
             )
             offset += n_shift
 
-    return out
+        return out
 
 
 def compute_prob_from_fixation_logits(
