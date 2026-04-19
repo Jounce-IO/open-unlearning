@@ -47,13 +47,28 @@ def test_filter_forget_unguided():
     assert ftc["evaluation_mode"] == "unguided"
 
 
+def test_filter_retain_unguided():
+    m = {"rouge": {}, "probability": {}}
+    data = {"retain": object(), "forget": object()}
+    tc = {"evaluation_mode": "guided_native"}
+    fm, fd, ftc = filter_metrics_and_data_for_pass("retain__unguided", m, data, tc)
+    assert set(fm.keys()) == {"rouge"}
+    assert set(fd.keys()) == {"retain"}
+    assert ftc["evaluation_mode"] == "unguided"
+
+
+def test_all_canonical_eight_pass_specs_exist():
+    for pid in canonical_pass_ids_eight():
+        get_pass_spec(pid)
+
+
 def test_forget_guided_skew_mode():
     s = get_pass_spec("forget__guided_skew")
     assert s.evaluation_mode == "guided_skew"
 
 
-def test_implemented_pass_specs_are_subset_of_canonical_eight():
-    """Operators discover eight logical passes; code may implement a subset first."""
-    eight = set(canonical_pass_ids_eight())
+def test_implemented_pass_specs_are_subset_of_canonical_twelve():
+    """Skew variants extend the eight canonical legs; every spec must be discoverable."""
+    twelve = set(canonical_pass_ids_twelve())
     for pid in list_all_pass_specs():
-        assert pid in eight or pid.endswith("__guided_skew")
+        assert pid in twelve
