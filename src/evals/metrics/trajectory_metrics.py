@@ -38,6 +38,7 @@ from evals.metrics.step_wise_score import (
     FixationStepWiseScoreProvider,
     build_effective_step_fixation_logits,
     build_effective_step_fixation_logits_from_history,
+    build_fixation_logits_from_history,
     build_fixation_logits_from_R_F,
     compute_prob_from_fixation_logits as _compute_prob_from_fixation_logits,
     compute_prob_packed_shifted_segments as _compute_prob_packed_shifted_segments,
@@ -3675,19 +3676,31 @@ def _call_metric_at_step(
         and trajectory_config.get("use_generalized_sequence_probability", True)
         and sample_traj is not None
     ):
-        R = sample_traj["R"]
         F = sample_traj["F"]
         S_val = int(sample_traj["S"])
         report_step = kwargs.get("step")
         lab = batch.get("labels")
         if lab is not None:
             lab = lab.squeeze(0) if lab.dim() > 1 else lab
-            if report_step is not None:
-                fixation_logits = build_effective_step_fixation_logits(
-                    R, F, int(report_step)
-                ).squeeze(0)
+            if sample_traj.get("lh") is not None:
+                lh = sample_traj["lh"]
+                b = int(sample_traj["b"])
+                F_1 = F.unsqueeze(0) if F.dim() == 1 else F
+                if report_step is not None:
+                    lh_1 = [t[b : b + 1] for t in lh]
+                    fixation_logits = build_effective_step_fixation_logits_from_history(
+                        lh_1, F_1, int(report_step)
+                    ).squeeze(0)
+                else:
+                    fixation_logits = build_fixation_logits_from_history(lh, F, b)
             else:
-                fixation_logits = build_fixation_logits_from_R_F(R, F).squeeze(0)
+                R = sample_traj["R"]
+                if report_step is not None:
+                    fixation_logits = build_effective_step_fixation_logits(
+                        R, F, int(report_step)
+                    ).squeeze(0)
+                else:
+                    fixation_logits = build_fixation_logits_from_R_F(R, F).squeeze(0)
             logit_alignment = trajectory_config.get("logit_alignment", "causal")
             F_sq = F.squeeze(0) if F.dim() > 1 else F
             es_val = extraction_strength_from_fixation(
