@@ -181,6 +181,34 @@ def build_effective_step_fixation_logits_from_history(
     return out
 
 
+def build_fixation_logits_from_history(
+    lh: list[torch.Tensor], F: torch.Tensor, b: int
+) -> torch.Tensor:
+    """Fixation logits ``[L, V]`` for sample row ``b`` from list-backed history.
+
+    Matches :func:`build_fixation_logits_from_R_F` for a single packed sample:
+    position ``ell`` uses logits at diffusion step ``F[ell]`` (clamped to ``[0, S-1]``).
+    Each ``lh[s]`` is ``[B, L, V]``.
+    """
+    if F.dim() > 1:
+        F_row = F[int(b)]
+    else:
+        F_row = F
+    S = len(lh)
+    if S <= 0:
+        raise ValueError("logits history must be non-empty")
+    L = int(F_row.shape[0])
+    device = F_row.device
+    dtype = lh[0].dtype
+    V = lh[0].shape[-1]
+    out = torch.empty(L, V, device=device, dtype=dtype)
+    bb = int(b)
+    for ell in range(L):
+        s_fix = int(F_row[ell].clamp(0, S - 1).item())
+        out[ell] = lh[s_fix][bb, ell, :]
+    return out
+
+
 def build_effective_step_fixation_logits(
     R: torch.Tensor, F: torch.Tensor, report_step: int
 ) -> torch.Tensor:
