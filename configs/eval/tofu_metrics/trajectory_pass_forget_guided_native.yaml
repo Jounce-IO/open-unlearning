@@ -29,6 +29,8 @@ trajectory_config:
   return_fixation_steps: true
   trajectory_step_prefetch_max_steps: 16
   trajectory_logits_storage: dense_r
+  # Declared so Hydra accepts overrides without + (e.g. ablation chunk_max=1).
+  trajectory_step_view_batch_chunk_max: 32
   include_views: [full, eos]
   use_generalized_sequence_probability: true
   logit_alignment: causal
