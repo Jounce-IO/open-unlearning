@@ -5535,8 +5535,9 @@ def trajectory_metrics(model, **kwargs):
                                     L_eff_bp = int(effective_lengths[b])
                                     if traj_name == "steps":
                                         if lh_batch is not None:
+                                            # lh_batch[s][b] is [L,V]; dense R[b,:,:,s] is [V,L]. Match _get_logits_at_step.
                                             logits_step = trajectory_step_logits_to_prob_batch(
-                                                lh_batch[int(step)][b]
+                                                lh_batch[int(step)][b].transpose(0, 1).contiguous()
                                             )
                                         else:
                                             assert R is not None
