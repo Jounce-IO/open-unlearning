@@ -61,6 +61,7 @@ from evals.metrics.trajectory_adapters import (
     DualLogitModelWrapper,
 )
 from evals.metrics.mia.utils import get_attacker, MIAStreamingAccumulator
+from evals.metrics.golden_token_prob_heatmap import GoldenTokenHeatmapAccumulator
 from evals.gpu_phase_logger import set_phase as gpu_set_phase
 from evals.guardrails import (
     load_icul_pools,
@@ -4428,6 +4429,7 @@ def trajectory_metrics(model, **kwargs):
         _logged_capture_final_only = False
 
         keys_to_process = [None] if not multi_dataset else single_dataset_keys
+        golden_token_heatmap_payload_by_key: dict[str, Any] = {}
         for _key in keys_to_process:
             if _key is not None:
                 primary_data = data[_key]
@@ -4463,6 +4465,8 @@ def trajectory_metrics(model, **kwargs):
                 ]
             if not metrics_to_run:
                 continue
+
+            _golden_hm_accum: Optional[GoldenTokenHeatmapAccumulator] = None
 
             n_samples = (
                 len(dataloader.sampler)
@@ -4787,7 +4791,10 @@ def trajectory_metrics(model, **kwargs):
 
                 # Per-sample generated labels [L] for packed trajectory probability (same slicing as per-sample loop).
                 _gen_labels_for_packed_prob: list[torch.Tensor] = []
-                if "probability" in metrics_to_run and labels is not None:
+                if (
+                    ("probability" in metrics_to_run or "golden_token_prob_heatmap" in metrics_to_run)
+                    and labels is not None
+                ):
                     for b in range(B):
                         sample_labels_b = labels[b]
                         gs_b = _generation_start(
@@ -4955,7 +4962,11 @@ def trajectory_metrics(model, **kwargs):
                                         continue
                                     if metric_name in exact_mem_post_loop_metrics:
                                         continue
-                                    if metric_name in rouge_metrics_in_run or metric_name == "probability":
+                                    if (
+                                        metric_name in rouge_metrics_in_run
+                                        or metric_name == "probability"
+                                        or metric_name == "golden_token_prob_heatmap"
+                                    ):
                                         continue
                                     if metric_name == "ks_test":
                                         ref_logs = kwargs.get("reference_logs") or {}
@@ -5444,6 +5455,35 @@ def trajectory_metrics(model, **kwargs):
                                         exc_info=True,
                                     )
                                     raise
+                            if (
+                                "golden_token_prob_heatmap" in metrics_to_run
+                                and _gen_labels_for_packed_prob
+                                and trajectory_config is not None
+                            ):
+                                gl_hm = _gen_labels_for_packed_prob[sample_idx]
+                                if _golden_hm_accum is None:
+                                    _golden_hm_accum = GoldenTokenHeatmapAccumulator(
+                                        step_indices=list(steps_to_use),
+                                        L_gen=L,
+                                        trajectory_names=trajectory_names,
+                                        views=include_views,
+                                    )
+                                logits_hm = _prefetch_logits_by_step(
+                                    sample_traj, traj_name, steps_to_use
+                                )
+                                try:
+                                    _golden_hm_accum.add_traj(
+                                        traj_name=traj_name,
+                                        logits_by_step=logits_hm,
+                                        gen_labels=gl_hm,
+                                        logit_alignment=str(
+                                            trajectory_config.get("logit_alignment", "causal")
+                                        ),
+                                        ignore_index=IGNORE_INDEX,
+                                        L_eff=int(L_eff_b),
+                                    )
+                                finally:
+                                    del logits_hm
                             del logits_by_step
                         try:
                             del batch_template_eos
@@ -5919,6 +5959,9 @@ def trajectory_metrics(model, **kwargs):
                                 )
                 privleak_accumulators = None
 
+            if _golden_hm_accum is not None:
+                golden_token_heatmap_payload_by_key[str(_key)] = _golden_hm_accum.finalize_agg_value()
+
         # Multi-dataset: run privleak dual trajectory after per-key loops
         if multi_dataset and "forget" in data and "holdout" in data and "privleak" in loaded_metrics and privleak_needs_dual:
             primary_data = data["forget"]
@@ -6297,6 +6340,8 @@ def trajectory_metrics(model, **kwargs):
                 agg_value[traj_name] = {}
                 step_distribution[traj_name] = {}
                 for metric_name in loaded_metrics.keys():
+                    if metric_name == "golden_token_prob_heatmap":
+                        continue
                     step_metric_values = {}
                     if traj_name in step_values:
                         for step, metrics_dict in step_values[traj_name].items():
@@ -6455,6 +6500,8 @@ def trajectory_metrics(model, **kwargs):
         result = {}
         if len(display_names) == len(internal_names) and len(internal_names) > 0:
             for display_name, internal_name in zip(display_names, internal_names):
+                if internal_name == "golden_token_prob_heatmap":
+                    continue
                 result[display_name] = {
                     "agg_value": {
                         view: {
@@ -6471,6 +6518,21 @@ def trajectory_metrics(model, **kwargs):
                         }
                         for view in include_views
                     },
+                }
+            hm_display: Optional[str] = None
+            for d, k in zip(display_names, internal_names):
+                if k == "golden_token_prob_heatmap":
+                    hm_display = d
+                    break
+            if hm_display is not None and golden_token_heatmap_payload_by_key:
+                if len(golden_token_heatmap_payload_by_key) == 1:
+                    hm_payload: Any = next(iter(golden_token_heatmap_payload_by_key.values()))
+                else:
+                    hm_payload = {"by_dataset_key": dict(golden_token_heatmap_payload_by_key)}
+                result[hm_display] = {
+                    "agg_value": hm_payload,
+                    "value_by_index": {},
+                    "step_distribution": {},
                 }
             result["trajectory_step_metadata"] = {
                 "agg_value": None,

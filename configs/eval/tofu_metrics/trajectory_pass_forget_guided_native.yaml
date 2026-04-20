@@ -22,6 +22,7 @@ metrics:
         handler: probability
         access_key: wrong
         labels_field: labels_wrong
+  golden_token_prob_heatmap: {}
 trajectory_config:
   evaluation_mode: guided_native
   logits_source: sampler
@@ -45,6 +46,7 @@ metric_display_names:
   - trajectory_forget_Q_A_Prob
   - trajectory_extraction_strength
   - trajectory_forget_Truth_Ratio
+  - trajectory_forget_golden_token_prob_heatmap
 datasets:
   TOFU_QA_forget:
     access_key: forget

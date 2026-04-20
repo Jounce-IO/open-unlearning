@@ -96,12 +96,14 @@ _PASS_SPECS: dict[str, PassSpec] = {
             "probability",
             "extraction_strength",
             "truth_ratio",
+            "golden_token_prob_heatmap",
         ),
         "guided_native",
         (
             "trajectory_forget_Q_A_Prob",
             "trajectory_extraction_strength",
             "trajectory_forget_Truth_Ratio",
+            "trajectory_forget_golden_token_prob_heatmap",
         ),
     ),
     "retain__unguided": _spec(
@@ -209,6 +211,7 @@ DISPLAY_METRIC_BINDING: dict[str, tuple[str, str]] = {
     "trajectory_forget_Q_A_ROUGE": ("guidance_free", "forget"),
     "trajectory_extraction_strength": ("guided", "forget"),
     "trajectory_forget_Truth_Ratio": ("guided", "forget"),
+    "trajectory_forget_golden_token_prob_heatmap": ("guided", "forget"),
     "trajectory_forget_quality": ("guided", "forget"),
     "trajectory_model_utility": ("mixed", "retain_ra_wf"),
     "trajectory_privleak": ("guided", "forget"),
