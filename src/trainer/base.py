@@ -181,7 +181,8 @@ class FinetuneTrainer(Trainer):
         # Run a custom evaluator and save results
         if self.evaluators:
             logger.info(
-                "[eval] evaluate: using evaluators path (four-way skipped) step=%s",
+                "[eval] evaluate: evaluators path (no per-split HF Trainer.evaluate); "
+                "Phase 2 TOFU scalars merge when scheduled. step=%s",
                 self.state.global_step
                 if hasattr(self, "state") and self.state is not None
                 else "?",
@@ -278,11 +279,10 @@ class FinetuneTrainer(Trainer):
         metric_key_prefix: str = "eval",
         trial: Dict[str, Any] = None,
     ) -> EvalLoopOutput:
-        """TOFU multi-split eval matching SFT: schedule gate, Phase 1 ``Trainer.evaluate`` per split, Phase 2 shared dllm pass.
+        """TOFU multi-split eval matching SFT: schedule gate, Phase 2 ``dllm`` pass only.
 
-        Phase 1 must call the base :class:`~transformers.Trainer` implementation (not
-        :meth:`FinetuneTrainer.evaluate`) so ``retain_logs_path`` / evaluator short-circuit
-        does not skip per-split HF eval.
+        OU Phase 1 HF ``Trainer.evaluate`` per split is skipped: ``UnlearnTrainer`` eval
+        loss is not MDLM-comparable; Phase 2 supplies the same scalars as ``dllm sft``.
         """
         from dllm.core.trainers.tofu_multi_eval_phase2 import (
             run_tofu_multi_eval_phase2,
@@ -312,30 +312,9 @@ class FinetuneTrainer(Trainer):
         combined_metrics: Dict[str, float] = {}
         if self.is_world_process_zero():
             logger.info(
-                "[tofu-multi-eval eval] Phase 1 (base Trainer.evaluate per split): "
-                "method loss — no ROUGE in this pass."
-            )
-        for name, dataset in eval_dataset.items():
-            if dataset is None or len(dataset) == 0:
-                continue
-            if self.is_world_process_zero():
-                logger.info(
-                    "[tofu-multi-eval eval] Phase 1 split=%r n_examples=%d",
-                    name,
-                    len(dataset),
-                )
-            metrics = super(FinetuneTrainer, self).evaluate(
-                dataset,
-                ignore_keys=ignore_keys,
-                metric_key_prefix=f"{metric_key_prefix}_{name}",
-            )
-            if hasattr(metrics, "metrics") and getattr(metrics, "metrics", None):
-                combined_metrics.update(metrics.metrics)
-            elif isinstance(metrics, dict) and metrics:
-                combined_metrics.update(metrics)
-        if self.is_world_process_zero():
-            logger.info(
-                "[tofu-multi-eval eval] Phase 2 (dllm shared): include_rouge=%s step=%s",
+                "[tofu-multi-eval eval] Phase 1 skipped (OU); Phase 2 (dllm shared) "
+                "include_rouge=%s step=%s — canonical eval_*_loss / _loss_ce / ROUGE "
+                "(matches dllm SFT).",
                 include_rouge,
                 int(getattr(self.state, "global_step", 0) or 0),
             )

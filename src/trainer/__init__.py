@@ -140,6 +140,16 @@ def load_trainer(
     if tofu_multi_eval_runtime is not None and hasattr(
         trainer, "attach_tofu_multi_eval_phase2_runtime"
     ):
+        try:
+            from dllm.core.trainers.tofu_multi_eval_phase2 import (
+                runtime_with_adapter_eval_scheduler,
+            )
+
+            tofu_multi_eval_runtime = runtime_with_adapter_eval_scheduler(
+                tofu_multi_eval_runtime, model
+            )
+        except ImportError:
+            pass
         trainer.attach_tofu_multi_eval_phase2_runtime(tofu_multi_eval_runtime)
     logger.info(
         f"{trainer_handler_name} Trainer loaded, output_dir: {trainer_args.output_dir}"

@@ -33,7 +33,7 @@ class _Tiny(Dataset):
         return {k: v[i].clone() for k, v in self.data.items()}
 
 
-def test_mdlm_style_eval_uses_trainer_evaluate_and_shared_phase2() -> None:
+def test_mdlm_style_eval_skips_ou_phase1_and_uses_shared_phase2() -> None:
     from transformers import AutoModelForCausalLM, AutoTokenizer, GPT2Config
 
     from dllm.core.trainers.tofu_multi_eval_phase2 import (
@@ -94,6 +94,6 @@ def test_mdlm_style_eval_uses_trainer_evaluate_and_shared_phase2() -> None:
     ):
         out = trainer._evaluate_four_way(ds, metric_key_prefix="eval")
 
-    assert phase1_prefixes == ["eval_forget"]
+    assert phase1_prefixes == []
     assert out.metrics.get("eval_forget_loss") == 0.2
     assert out.metrics.get("eval_forget_loss_ce") == 0.3
