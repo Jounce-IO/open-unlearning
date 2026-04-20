@@ -33,6 +33,9 @@ trajectory_config:
   # Declared so Hydra accepts overrides without + (e.g. ablation chunk_max=1).
   # Small value caps packed shifted-CE workspace on large-vocab dLLMs (A100-40).
   trajectory_step_view_batch_chunk_max: 1
+  # Declared so Hydra accepts overrides (dllm smoke --config-file); read in trajectory_metrics.py.
+  golden_token_heatmap_verbose_log: false
+  golden_token_heatmap_verbose_max_samples: 2
   include_views: [full, eos]
   use_generalized_sequence_probability: true
   logit_alignment: causal
