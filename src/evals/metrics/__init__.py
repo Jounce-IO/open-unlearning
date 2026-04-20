@@ -23,6 +23,7 @@ from evals.metrics.utility import (
     classifier_prob,
 )
 from evals.metrics.trajectory_metrics import trajectory_metrics
+from evals.metrics.golden_token_prob_heatmap import golden_token_prob_heatmap
 
 METRICS_REGISTRY: Dict[str, UnlearningMetric] = {}
 
@@ -77,3 +78,4 @@ _register_metric(classifier_prob)
 
 # Register Trajectory metrics
 _register_metric(trajectory_metrics)
+_register_metric(golden_token_prob_heatmap)

@@ -12,7 +12,7 @@ from evals.metrics.trajectory_pass_binding import (
 
 
 def test_display_metric_binding_count():
-    assert len(DISPLAY_METRIC_BINDING) == 7
+    assert len(DISPLAY_METRIC_BINDING) == 8
 
 
 def test_hm_aggregate_submetric_binding_count():
@@ -65,6 +65,12 @@ def test_all_canonical_eight_pass_specs_exist():
 def test_forget_guided_skew_mode():
     s = get_pass_spec("forget__guided_skew")
     assert s.evaluation_mode == "guided_skew"
+
+
+def test_forget_guided_native_includes_golden_token_heatmap():
+    s = get_pass_spec("forget__guided_native")
+    assert "golden_token_prob_heatmap" in s.internal_metric_keys
+    assert "trajectory_forget_golden_token_prob_heatmap" in s.display_names_emitted
 
 
 def test_implemented_pass_specs_are_subset_of_canonical_twelve():
