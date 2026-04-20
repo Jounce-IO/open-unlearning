@@ -385,6 +385,7 @@ class FinetuneTrainer(Trainer):
             ce_loss_sum = 0.0
             ce_n = 0
             self.model.eval()
+            ce_generator = None
             for batch in dataloader:
                 batch = self._prepare_inputs(batch)
                 with torch.no_grad():
@@ -414,6 +415,11 @@ class FinetuneTrainer(Trainer):
                                 and proc is not None
                                 and getattr(proc, "mask_token_id", None) is not None
                             ):
+                                if ce_generator is None:
+                                    ce_generator = torch.Generator(
+                                        device=batch["input_ids"].device
+                                    )
+                                    ce_generator.manual_seed(42)
                                 ce = compute_masked_ce_eval_loss(
                                     inner,
                                     batch,
@@ -435,6 +441,7 @@ class FinetuneTrainer(Trainer):
                                             adapter, "loss_weight_type", "scheduler"
                                         )
                                     ),
+                                    ce_generator=ce_generator,
                                 )
                                 ce_loss_sum += ce.item() * batch["input_ids"].size(0)
                                 ce_n += batch["input_ids"].size(0)
