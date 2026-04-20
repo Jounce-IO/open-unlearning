@@ -61,7 +61,10 @@ from evals.metrics.trajectory_adapters import (
     DualLogitModelWrapper,
 )
 from evals.metrics.mia.utils import get_attacker, MIAStreamingAccumulator
-from evals.metrics.golden_token_prob_heatmap import GoldenTokenHeatmapAccumulator
+from evals.metrics.golden_token_prob_heatmap import (
+    GoldenTokenHeatmapAccumulator,
+    log_golden_token_heatmap_sample_diagnostics,
+)
 from evals.gpu_phase_logger import set_phase as gpu_set_phase
 from evals.guardrails import (
     load_icul_pools,
@@ -5482,6 +5485,33 @@ def trajectory_metrics(model, **kwargs):
                                         ignore_index=IGNORE_INDEX,
                                         L_eff=int(L_eff_b),
                                     )
+                                    if bool(
+                                        trajectory_config.get(
+                                            "golden_token_heatmap_verbose_log", False
+                                        )
+                                    ):
+                                        _hm_dbg_n = int(
+                                            trajectory_config.get(
+                                                "golden_token_heatmap_verbose_max_samples", 2
+                                            )
+                                        )
+                                        if sample_idx < _hm_dbg_n:
+                                            log_golden_token_heatmap_sample_diagnostics(
+                                                sample_idx=sample_idx,
+                                                idx_str=idx_str,
+                                                traj_name=traj_name,
+                                                logits_by_step=logits_hm,
+                                                gen_labels=gl_hm,
+                                                steps_to_use=steps_to_use,
+                                                logit_alignment=str(
+                                                    trajectory_config.get(
+                                                        "logit_alignment", "causal"
+                                                    )
+                                                ),
+                                                ignore_index=IGNORE_INDEX,
+                                                L_gen=L,
+                                                L_eff=int(L_eff_b),
+                                            )
                                 finally:
                                     del logits_hm
                             del logits_by_step
