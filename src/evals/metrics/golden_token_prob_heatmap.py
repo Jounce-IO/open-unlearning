@@ -38,6 +38,25 @@ def _logit_column_for_alignment(ell: int, *, logit_alignment: str) -> int:
     )
 
 
+def _fixation_commit_fields(
+    ell: int,
+    report_step: int,
+    gold: int,
+    fixation_indices_gen: Optional[torch.Tensor],
+    committed_gen_ids: Optional[torch.Tensor],
+) -> tuple[Optional[int], Optional[bool], Optional[int], Optional[bool]]:
+    """Return (F_ell, fixed_by_report, commit_id, post_fix_commit_eq_gold) or Nones if data missing."""
+    if fixation_indices_gen is None or committed_gen_ids is None:
+        return None, None, None, None
+    if ell >= fixation_indices_gen.numel() or ell >= committed_gen_ids.numel():
+        return None, None, None, None
+    f_ell = int(fixation_indices_gen[ell].item())
+    comm = int(committed_gen_ids[ell].item())
+    fixed_by = bool(int(report_step) >= f_ell)
+    post_eq: Optional[bool] = bool(comm == gold) if fixed_by else None
+    return f_ell, fixed_by, comm, post_eq
+
+
 def log_golden_token_heatmap_sample_diagnostics(
     *,
     sample_idx: int,
@@ -50,8 +69,17 @@ def log_golden_token_heatmap_sample_diagnostics(
     ignore_index: int,
     L_gen: int,
     L_eff: int,
+    fixation_indices_gen: Optional[torch.Tensor] = None,
+    committed_gen_ids: Optional[torch.Tensor] = None,
 ) -> None:
     """Verbose INFO logs: softmax mass on gold vs entropy, key token indices, duplicate logit columns.
+
+    When ``fixation_indices_gen`` and ``committed_gen_ids`` are set (length ``L_gen``, generation
+    coordinates), each line adds fixation step ``F[ell]`` and whether ``report_step >= F[ell]``.
+    ``committed_gen_ids[ell]`` is the **final** sampler ``sequences`` slice in the gen window
+    (same geometry as ``gen_labels``); when the position is already fixed at ``report_step``,
+    we log ``post_fix_commit_eq_gold`` comparing that committed id to ``gold`` (not per-step
+    ``input_ids``, which are not retained on this code path).
 
     Intended for K8s / short runs when ``trajectory_config.golden_token_heatmap_verbose_log`` is true.
     """
@@ -93,6 +121,15 @@ def log_golden_token_heatmap_sample_diagnostics(
                 traj_name,
                 li0,
             )
+    if fixation_indices_gen is not None and committed_gen_ids is not None:
+        logger.info(
+            "[GOLDEN_HM_DIAG] fixation_commit_note sample=%s idx=%s traj=%s "
+            "F=per-gen-position fixation diffusion index; commit_id=final_sequences[gen_slice][ell]; "
+            "post_fix_commit_eq_gold only when report_step>=F[ell]",
+            sample_idx,
+            idx_str,
+            traj_name,
+        )
 
     for st in picked_steps:
         sl = logits_by_step.get(int(st))
@@ -139,18 +176,41 @@ def log_golden_token_heatmap_sample_diagnostics(
             ent = float((-(dist * (dist.clamp_min(1e-30)).log())).sum().item())
             top_i = int(torch.argmax(dist).item())
             p_top = float(dist[top_i].item())
-            logger.info(
-                "[GOLDEN_HM_DIAG]   ell=%s gold=%s logit_col=%s p_gold=%.6f H_softmax=%.4f "
-                "top1_id=%s p_top1=%.6f top1_eq_gold=%s",
-                ell,
-                y,
-                li,
-                p_gold,
-                ent,
-                top_i,
-                p_top,
-                str(top_i == y),
+            f_ell, fixed_by, comm, post_eq = _fixation_commit_fields(
+                ell, int(st), y, fixation_indices_gen, committed_gen_ids
             )
+            if f_ell is None:
+                logger.info(
+                    "[GOLDEN_HM_DIAG]   ell=%s gold=%s logit_col=%s p_gold=%.6f H_softmax=%.4f "
+                    "top1_id=%s p_top1=%.6f top1_eq_gold=%s",
+                    ell,
+                    y,
+                    li,
+                    p_gold,
+                    ent,
+                    top_i,
+                    p_top,
+                    str(top_i == y),
+                )
+            else:
+                pe_s = "n/a" if post_eq is None else str(post_eq)
+                logger.info(
+                    "[GOLDEN_HM_DIAG]   ell=%s gold=%s logit_col=%s p_gold=%.6f H_softmax=%.4f "
+                    "top1_id=%s p_top1=%.6f top1_eq_gold=%s F_ell=%s fixed_by_report=%s "
+                    "commit_id_final=%s post_fix_commit_eq_gold=%s",
+                    ell,
+                    y,
+                    li,
+                    p_gold,
+                    ent,
+                    top_i,
+                    p_top,
+                    str(top_i == y),
+                    f_ell,
+                    fixed_by,
+                    comm,
+                    pe_s,
+                )
 
     # Per-step summary on **steps** traj only: mean p_gold and mean entropy over valid ells (first reporting step)
     if traj_name == "steps" and picked_steps:
@@ -184,6 +244,37 @@ def log_golden_token_heatmap_sample_diagnostics(
                     float(np.max(p_list)),
                     float(np.mean(h_list)),
                 )
+                if fixation_indices_gen is not None and committed_gen_ids is not None:
+                    n_chk = 0
+                    n_ok = 0
+                    n_bad = 0
+                    for ell in range(Lc0):
+                        y = int(gl[ell].item())
+                        if y == ignore_index or y < 0 or y >= int(sl0.shape[0]):
+                            continue
+                        _f, fixed_by, _c, post_eq = _fixation_commit_fields(
+                            ell,
+                            int(st0),
+                            y,
+                            fixation_indices_gen,
+                            committed_gen_ids,
+                        )
+                        if fixed_by and post_eq is not None:
+                            n_chk += 1
+                            if post_eq:
+                                n_ok += 1
+                            else:
+                                n_bad += 1
+                    logger.info(
+                        "[GOLDEN_HM_DIAG] fixation_commit_summary sample=%s idx=%s traj=steps report_step=%s "
+                        "fixed_positions_checked=%s commit_eq_gold=%s commit_ne_gold=%s",
+                        sample_idx,
+                        idx_str,
+                        st0,
+                        n_chk,
+                        n_ok,
+                        n_bad,
+                    )
 
 
 def compute_golden_token_prob_heatmap_row(

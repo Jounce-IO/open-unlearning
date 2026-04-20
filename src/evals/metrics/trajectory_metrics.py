@@ -5496,6 +5496,27 @@ def trajectory_metrics(model, **kwargs):
                                             )
                                         )
                                         if sample_idx < _hm_dbg_n:
+                                            _F_dbg = sample_traj["F"]
+                                            if _F_dbg.dim() > 1:
+                                                _F_dbg = _F_dbg.reshape(-1)
+                                            _F_dbg = _F_dbg[:L].contiguous()
+                                            _committed_dbg: Optional[torch.Tensor] = None
+                                            if (
+                                                sequences is not None
+                                                and sequences.dim() >= 2
+                                            ):
+                                                _pl_raw = prompt_lens[sample_idx]
+                                                _pl_i = (
+                                                    int(_pl_raw.item())
+                                                    if torch.is_tensor(_pl_raw)
+                                                    else int(_pl_raw)
+                                                )
+                                                _seq_row = sequences[sample_idx]
+                                                _cg = _seq_row[
+                                                    _pl_i : _pl_i + L
+                                                ].detach().long()
+                                                if _cg.numel() >= L:
+                                                    _committed_dbg = _cg[:L].contiguous()
                                             log_golden_token_heatmap_sample_diagnostics(
                                                 sample_idx=sample_idx,
                                                 idx_str=idx_str,
@@ -5511,6 +5532,10 @@ def trajectory_metrics(model, **kwargs):
                                                 ignore_index=IGNORE_INDEX,
                                                 L_gen=L,
                                                 L_eff=int(L_eff_b),
+                                                fixation_indices_gen=_F_dbg
+                                                if _F_dbg.numel() == L
+                                                else None,
+                                                committed_gen_ids=_committed_dbg,
                                             )
                                 finally:
                                     del logits_hm

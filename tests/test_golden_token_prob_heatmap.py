@@ -74,6 +74,33 @@ def test_verbose_diag_runs_without_error():
     )
 
 
+def test_verbose_diag_with_fixation_and_commit_runs():
+    """Optional fixation + final commit slice: exercise logging path (no assert on log text)."""
+    V, L = 8, 6
+    logits_by_step = {
+        0: torch.randn(V, L),
+        1: torch.randn(V, L),
+        2: torch.randn(V, L),
+    }
+    labels = torch.tensor([1, 2, 3, 4, 5, 0], dtype=torch.long)
+    F = torch.tensor([0, 1, 1, 2, 2, 2], dtype=torch.long)
+    committed = torch.tensor([1, 2, 9, 4, 5, 0], dtype=torch.long)
+    log_golden_token_heatmap_sample_diagnostics(
+        sample_idx=0,
+        idx_str="0",
+        traj_name="steps",
+        logits_by_step=logits_by_step,
+        gen_labels=labels,
+        steps_to_use=[0, 1, 2],
+        logit_alignment="causal",
+        ignore_index=IGNORE_INDEX,
+        L_gen=L,
+        L_eff=4,
+        fixation_indices_gen=F,
+        committed_gen_ids=committed,
+    )
+
+
 def test_ignore_index_skips_positions():
     logits = torch.zeros(3, 4, dtype=torch.float32)
     logits[1, :] = 3.0
