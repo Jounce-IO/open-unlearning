@@ -10,6 +10,7 @@ import torch
 from evals.metrics.golden_token_prob_heatmap import (
     GoldenTokenHeatmapAccumulator,
     compute_golden_token_prob_heatmap_row,
+    log_golden_token_heatmap_sample_diagnostics,
 )
 from evals.metrics.utils import IGNORE_INDEX
 
@@ -49,6 +50,28 @@ def test_same_position_uses_current_column():
         ignore_index=IGNORE_INDEX,
     )
     assert row[1] > 0.95
+
+
+def test_verbose_diag_runs_without_error():
+    V, L = 8, 6
+    logits_by_step = {
+        0: torch.randn(V, L),
+        1: torch.randn(V, L),
+        2: torch.randn(V, L),
+    }
+    labels = torch.tensor([1, 2, 3, 4, 5, 0], dtype=torch.long)
+    log_golden_token_heatmap_sample_diagnostics(
+        sample_idx=0,
+        idx_str="0",
+        traj_name="steps",
+        logits_by_step=logits_by_step,
+        gen_labels=labels,
+        steps_to_use=[0, 1, 2],
+        logit_alignment="causal",
+        ignore_index=IGNORE_INDEX,
+        L_gen=L,
+        L_eff=4,
+    )
 
 
 def test_ignore_index_skips_positions():
