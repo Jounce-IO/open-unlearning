@@ -1,0 +1,72 @@
+# @package eval.tofu_trajectory.metrics.trajectory_pass_forget_guided_native
+# Single inference pass: forget split, guided_native (OU-aligned gold-scored legs, no ROUGE).
+defaults:
+  - ../../data/datasets@datasets: TOFU_QA_forget
+  - ../../collator@collators: DataCollatorForSupervisedDatasetwithIndex
+
+handler: trajectory_metrics
+batch_size: 1
+sort_by_length: true
+trajectory_pass_id: forget__guided_native
+metrics:
+  probability: {}
+  extraction_strength: {}
+  truth_ratio:
+    aggregator: closer_to_1_better
+    pre_compute:
+      correct:
+        handler: probability
+        access_key: correct
+        labels_field: labels_correct
+      wrong:
+        handler: probability
+        access_key: wrong
+        labels_field: labels_wrong
+  golden_token_prob_heatmap: {}
+trajectory_config:
+  evaluation_mode: guided_native
+  logits_source: sampler
+  return_logits: true
+  return_fixation_steps: true
+  trajectory_step_prefetch_max_steps: 4
+  trajectory_logits_storage: list_history
+  # Declared so Hydra accepts overrides without + (e.g. ablation chunk_max=1).
+  # Small value caps packed shifted-CE workspace on large-vocab dLLMs (A100-40).
+  trajectory_step_view_batch_chunk_max: 1
+  # Declared so Hydra accepts overrides (dllm smoke --config-file); read in trajectory_metrics.py.
+  golden_token_heatmap_verbose_log: false
+  golden_token_heatmap_verbose_max_samples: 2
+  include_views: [full, eos]
+  use_generalized_sequence_probability: true
+  logit_alignment: causal
+  metric_worker_pool_size: 8
+  sampler_kwargs:
+    steps: 50
+    temperature: 0.0
+    max_new_tokens: 200
+    trajectory_sample_interval: 8
+metric_display_names:
+  - trajectory_forget_Q_A_Prob
+  - trajectory_extraction_strength
+  - trajectory_forget_Truth_Ratio
+  - trajectory_forget_golden_token_prob_heatmap
+datasets:
+  TOFU_QA_forget:
+    access_key: forget
+    handler: QAwithDualAnswersDataset
+    args:
+      hf_args:
+        name: ${eval.tofu_trajectory.forget_split}_perturbed
+        split: train
+        path: locuslab/TOFU
+      question_key: ${eval.tofu_trajectory.question_key}
+      correct_answer_key: paraphrased_answer
+      wrong_answer_key: perturbed_answer
+      max_length: 512
+      predict_with_generate: true
+collators:
+  DataCollatorForSupervisedDataset:
+    args:
+      padding_side: left
+generation_args:
+  max_new_tokens: 200

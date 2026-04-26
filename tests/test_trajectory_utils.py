@@ -1205,6 +1205,37 @@ class TestTrajectoriesFromLogits:
         for key in ("steps", "fixation_start", "fixation_end", "fixation_ratio"):
             assert key not in out
 
+    def test_list_history_matches_stacked_R_per_step(self):
+        """``output_layout=list_history`` keeps per-step [B,L,V] tensors equivalent to dense ``R`` slices."""
+        B, V, L_full, S = 2, 16, 20, 6
+        max_prompt_len = 4
+        logits_history = [torch.randn(B, L_full, V) for _ in range(S)]
+        fixation_steps = torch.randint(0, S, (B, L_full))
+        prompt_lens = [max_prompt_len, max_prompt_len]
+        out_dense = trajectories_from_logits(
+            logits_history,
+            fixation_steps,
+            prompt_lens,
+            return_trajectory_tensors=False,
+            output_layout="dense_r",
+        )
+        out_list = trajectories_from_logits(
+            logits_history,
+            fixation_steps,
+            prompt_lens,
+            return_trajectory_tensors=False,
+            output_layout="list_history",
+        )
+        R = out_dense["R"]
+        lh = out_list["lh"]
+        assert len(lh) == S
+        L = int(out_dense["L"])
+        assert L == int(out_list["L"])
+        for s in range(S):
+            stacked_step = R[:, :, :, s]
+            list_step = lh[s].transpose(1, 2)
+            assert torch.equal(stacked_step, list_step)
+
     def test_trajectories_from_logits_L_equals_R_second_dim(self):
         """Invariant: out['L'] must equal out['R'].shape[2] for both generated-only and full-sequence branches."""
         # Full-sequence branch: L_logits >= T_fixation

@@ -16,5 +16,8 @@ samples: null  # Limit dataset size; set via CLI (eval.muse_trajectory.samples=N
 overwrite: false
 data_split: News
 retain_logs_path: null
+retain_reference_mode: false
+# False: same sampler pass as capture on, but metrics run only at the final step (009 MUSE unified path).
+trajectory_capture: true
 use_generalized_sequence_probability: true
 logit_alignment: causal

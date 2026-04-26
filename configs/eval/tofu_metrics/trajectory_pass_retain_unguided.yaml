@@ -1,0 +1,48 @@
+# @package eval.tofu_trajectory.metrics.trajectory_pass_retain_unguided
+# Single inference pass: retain split, guidance-free (ROUGE leg).
+defaults:
+  - ../../collator@collators: DataCollatorForSupervisedDatasetwithIndex
+
+handler: trajectory_metrics
+batch_size: 4
+sort_by_length: true
+trajectory_pass_id: retain__unguided
+metrics:
+  rouge:
+    rouge_type: rougeL_recall
+trajectory_config:
+  evaluation_mode: unguided
+  logits_source: sampler
+  return_logits: true
+  return_fixation_steps: true
+  include_views: [full, eos]
+  use_generalized_sequence_probability: true
+  logit_alignment: causal
+  metric_worker_pool_size: 8
+  sampler_kwargs:
+    steps: 50
+    temperature: 0.0
+    max_new_tokens: 200
+    trajectory_sample_interval: 8
+metric_display_names:
+  - trajectory_retain_Q_A_ROUGE
+datasets:
+  TOFU_QA_retain_eval:
+    access_key: retain
+    handler: QAwithDualAnswersDataset
+    args:
+      hf_args:
+        name: retain_perturbed
+        split: train
+        path: locuslab/TOFU
+      question_key: ${eval.tofu_trajectory.question_key}
+      correct_answer_key: paraphrased_answer
+      wrong_answer_key: perturbed_answer
+      max_length: 512
+      predict_with_generate: true
+collators:
+  DataCollatorForSupervisedDataset:
+    args:
+      padding_side: left
+generation_args:
+  max_new_tokens: 200

@@ -3,9 +3,9 @@
 # Note: eval.tofu.forget_split etc come from experiment eval/tofu/default
 
 # Single-pass: one metric entry (trajectory_all) runs trajectory_metrics once for all 7 sub-metrics.
+# Flat default so Hydra can override the metric entry via `tofu_metrics=...` (010 single eval path).
 defaults:
-  - tofu_metrics:
-    - trajectory_all
+  - tofu_metrics: trajectory_all
 
 handler: TOFUEvaluator
 output_dir: ${paths.output_dir}
@@ -22,3 +22,7 @@ batch_size: 32
 # Log parity with non-traj eval; trajectory metrics read trajectory_config.use_generalized_sequence_probability
 use_generalized_sequence_probability: true
 logit_alignment: causal
+# When set, trajectory_metrics filters datasets/submetrics (multi-pass eval). Null = legacy single coalesced pass.
+trajectory_pass_id: null
+# False: same sampler pass as capture on, but metrics run only at the final captured step (008 unified path).
+trajectory_capture: true
