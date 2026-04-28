@@ -58,8 +58,8 @@ class TestHandleTextBasedMetricLogitsShape:
         assert len(decoded_lengths) == 1
         assert decoded_lengths[0] == L
 
-    def test_logits_V_L_wrong_shape_yields_gen_text_length_on_order_of_V(self):
-        """With [V, L] (wrong), argmax(dim=-1) gives V tokens; decoded length is on order of V."""
+    def test_logits_V_L_tall_layout_yields_L_tokens_via_argmax_dim0(self):
+        """Tall 2D logits [V, L] (vocab-major) use argmax(dim=0) → L positions (see _handle_text_based_metric)."""
         L, V = 20, 1000
         logits = torch.randn(V, L)
         tokenizer = Mock()
@@ -89,7 +89,7 @@ class TestHandleTextBasedMetricLogitsShape:
                 rouge_scorer=scorer,
             )
         assert len(decoded_lengths) == 1
-        assert decoded_lengths[0] == V
+        assert decoded_lengths[0] == L
 
     def test_logits_2d_L_V_yields_gen_text_length_L(self):
         """With [L, V] (2D), argmax(dim=-1) gives L tokens."""
