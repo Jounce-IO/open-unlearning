@@ -1,6 +1,6 @@
 import torch
 from typing import Dict, Any
-from omegaconf import DictConfig
+from omegaconf import DictConfig, OmegaConf
 from transformers import Trainer, TrainingArguments
 
 from trainer.base import FinetuneTrainer, _DummyEvalDataset
@@ -65,7 +65,34 @@ def load_trainer(
     # Support both DictConfig and plain dict (e.g. from Hydra composition).
     trainer_args = _get_cfg(trainer_cfg, "args")
     assert trainer_args is not None, "trainer.args is required"
-    method_args = _get_cfg(trainer_cfg, "method_args") or {}
+    _raw_ma = _get_cfg(trainer_cfg, "method_args") or {}
+    if OmegaConf.is_config(_raw_ma):
+        method_args = dict(OmegaConf.to_container(_raw_ma, resolve=True))
+    else:
+        method_args = dict(_raw_ma)
+    # TOFU multi-eval / legacy four-way ROUGE keys are dllm-only; HF Trainer rejects unknown kwargs.
+    tofu_multi_eval_cfg: dict = {}
+    tofu_multi_eval_runtime = None
+    try:
+        from dllm.core.trainers.tofu_multi_eval_phase2 import (
+            build_runtime_from_flat_method_args,
+        )
+        from dllm.utils.tofu_multi_eval_config import (
+            FINETUNE_TOFU_MULTI_EVAL_METHOD_ARG_KEYS,
+            normalize_tofu_multi_eval_flat_dict,
+        )
+
+        for _k in list(method_args.keys()):
+            if _k in FINETUNE_TOFU_MULTI_EVAL_METHOD_ARG_KEYS:
+                tofu_multi_eval_cfg[_k] = method_args[_k]
+        if tofu_multi_eval_cfg:
+            normalize_tofu_multi_eval_flat_dict(tofu_multi_eval_cfg, warn_on_conflict=False)
+        for _k in list(method_args.keys()):
+            if _k in FINETUNE_TOFU_MULTI_EVAL_METHOD_ARG_KEYS:
+                method_args.pop(_k, None)
+        tofu_multi_eval_runtime = build_runtime_from_flat_method_args(tofu_multi_eval_cfg)
+    except ImportError:
+        pass
     # When eval_dataset is None but eval_strategy is not "no", Trainer.__init__ in
     # transformers >= 4.57 raises. We pass a dummy so init succeeds; FinetuneTrainer
     # runs custom evaluators every epoch and never uses the dummy. See _DummyEvalDataset.
@@ -78,7 +105,7 @@ def load_trainer(
             eval_dataset_to_pass = _DummyEvalDataset()
             dummy_substituted = True
             logger.info(
-                "[eval] load_trainer: eval_dataset=None eval_strategy=%s -> passing dummy (four-way will not run)",
+                "[eval] load_trainer: eval_dataset=None eval_strategy=%s -> passing dummy (multi-eval will not run)",
                 eval_strategy,
             )
     if eval_dataset_to_pass is not None and not dummy_substituted:
@@ -110,6 +137,20 @@ def load_trainer(
         template_args=template_args,
         **method_args,
     )
+    if tofu_multi_eval_runtime is not None and hasattr(
+        trainer, "attach_tofu_multi_eval_phase2_runtime"
+    ):
+        try:
+            from dllm.core.trainers.tofu_multi_eval_phase2 import (
+                runtime_with_adapter_eval_scheduler,
+            )
+
+            tofu_multi_eval_runtime = runtime_with_adapter_eval_scheduler(
+                tofu_multi_eval_runtime, model
+            )
+        except ImportError:
+            pass
+        trainer.attach_tofu_multi_eval_phase2_runtime(tofu_multi_eval_runtime)
     logger.info(
         f"{trainer_handler_name} Trainer loaded, output_dir: {trainer_args.output_dir}"
     )

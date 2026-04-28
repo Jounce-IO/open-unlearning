@@ -23,12 +23,43 @@ class QADataset(Dataset):
         few_shot_dataset_hf_args=None,
         max_length=512,
         predict_with_generate=False,
+        match_dllm_sft_eval_rows: bool = False,
     ):
         super(QADataset, self).__init__()
         self.tokenizer = tokenizer
         self.max_length = max_length
-        self.data = load_hf_dataset(**hf_args)
-        self.data = add_dataset_index(self.data)
+        _match_rows = (
+            match_dllm_sft_eval_rows
+            if isinstance(match_dllm_sft_eval_rows, bool)
+            else str(match_dllm_sft_eval_rows).lower().strip() in ("1", "true", "yes", "on")
+        )
+        raw = load_hf_dataset(**hf_args)
+        # dllm ``load_dataset_tofu`` keeps 95% of rows for the exposed ``train`` split (seed=42);
+        # ``dllm.tools.sft`` multi-eval evaluates on that train slice. Without this, OU used the
+        # full HF split → different rows / ROUGE vs vivid SFT checkpoint-31000.
+        if _match_rows:
+            path_l = ""
+            try:
+                from omegaconf import OmegaConf
+
+                if OmegaConf.is_config(hf_args):
+                    path_l = str(OmegaConf.select(hf_args, "path") or "").lower()
+                elif isinstance(hf_args, dict):
+                    path_l = str(hf_args.get("path", "") or "").lower()
+            except Exception:
+                try:
+                    path_l = str(getattr(hf_args, "path", "") or "").lower()
+                except Exception:
+                    path_l = ""
+            if "locuslab/tofu" in path_l and hasattr(raw, "train_test_split"):
+                raw = raw.train_test_split(test_size=0.05, seed=42)["train"]
+            elif _match_rows and "locuslab/tofu" in path_l:
+                logger.warning(
+                    "match_dllm_sft_eval_rows=True but dataset has no train_test_split; "
+                    "using full split (path=%r)",
+                    path_l or hf_args,
+                )
+        self.data = add_dataset_index(raw)
         self.fs_data = None
         if few_shot_dataset_hf_args is not None:
             raw_data = load_hf_dataset(**few_shot_dataset_hf_args)
@@ -88,14 +119,40 @@ class MMLUUtilityDataset(QADataset):
     """MMLU one-subject dataset for utility validation (same format as QADataset: input_ids, labels).
     Loads cais/mmlu (or path/name from hf_args), maps choices[answer] to answer text, first 100 by config.
     Cap at 100 is applied in get_data via _cap_dataset_at_100.
+
+    verbalized_reference (default False for backward compatibility):
+        When True, assistant targets match dllm SFT utility eval (``mmlu_example_to_messages`` with
+        ``verbalized_reference=True``): a full sentence citing the correct letter and choice text.
+        When False, targets are only the raw correct choice string (shorter), which inflates
+        ROUGE-L recall vs verbalized references for the same generations.
     """
-    def __init__(self, hf_args, template_args, tokenizer, question_key="question", answer_key="answer", max_length=512, **kwargs):
+    def __init__(
+        self,
+        hf_args,
+        template_args,
+        tokenizer,
+        question_key="question",
+        answer_key="answer",
+        max_length=512,
+        verbalized_reference: bool = False,
+        **kwargs,
+    ):
         self.tokenizer = tokenizer
         self.max_length = max_length
         self.template_args = template_args
         self.question_key = question_key
         self.answer_key = answer_key
         self.predict_with_generate = kwargs.get("predict_with_generate", False)
+        # Avoid bool("false") == True when Hydra passes a string.
+        if isinstance(verbalized_reference, bool):
+            self.verbalized_reference = verbalized_reference
+        else:
+            self.verbalized_reference = str(verbalized_reference).lower().strip() in (
+                "1",
+                "true",
+                "yes",
+                "on",
+            )
         raw = load_hf_dataset(**hf_args)
         # When split= is in hf_args, load_dataset returns a single Dataset; otherwise DatasetDict.
         if DatasetDict is not None and isinstance(raw, DatasetDict):
@@ -117,8 +174,19 @@ class MMLUUtilityDataset(QADataset):
             ans_idx = row.get(answer_key_raw, 0)
             if isinstance(ans_idx, str):
                 ans_idx = ord(ans_idx.strip().upper()) - ord("A")
-            ans_idx = min(max(0, int(ans_idx)), len(choices) - 1) if choices else ""
-            answer = choices[ans_idx] if isinstance(ans_idx, int) else str(ans_idx)
+            ans_idx_int = min(max(0, int(ans_idx)), len(choices) - 1) if choices else 0
+            if choices:
+                choice_text = (choices[ans_idx_int] or "").strip()
+                letter = chr(ord("A") + ans_idx_int)
+                if self.verbalized_reference and choice_text:
+                    answer = (
+                        f"The correct answer is ({letter}) {choice_text}. "
+                        f"Therefore, option {letter} is the best choice."
+                    )
+                else:
+                    answer = choice_text
+            else:
+                answer = str(ans_idx_int)
             self.data.append({"question": q, "answer": answer, "index": i})
         self.fs_data = None
 

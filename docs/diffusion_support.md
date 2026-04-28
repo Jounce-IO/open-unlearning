@@ -51,6 +51,10 @@ model:
     remasking: "low_confidence"  # Remasking strategy
     max_new_tokens: 128     # Max tokens to generate
     cache_fixation_logits: true  # Cache logits for reuse
+    # Training / unlearn (when diffusion_adapter.training: true); see dllm DiffusionAdapterConfig
+    loss_weight_type: "scheduler"   # scheduler | uniform | inverse_p_mask (LLaDA-style 1/p_mask)
+    loss_normalization_type: "sequence"  # batch | sequence | token
+    time_epsilon: 1.0e-3
 ```
 
 ### Example Configs

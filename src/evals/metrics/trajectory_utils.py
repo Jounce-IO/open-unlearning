@@ -91,7 +91,10 @@ def _slice_logits_history_to_generated(
         F = torch.stack(F_list, dim=0)
         return lh_sliced, F, S, L
 
-    generated_len = T_fixation - max_prompt_len
+    # Full-sequence logits [B, L_full, V]: generated length follows L_full, not fixation width.
+    # When fixation_steps is shorter than logits (padded / partial), pad F; do not use
+    # T_fixation - max_prompt_len (can be negative if T_fixation < max_prompt_len).
+    generated_len = L_logits - max_prompt_len
     L = generated_len
     lh_sliced = []
     for t in logits_history:

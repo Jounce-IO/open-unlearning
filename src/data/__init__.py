@@ -80,37 +80,49 @@ def get_datasets(dataset_cfgs: Union[Dict, DictConfig], **kwargs):
     return dataset
 
 
-# Four-way validation: fixed cap so the same 100 samples are used across runs (first 100 by order).
+# Default max rows per named validation split (first N by order) when ``validation_cap`` is unset.
 VALIDATION_MAX_SAMPLES = 100
 
 
-def _cap_dataset_at_100(dataset: Union[Dataset, Any]) -> Union[Dataset, Any]:
-    """Return a dataset capped at VALIDATION_MAX_SAMPLES (first N by order) for deterministic validation."""
+def _cap_dataset_for_validation(
+    dataset: Union[Dataset, Any], max_samples: int
+) -> Union[Dataset, Any]:
+    """Return ``dataset`` capped at ``max_samples`` (first N by order)."""
+    cap = max(1, int(max_samples))
     try:
         n = len(dataset)
     except TypeError:
         return dataset
-    if n <= VALIDATION_MAX_SAMPLES:
+    if n <= cap:
         return dataset
-    return Subset(dataset, range(VALIDATION_MAX_SAMPLES))
+    return Subset(dataset, range(cap))
+
+
+def _cap_dataset_at_100(dataset: Union[Dataset, Any]) -> Union[Dataset, Any]:
+    """Backward-compatible name: cap at :data:`VALIDATION_MAX_SAMPLES`."""
+    return _cap_dataset_for_validation(dataset, VALIDATION_MAX_SAMPLES)
 
 
 def get_data(data_cfg: DictConfig, mode="train", **kwargs):
     data = {}
     data_cfg = dict(data_cfg)
     anchor = data_cfg.pop("anchor", "forget")
+    val_cap_raw = data_cfg.pop("validation_cap", None)
+    validation_cap = (
+        int(val_cap_raw) if val_cap_raw is not None else VALIDATION_MAX_SAMPLES
+    )
     validation_splits_cfg = data_cfg.pop("validation_splits", None)
-    # Log for four-way debugging: presence of validation_splits in config
     if validation_splits_cfg is not None:
         validation_keys = list(validation_splits_cfg.keys())
         logger.info(
-            "[eval] get_data: mode=%s validation_splits=present keys=%s",
+            "[eval] get_data: mode=%s validation_splits=present keys=%s validation_cap=%s",
             mode,
             validation_keys,
+            validation_cap,
         )
     else:
         logger.info(
-            "[eval] get_data: mode=%s validation_splits=missing (four-way will be disabled if mode=unlearn)",
+            "[eval] get_data: mode=%s validation_splits=missing (multi-eval off if mode=unlearn)",
             mode,
         )
     for split, dataset_cfgs in data_cfg.items():
@@ -119,7 +131,7 @@ def get_data(data_cfg: DictConfig, mode="train", **kwargs):
         eval_dict = {}
         for name, dataset_cfgs in validation_splits_cfg.items():
             ds = get_datasets(dataset_cfgs, **kwargs)
-            eval_dict[name] = _cap_dataset_at_100(ds)
+            eval_dict[name] = _cap_dataset_for_validation(ds, validation_cap)
         data["eval_dataset"] = eval_dict
         logger.info(
             "[eval] get_data: train mode built eval_dataset keys=%s lengths=%s",
@@ -136,10 +148,10 @@ def get_data(data_cfg: DictConfig, mode="train", **kwargs):
             eval_dict = {}
             for name, dataset_cfgs in validation_splits_cfg.items():
                 ds = get_datasets(dataset_cfgs, **kwargs)
-                eval_dict[name] = _cap_dataset_at_100(ds)
+                eval_dict[name] = _cap_dataset_for_validation(ds, validation_cap)
             data["eval_dataset"] = eval_dict
             logger.info(
-                "[eval] get_data: unlearn mode built four-way eval_dataset keys=%s lengths=%s",
+                "[eval] get_data: unlearn mode built multi-eval eval_dataset keys=%s lengths=%s",
                 list(eval_dict.keys()),
                 {k: len(v) for k, v in eval_dict.items()},
             )
