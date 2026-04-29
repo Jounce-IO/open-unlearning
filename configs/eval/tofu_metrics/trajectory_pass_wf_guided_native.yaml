@@ -4,7 +4,7 @@ defaults:
   - ../../collator@collators: DataCollatorForSupervisedDatasetwithIndex
 
 handler: trajectory_metrics
-batch_size: 4
+batch_size: 2
 sort_by_length: true
 trajectory_pass_id: wf__guided_native
 metrics:
@@ -28,7 +28,7 @@ trajectory_config:
   return_fixation_steps: true
   trajectory_step_prefetch_max_steps: 16
   trajectory_logits_storage: dense_r
-  trajectory_step_view_batch_chunk_max: 32
+  trajectory_step_view_batch_chunk_max: 16
   include_views: [full, eos]
   use_generalized_sequence_probability: true
   logit_alignment: causal
