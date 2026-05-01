@@ -26,6 +26,9 @@ from evals.metrics.trajectory_utils import (
     compute_fixation_start_trajectory,
     compute_fixation_end_trajectory,
     compute_fixation_ratio_trajectory,
+    compute_fixation_start_from_history,
+    compute_fixation_end_from_history,
+    compute_fixation_ratio_from_history,
     trajectories_from_logits,
     effective_lengths_from_eos,
     extract_logits_at_step,
@@ -139,7 +142,34 @@ class TestStackLogitsHistory:
 
 class TestComputeTrajectories:
     """Tests for compute_trajectories function."""
-    
+
+    def test_fixation_variants_identical_logits_at_terminal_trajectory_step(self):
+        """At trajectory index S-1, start/end/ratio index the same diffusion step per position."""
+        V, L, S = 11, 9, 10
+        torch.manual_seed(42)
+        R = torch.randn(V, L, S)
+        F = torch.randint(0, S, (L,))
+        last = S - 1
+        a = compute_fixation_start_trajectory(R, last, F)
+        b = compute_fixation_end_trajectory(R, last, F)
+        c = compute_fixation_ratio_trajectory(R, last, F)
+        assert torch.allclose(a, b)
+        assert torch.allclose(a, c)
+
+    def test_fixation_from_history_matches_dense_at_terminal_step(self):
+        B, V, L, S = 1, 13, 7, 8
+        torch.manual_seed(7)
+        lh = [torch.randn(B, L, V) for _ in range(S)]
+        R = stack_logits_history(lh).squeeze(0)
+        F = torch.randint(0, S, (L,))
+        last = S - 1
+        h0 = compute_fixation_start_from_history(lh, 0, last, F, S)
+        h1 = compute_fixation_end_from_history(lh, 0, last, F, S)
+        h2 = compute_fixation_ratio_from_history(lh, 0, last, F, S)
+        assert torch.allclose(h0, h1) and torch.allclose(h0, h2)
+        d0 = compute_fixation_start_trajectory(R, last, F)
+        assert torch.allclose(h0, d0)
+
     def test_steps_trajectory_is_copy(self):
         """Test that T_steps is a direct copy of R."""
         V, L, S = 100, 20, 10

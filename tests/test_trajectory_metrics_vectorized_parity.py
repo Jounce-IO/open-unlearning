@@ -279,6 +279,186 @@ def test_post_loop_rouge_append_order_b2_executor_none() -> None:
     assert all(isinstance(x, (int, float, np.number)) for x in vals)
 
 
+def test_post_loop_rouge_terminal_sampler_sequences_unifies_trajectories() -> None:
+    """At step S-1 with ``sequences`` set, all trajectory types share one decode (committed tokens)."""
+    from evals.metrics.trajectory_metrics import _trajectory_append_post_loop_rouge
+
+    try:
+        from transformers import AutoTokenizer
+
+        tok = AutoTokenizer.from_pretrained("gpt2")
+    except Exception:
+        pytest.skip("gpt2 tokenizer unavailable")
+
+    B, V, L, S = 1, tok.vocab_size, 3, 2
+    tok_a = min(80, V - 1)
+    tok_b = min(81, V - 1)
+    if tok_a == tok_b:
+        pytest.skip("need two distinct token ids")
+
+    R = torch.full((B, V, L, S), -30.0)
+    R[:, tok_a, :, 1] = 30.0
+    R[:, tok_b, 0, 0] = 30.0
+    F = torch.tensor([[0, 1, 1]], dtype=torch.long)
+    pl = 1
+    seq_row = torch.full((pl + L,), tok_b, dtype=torch.long)
+    seq_row[:pl] = 0
+    sequences = seq_row.unsqueeze(0)
+
+    steps_to_use = [S - 1]
+    loaded_metrics = {
+        "rouge": {"metric": METRICS_REGISTRY["rouge"], "config": {"rouge_type": "rougeL_f1"}}
+    }
+    metrics_to_run = ["rouge"]
+    step_values_by_view = {
+        "full": {"steps": {}, "fixation_start": {}},
+    }
+    labels = torch.full((B, pl + L), -100)
+    labels[:, pl:] = torch.randint(0, min(200, V), (B, L))
+    input_ids = torch.zeros((B, pl + L), dtype=torch.long)
+    batch = {"input_ids": input_ids, "labels": labels}
+    indices = torch.arange(B)
+    prompt_starts = [pl] * B
+    prompt_lens = [pl] * B
+
+    _trajectory_append_post_loop_rouge(
+        trajectory_names=["steps", "fixation_start"],
+        steps_to_use=steps_to_use,
+        include_views=["full"],
+        R=R,
+        lh=None,
+        F=F,
+        S=S,
+        L=L,
+        B=B,
+        effective_lengths=[L] * B,
+        labels=labels,
+        input_ids=input_ids,
+        batch=batch,
+        indices=indices,
+        prompt_starts=prompt_starts,
+        prompt_lens=prompt_lens,
+        prompt_only_input_ids=False,
+        tokenizer=tok,
+        metrics_to_run=metrics_to_run,
+        loaded_metrics=loaded_metrics,
+        step_values_by_view=step_values_by_view,
+        executor=None,
+        all_rouge_futures=[],
+        kwargs={"rouge_type": "rougeL_f1"},
+        sequences=sequences,
+        trajectory_config=None,
+    )
+
+    assert step_values_by_view["full"]["steps"][S - 1]["rouge"] == step_values_by_view["full"][
+        "fixation_start"
+    ][S - 1]["rouge"]
+
+    from evals.metrics.trajectory_metrics import (
+        _trajectory_decode_prediction_for_rouge,
+        _trajectory_logits_vl_at_step,
+    )
+
+    lv_steps = _trajectory_logits_vl_at_step(R[0], F[0], S, L, "steps", S - 1)
+    lv_fix = _trajectory_logits_vl_at_step(R[0], F[0], S, L, "fixation_start", S - 1)
+    assert _trajectory_decode_prediction_for_rouge(tok, lv_steps, "full", L) != _trajectory_decode_prediction_for_rouge(
+        tok, lv_fix, "full", L
+    )
+
+
+def test_post_loop_rouge_fixation_triplet_terminal_identical_steps_differs_under_logits_argmax() -> None:
+    """Fixation views share terminal logits; ``steps`` uses R[:,:,S-1] only (may differ).
+
+    With ``rouge_terminal_decode: logits_argmax``, terminal ROUGE ignores ``sequences`` and
+    decodes from stored logits — fixation_start / fixation_end / fixation_ratio must agree
+    at s=S-1 by construction, while ``steps`` may disagree (expected).
+    """
+    from evals.metrics.trajectory_metrics import _trajectory_append_post_loop_rouge
+
+    try:
+        from transformers import AutoTokenizer
+
+        tok = AutoTokenizer.from_pretrained("gpt2")
+    except Exception:
+        pytest.skip("gpt2 tokenizer unavailable")
+
+    B, V, L, S = 2, tok.vocab_size, 5, 4
+    tok_a = min(80, V - 1)
+    tok_b = min(81, V - 1)
+    if tok_a == tok_b:
+        pytest.skip("need two distinct token ids")
+    # Steps @ s=S-1: argmax tok_a everywhere. Fixation @ s=S-1: pos0 from diffusion step 0 → tok_b.
+    R = torch.full((B, V, L, S), -30.0)
+    R[:, tok_a, :, S - 1] = 30.0
+    R[:, tok_b, 0, 0] = 30.0
+    F = torch.tensor([[0, 1, 1, 1, 1], [0, 1, 1, 1, 1]], dtype=torch.long)
+    pl = 2
+    sequences = torch.randint(0, min(300, V), (B, pl + L), dtype=torch.long)
+
+    steps_to_use = [S - 1]
+    loaded_metrics = {
+        "rouge": {"metric": METRICS_REGISTRY["rouge"], "config": {"rouge_type": "rougeL_f1"}}
+    }
+    metrics_to_run = ["rouge"]
+    traj_keys = ["steps", "fixation_start", "fixation_end", "fixation_ratio"]
+    step_values_by_view = {"full": {k: {} for k in traj_keys}}
+
+    labels = torch.full((B, pl + L), -100)
+    labels[:, pl:] = torch.randint(0, min(250, V), (B, L))
+    input_ids = torch.zeros((B, pl + L), dtype=torch.long)
+    batch = {"input_ids": input_ids, "labels": labels}
+    indices = torch.arange(B)
+    prompt_starts = [pl] * B
+    prompt_lens = [pl] * B
+
+    _trajectory_append_post_loop_rouge(
+        trajectory_names=traj_keys,
+        steps_to_use=steps_to_use,
+        include_views=["full"],
+        R=R,
+        lh=None,
+        F=F,
+        S=S,
+        L=L,
+        B=B,
+        effective_lengths=[L] * B,
+        labels=labels,
+        input_ids=input_ids,
+        batch=batch,
+        indices=indices,
+        prompt_starts=prompt_starts,
+        prompt_lens=prompt_lens,
+        prompt_only_input_ids=False,
+        tokenizer=tok,
+        metrics_to_run=metrics_to_run,
+        loaded_metrics=loaded_metrics,
+        step_values_by_view=step_values_by_view,
+        executor=None,
+        all_rouge_futures=[],
+        kwargs={"rouge_type": "rougeL_f1"},
+        sequences=sequences,
+        trajectory_config={"rouge_terminal_decode": "logits_argmax"},
+    )
+
+    last = S - 1
+    fs = step_values_by_view["full"]["fixation_start"][last]["rouge"]
+    fe = step_values_by_view["full"]["fixation_end"][last]["rouge"]
+    fr = step_values_by_view["full"]["fixation_ratio"][last]["rouge"]
+    assert fs == fe == fr
+
+    from evals.metrics.trajectory_metrics import (
+        _trajectory_decode_prediction_for_rouge,
+        _trajectory_logits_vl_at_step,
+    )
+
+    for b in range(B):
+        lv_s = _trajectory_logits_vl_at_step(R[b], F[b], S, L, "steps", last)
+        lv_f0 = _trajectory_logits_vl_at_step(R[b], F[b], S, L, "fixation_start", last)
+        assert _trajectory_decode_prediction_for_rouge(tok, lv_s, "full", L) != _trajectory_decode_prediction_for_rouge(
+            tok, lv_f0, "full", L
+        )
+
+
 def test_batch_rouge_decode_matches_per_row_decode() -> None:
     from evals.metrics.trajectory_metrics import (
         _trajectory_batch_decode_predictions_for_rouge,

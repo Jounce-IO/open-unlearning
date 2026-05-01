@@ -920,6 +920,50 @@ def _trajectory_batch_decode_predictions_for_rouge(
     ]
 
 
+def _trajectory_gen_texts_from_sampler_sequences(
+    *,
+    sequences: torch.Tensor,
+    prompt_lens: Sequence[Any],
+    L: int,
+    effective_lengths: Sequence[int],
+    view: str,
+    tokenizer: Any,
+) -> List[str]:
+    """Decode the generated span from sampler ``sequences`` (committed tokens).
+
+    Matches :func:`evals.metrics.utils.eval_text_similarity` decode flags so trajectory
+    terminal ROUGE aligns with non-trajectory ``forget_Q_A_ROUGE`` (``model.generate``).
+    """
+    B = int(sequences.shape[0])
+    token_rows: list[list[int]] = []
+    for b in range(B):
+        pl_raw = prompt_lens[b]
+        pl = int(pl_raw.item()) if torch.is_tensor(pl_raw) else int(pl_raw)
+        row = sequences[b, pl : pl + L].detach().long()
+        ids = row.tolist()
+        if view == "eos":
+            n = min(int(effective_lengths[b]), len(ids))
+            ids = ids[:n]
+        token_rows.append(ids)
+    batch_decode = getattr(tokenizer, "batch_decode", None)
+    if callable(batch_decode):
+        return list(
+            batch_decode(
+                token_rows,
+                skip_special_tokens=True,
+                clean_up_tokenization_spaces=True,
+            )
+        )
+    return [
+        tokenizer.decode(
+            ids,
+            skip_special_tokens=True,
+            clean_up_tokenization_spaces=True,
+        )
+        for ids in token_rows
+    ]
+
+
 def _trajectory_exact_mem_post_loop_metric_names(
     *,
     metrics_to_run: List[str],
@@ -1004,6 +1048,8 @@ def _trajectory_append_post_loop_rouge(
     executor: Optional[ProcessPoolExecutor],
     all_rouge_futures: List[Any],
     kwargs: Dict[str, Any],
+    sequences: Optional[torch.Tensor] = None,
+    trajectory_config: Optional[Any] = None,
 ) -> None:
     """Gather gen/gt strings across ``B`` per (traj, step, view); append ROUGE like probability post-loop."""
     rouge_metrics_in_run = [
@@ -1014,9 +1060,102 @@ def _trajectory_append_post_loop_rouge(
     rouge_scorer_batch = rouge_scorer.RougeScorer(["rouge1", "rougeL"], use_stemmer=True)
     if (R is None) == (lh is None):
         raise ValueError("post-loop ROUGE: exactly one of R or lh must be set")
-    for traj_name in trajectory_names:
-        for step in steps_to_use:
-            for view in include_views:
+
+    def _rouge_terminal_decode_sampler_sequence() -> bool:
+        if sequences is None or not isinstance(sequences, torch.Tensor) or sequences.dim() < 2:
+            return False
+        cfg = (
+            trajectory_config
+            if trajectory_config is not None
+            else kwargs.get("trajectory_config")
+        )
+        if cfg is None:
+            return True
+        if OmegaConf.is_config(cfg):
+            mode = OmegaConf.select(cfg, "rouge_terminal_decode", default="sampler_sequence")
+        elif isinstance(cfg, dict):
+            mode = cfg.get("rouge_terminal_decode", "sampler_sequence")
+        else:
+            mode = getattr(cfg, "rouge_terminal_decode", "sampler_sequence")
+        return str(mode).lower() != "logits_argmax"
+
+    use_sampler_terminal = _rouge_terminal_decode_sampler_sequence()
+
+    for step in steps_to_use:
+        for view in include_views:
+            terminal_sampler = (
+                use_sampler_terminal and int(step) == S - 1 and sequences is not None
+            )
+            ground_truths: List[str] = []
+            for b in range(B):
+                _, gt_str, _ = _trajectory_build_sample_batch_template(
+                    b,
+                    batch,
+                    labels,
+                    input_ids,
+                    indices,
+                    prompt_starts,
+                    prompt_lens,
+                    L,
+                    prompt_only_input_ids,
+                    tokenizer,
+                )
+                ground_truths.append(gt_str)
+
+            if terminal_sampler:
+                assert sequences is not None
+                gen_texts = _trajectory_gen_texts_from_sampler_sequences(
+                    sequences=sequences,
+                    prompt_lens=prompt_lens,
+                    L=L,
+                    effective_lengths=effective_lengths,
+                    view=view,
+                    tokenizer=tokenizer,
+                )
+                if executor is None:
+                    scores = eval_rouge_recall_batch(
+                        gen_texts,
+                        ground_truths,
+                        use_stemmer=True,
+                        scorer=rouge_scorer_batch,
+                    )
+                    for traj_name in trajectory_names:
+                        if step not in step_values_by_view[view][traj_name]:
+                            step_values_by_view[view][traj_name][step] = {
+                                m: [] for m in loaded_metrics.keys()
+                            }
+                        for metric_name in rouge_metrics_in_run:
+                            metric_cfg = loaded_metrics[metric_name]["config"]
+                            rouge_type = metric_cfg.get("rouge_type") or kwargs.get(
+                                "rouge_type", "rougeL_f1"
+                            )
+                            for b_idx in range(B):
+                                if (
+                                    b_idx < len(scores)
+                                    and isinstance(scores[b_idx], dict)
+                                    and rouge_type in scores[b_idx]
+                                ):
+                                    step_values_by_view[view][traj_name][step][metric_name].append(
+                                        scores[b_idx][rouge_type]
+                                    )
+                else:
+                    fut = executor.submit(
+                        eval_rouge_recall_batch_worker,
+                        gen_texts,
+                        ground_truths,
+                        True,
+                    )
+                    for traj_name in trajectory_names:
+                        if step not in step_values_by_view[view][traj_name]:
+                            step_values_by_view[view][traj_name][step] = {
+                                m: [] for m in loaded_metrics.keys()
+                            }
+                        all_rouge_futures.append(
+                            (fut, traj_name, rouge_metrics_in_run, step, view)
+                        )
+                continue
+
+            for traj_name in trajectory_names:
                 if step not in step_values_by_view[view][traj_name]:
                     step_values_by_view[view][traj_name][step] = {
                         m: [] for m in loaded_metrics.keys()
@@ -1050,21 +1189,6 @@ def _trajectory_append_post_loop_rouge(
                         )
                         for b in range(B)
                     ]
-                ground_truths: List[str] = []
-                for b in range(B):
-                    _, gt_str, _ = _trajectory_build_sample_batch_template(
-                        b,
-                        batch,
-                        labels,
-                        input_ids,
-                        indices,
-                        prompt_starts,
-                        prompt_lens,
-                        L,
-                        prompt_only_input_ids,
-                        tokenizer,
-                    )
-                    ground_truths.append(gt_str)
                 if executor is None:
                     scores = eval_rouge_recall_batch(
                         gen_texts,
@@ -1074,9 +1198,15 @@ def _trajectory_append_post_loop_rouge(
                     )
                     for metric_name in rouge_metrics_in_run:
                         metric_cfg = loaded_metrics[metric_name]["config"]
-                        rouge_type = metric_cfg.get("rouge_type") or kwargs.get("rouge_type", "rougeL_f1")
+                        rouge_type = metric_cfg.get("rouge_type") or kwargs.get(
+                            "rouge_type", "rougeL_f1"
+                        )
                         for b_idx in range(B):
-                            if b_idx < len(scores) and isinstance(scores[b_idx], dict) and rouge_type in scores[b_idx]:
+                            if (
+                                b_idx < len(scores)
+                                and isinstance(scores[b_idx], dict)
+                                and rouge_type in scores[b_idx]
+                            ):
                                 step_values_by_view[view][traj_name][step][metric_name].append(
                                     scores[b_idx][rouge_type]
                                 )
@@ -3936,6 +4066,10 @@ def trajectory_metrics(model, **kwargs):
         - trajectory_step_view_batch_chunk_max: int caps packed shifted-CE segment count per GPU
           chunk (post-loop probability and truth_ratio legs). Defaults to 32 when omitted; ``0`` or
           negative disables chunking.
+        - rouge_terminal_decode: ``sampler_sequence`` (default) or ``logits_argmax``. At diffusion
+          step ``S-1``, trajectory ROUGE uses the sampler's committed ``sequences`` slice so scores
+          align with non-trajectory ``forget_Q_A_ROUGE`` (``eval_text_similarity``). Set to
+          ``logits_argmax`` to decode from stored logits at the final step (legacy behavior).
         """
         # Extract config
         metrics_config = kwargs.get("metrics", [])
@@ -5578,6 +5712,8 @@ def trajectory_metrics(model, **kwargs):
                     executor=executor,
                     all_rouge_futures=all_rouge_futures,
                     kwargs=kwargs,
+                    sequences=sequences,
+                    trajectory_config=trajectory_config,
                 )
                 _trajectory_append_post_loop_exact_mem_allowlist(
                     trajectory_names=trajectory_names,
@@ -6513,6 +6649,14 @@ def trajectory_metrics(model, **kwargs):
         }
         if step_values is not None:
             trajectory_step_metadata["step_values"] = step_values
+        if run_steps_to_use is not None and len(run_steps_to_use) > 0:
+            trajectory_step_metadata["diffusion_step_indices"] = [
+                int(x) for x in run_steps_to_use
+            ]
+        elif num_trajectory_steps > 0:
+            trajectory_step_metadata["diffusion_step_indices"] = list(
+                range(num_trajectory_steps)
+            )
         if effective_length_by_index:
             trajectory_step_metadata["effective_length_by_index"] = effective_length_by_index
         if prompt_len_by_index:
