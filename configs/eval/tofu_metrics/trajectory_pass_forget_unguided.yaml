@@ -19,6 +19,9 @@ trajectory_config:
   logits_source: sampler
   return_logits: true
   return_fixation_steps: true
+  # Align terminal trajectory ROUGE with memorization ``forget_Q_A_ROUGE`` (``eval_text_similarity`` /
+  # ``model.generate``): default ``logits_argmax`` scores a different string than generate.
+  rouge_prediction_source: canvas_plus_step_x0
   include_views: [full, eos]
   use_generalized_sequence_probability: true
   logit_alignment: causal
