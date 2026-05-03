@@ -20,6 +20,8 @@ trajectory_config:
   logits_source: sampler
   return_logits: true
   return_fixation_steps: true
+  # Align trajectory forget ROUGE text with sampler commits (+ same-step x0 on remaining masks).
+  rouge_prediction_source: canvas_plus_step_x0
   sampler_kwargs:
     steps: 16
     temperature: 0.0

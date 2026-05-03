@@ -981,6 +981,67 @@ def _trajectory_gen_texts_from_sampler_sequences(
     return out
 
 
+def _trajectory_decode_gen_span_canvas_merge(
+    *,
+    canvas_row: torch.Tensor,
+    proposal_row: Optional[torch.Tensor],
+    pl: int,
+    L: int,
+    mask_id: int,
+    view: str,
+    leff: int,
+    tokenizer: Any,
+    mode: str,
+) -> str:
+    """Decode generation span for ROUGE using post-commit canvas + optional proposal on masks."""
+    n = min(int(leff), int(L)) if view == "eos" else int(L)
+    ids: list[int] = []
+    for pos in range(pl, pl + n):
+        if pos >= int(canvas_row.shape[0]):
+            break
+        cid = int(canvas_row[pos].item())
+        if mode == "committed_only":
+            if cid != mask_id:
+                ids.append(cid)
+        else:
+            if cid != mask_id:
+                ids.append(cid)
+            elif proposal_row is not None and pos < proposal_row.shape[0]:
+                ids.append(int(proposal_row[pos].item()))
+            else:
+                ids.append(cid)
+    return tokenizer.decode(
+        ids,
+        skip_special_tokens=True,
+        clean_up_tokenization_spaces=True,
+    )
+
+
+def _trajectory_assert_snapshots_align_logits_history(
+    *,
+    sequence_snapshots: Optional[List[torch.Tensor]],
+    proposal_snapshots: Optional[List[torch.Tensor]],
+    lh_len: int,
+    rouge_prediction_source: str,
+) -> None:
+    if rouge_prediction_source == "logits_argmax":
+        return
+    if sequence_snapshots is None or len(sequence_snapshots) != lh_len:
+        raise ValueError(
+            "trajectory ROUGE with rouge_prediction_source="
+            f"{rouge_prediction_source!r} requires sequence_snapshots with "
+            f"len == len(logits_history) ({lh_len}); got "
+            f"{None if sequence_snapshots is None else len(sequence_snapshots)}"
+        )
+    if rouge_prediction_source == "canvas_plus_step_x0":
+        if proposal_snapshots is None or len(proposal_snapshots) != lh_len:
+            raise ValueError(
+                "canvas_plus_step_x0 requires proposal_snapshots with "
+                f"len == len(logits_history) ({lh_len}); got "
+                f"{None if proposal_snapshots is None else len(proposal_snapshots)}"
+            )
+
+
 def _trajectory_exact_mem_post_loop_metric_names(
     *,
     metrics_to_run: List[str],
@@ -1065,6 +1126,10 @@ def _trajectory_append_post_loop_rouge(
     executor: Optional[ProcessPoolExecutor],
     all_rouge_futures: List[Any],
     kwargs: Dict[str, Any],
+    trajectory_config: Optional[Any] = None,
+    sequence_snapshots: Optional[List[torch.Tensor]] = None,
+    proposal_snapshots: Optional[List[torch.Tensor]] = None,
+    mask_token_id: Optional[int] = None,
 ) -> None:
     """Gather gen/gt strings across ``B`` per (traj, step, view); append ROUGE like probability post-loop."""
     rouge_metrics_in_run = [
@@ -1075,6 +1140,43 @@ def _trajectory_append_post_loop_rouge(
     rouge_scorer_batch = rouge_scorer.RougeScorer(["rouge1", "rougeL"], use_stemmer=True)
     if (R is None) == (lh is None):
         raise ValueError("post-loop ROUGE: exactly one of R or lh must be set")
+    _tc_plain: Dict[str, Any] = {}
+    if trajectory_config is not None:
+        if OmegaConf.is_config(trajectory_config):
+            _tc_plain = OmegaConf.to_container(trajectory_config, resolve=True) or {}
+        elif isinstance(trajectory_config, dict):
+            _tc_plain = trajectory_config
+    rouge_prediction_source = str(
+        _tc_plain.get("rouge_prediction_source") or "logits_argmax"
+    ).lower()
+    if rouge_prediction_source not in (
+        "logits_argmax",
+        "canvas_plus_step_x0",
+        "committed_only",
+    ):
+        raise ValueError(
+            "trajectory_config.rouge_prediction_source must be one of "
+            "logits_argmax, canvas_plus_step_x0, committed_only; got "
+            f"{rouge_prediction_source!r}"
+        )
+    lh_len = len(lh) if lh is not None else int(S)
+    _trajectory_assert_snapshots_align_logits_history(
+        sequence_snapshots=sequence_snapshots,
+        proposal_snapshots=proposal_snapshots,
+        lh_len=lh_len,
+        rouge_prediction_source=rouge_prediction_source,
+    )
+    if rouge_prediction_source != "logits_argmax":
+        if mask_token_id is None:
+            raise ValueError(
+                "trajectory ROUGE with rouge_prediction_source="
+                f"{rouge_prediction_source!r} requires tokenizer.mask_token_id"
+            )
+    merge_mode = (
+        "committed_only"
+        if rouge_prediction_source == "committed_only"
+        else "canvas_plus_step_x0"
+    )
     for traj_name in trajectory_names:
         for step in steps_to_use:
             for view in include_views:
@@ -1082,35 +1184,66 @@ def _trajectory_append_post_loop_rouge(
                     step_values_by_view[view][traj_name][step] = {
                         m: [] for m in loaded_metrics.keys()
                     }
-                logits_rows: list[torch.Tensor] = []
-                for b in range(B):
-                    if lh is not None:
-                        logits_rows.append(
-                            _trajectory_logits_vl_from_history(lh, b, F[b], S, L, traj_name, step)
+                if rouge_prediction_source == "logits_argmax":
+                    logits_rows: list[torch.Tensor] = []
+                    for b in range(B):
+                        if lh is not None:
+                            logits_rows.append(
+                                _trajectory_logits_vl_from_history(lh, b, F[b], S, L, traj_name, step)
+                            )
+                        else:
+                            assert R is not None
+                            logits_rows.append(
+                                _trajectory_logits_vl_at_step(R[b], F[b], S, L, traj_name, step)
+                            )
+                    flat_lens: set[int] = set()
+                    for t in logits_rows:
+                        lv = t[0] if t.dim() == 3 else t
+                        flat_lens.add(int(lv.shape[1]))
+                    if len(flat_lens) == 1:
+                        gen_texts = _trajectory_batch_decode_predictions_for_rouge(
+                            tokenizer, logits_rows, view, effective_lengths
                         )
                     else:
-                        assert R is not None
-                        logits_rows.append(
-                            _trajectory_logits_vl_at_step(R[b], F[b], S, L, traj_name, step)
-                        )
-                flat_lens: set[int] = set()
-                for t in logits_rows:
-                    lv = t[0] if t.dim() == 3 else t
-                    flat_lens.add(int(lv.shape[1]))
-                if len(flat_lens) == 1:
-                    gen_texts = _trajectory_batch_decode_predictions_for_rouge(
-                        tokenizer, logits_rows, view, effective_lengths
-                    )
+                        gen_texts = [
+                            _trajectory_decode_prediction_for_rouge(
+                                tokenizer,
+                                logits_rows[b],
+                                view,
+                                int(effective_lengths[b]),
+                            )
+                            for b in range(B)
+                        ]
                 else:
-                    gen_texts = [
-                        _trajectory_decode_prediction_for_rouge(
-                            tokenizer,
-                            logits_rows[b],
-                            view,
-                            int(effective_lengths[b]),
+                    assert sequence_snapshots is not None
+                    if step < 0 or step >= len(sequence_snapshots):
+                        raise ValueError(
+                            f"trajectory ROUGE step {step} out of range for "
+                            f"sequence_snapshots (len={len(sequence_snapshots)})"
                         )
-                        for b in range(B)
-                    ]
+                    canvas_b = sequence_snapshots[step]
+                    prop_b = (
+                        proposal_snapshots[step]
+                        if rouge_prediction_source == "canvas_plus_step_x0"
+                        else None
+                    )
+                    gen_texts = []
+                    for b in range(B):
+                        pl_raw = prompt_lens[b]
+                        pl_i = int(pl_raw.item()) if torch.is_tensor(pl_raw) else int(pl_raw)
+                        gen_texts.append(
+                            _trajectory_decode_gen_span_canvas_merge(
+                                canvas_row=canvas_b[b],
+                                proposal_row=None if prop_b is None else prop_b[b],
+                                pl=pl_i,
+                                L=L,
+                                mask_id=int(mask_token_id),
+                                view=view,
+                                leff=int(effective_lengths[b]),
+                                tokenizer=tokenizer,
+                                mode=merge_mode,
+                            )
+                        )
                 ground_truths: List[str] = []
                 for b in range(B):
                     _, gt_str, _ = _trajectory_build_sample_batch_template(
@@ -4572,6 +4705,8 @@ def trajectory_metrics(model, **kwargs):
             _log_interval = max(1, expected_batches // 20) if expected_batches else 1
         # Process each batch
             for batch_idx, batch in enumerate(dataloader):
+                seq_snapshots_batch = None
+                prop_snapshots_batch = None
                 gpu_set_phase("trajectory_batch_start", batch_idx=batch_idx)
                 _batch_t0 = time.perf_counter()
                 if batch_idx % _log_interval == 0 or batch_idx == 0 or batch_idx == expected_batches - 1:
@@ -4689,6 +4824,8 @@ def trajectory_metrics(model, **kwargs):
                 else:
                     R = out["R"]
                     F, S, L = out["F"], out["S"], out["L"]
+                seq_snapshots_batch = getattr(sampler_output, "sequence_snapshots", None)
+                prop_snapshots_batch = getattr(sampler_output, "proposal_snapshots", None)
                 del logits_history, out
                 if _log_traj_peak and torch.cuda.is_available():
                     logger.info(
@@ -5643,6 +5780,10 @@ def trajectory_metrics(model, **kwargs):
                     executor=executor,
                     all_rouge_futures=all_rouge_futures,
                     kwargs=kwargs,
+                    trajectory_config=trajectory_config,
+                    sequence_snapshots=seq_snapshots_batch,
+                    proposal_snapshots=prop_snapshots_batch,
+                    mask_token_id=getattr(tokenizer, "mask_token_id", None),
                 )
                 _trajectory_append_post_loop_exact_mem_allowlist(
                     trajectory_names=trajectory_names,
@@ -5767,6 +5908,7 @@ def trajectory_metrics(model, **kwargs):
                     del sample_traj, batch_template, logits
                 except NameError:
                     pass
+                del seq_snapshots_batch, prop_snapshots_batch
                 if lh_batch is not None:
                     del lh_batch
                 else:
