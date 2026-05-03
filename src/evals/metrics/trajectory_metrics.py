@@ -875,7 +875,11 @@ def _trajectory_decode_prediction_for_rouge(
     pred_ids = torch.argmax(lv, dim=0).tolist()
     if view == "eos":
         pred_ids = pred_ids[: min(int(L_eff_b), len(pred_ids))]
-    return tokenizer.decode(pred_ids, skip_special_tokens=True)
+    return tokenizer.decode(
+        pred_ids,
+        skip_special_tokens=True,
+        clean_up_tokenization_spaces=True,
+    )
 
 
 def _trajectory_batch_decode_predictions_for_rouge(
@@ -914,10 +918,67 @@ def _trajectory_batch_decode_predictions_for_rouge(
         token_rows.append(row.detach().cpu().tolist())
     batch_decode = getattr(tokenizer, "batch_decode", None)
     if callable(batch_decode):
-        return list(batch_decode(token_rows, skip_special_tokens=True))
+        return list(
+            batch_decode(
+                token_rows,
+                skip_special_tokens=True,
+                clean_up_tokenization_spaces=True,
+            )
+        )
     return [
-        tokenizer.decode(ids, skip_special_tokens=True) for ids in token_rows
+        tokenizer.decode(
+            ids,
+            skip_special_tokens=True,
+            clean_up_tokenization_spaces=True,
+        )
+        for ids in token_rows
     ]
+
+
+def _trajectory_gen_texts_from_sampler_sequences(
+    *,
+    sequences: torch.Tensor,
+    prompt_lens: Union[torch.Tensor, Sequence[Any]],
+    L: int,
+    effective_lengths: Sequence[int],
+    view: str,
+    tokenizer: Any,
+) -> List[str]:
+    """Decode the generation span from sampler ``sequences`` (committed token IDs).
+
+    Matches the slice used for trajectory debug logging (~4896–4902): prompt end
+    ``pl``, generation window length ``L``, optional EOS-trim when ``view=='eos'``.
+    Used by investigation scripts to compare ``sequences`` decode vs argmax-on-logits.
+    """
+    if sequences.dim() != 2:
+        raise ValueError(
+            "trajectory sequences decode: expected [B, T] sequences, "
+            f"got dim={sequences.dim()} shape={tuple(sequences.shape)}"
+        )
+    B = int(sequences.shape[0])
+    if len(effective_lengths) < B:
+        raise ValueError(
+            f"effective_lengths length {len(effective_lengths)} < batch B={B}"
+        )
+    out: List[str] = []
+    for b in range(B):
+        row = sequences[b]
+        pl_raw = prompt_lens[b]
+        pl = int(pl_raw.item()) if torch.is_tensor(pl_raw) else int(pl_raw)
+        leff = int(effective_lengths[b])
+        if view == "eos":
+            n = min(leff, int(L))
+        else:
+            n = int(L)
+        gen_ids = row[pl : pl + n].detach().long().cpu().tolist()
+        out.append(
+            tokenizer.decode(
+                gen_ids,
+                skip_special_tokens=True,
+                clean_up_tokenization_spaces=True,
+            )
+        )
+    return out
 
 
 def _trajectory_exact_mem_post_loop_metric_names(
@@ -3301,7 +3362,11 @@ def _handle_text_based_metric(logits, tokenizer, sample_labels, sample_input_ids
         predicted_tokens = torch.argmax(logits, dim=0)
     else:
         predicted_tokens = torch.argmax(logits, dim=-1)
-    gen_text = tokenizer.decode(predicted_tokens.tolist(), skip_special_tokens=True)
+    gen_text = tokenizer.decode(
+        predicted_tokens.tolist(),
+        skip_special_tokens=True,
+        clean_up_tokenization_spaces=True,
+    )
     guardrail_config = kwargs.get("guardrail_config")
     if guardrail_config is not None:
         gen_text = transform_output_text(
