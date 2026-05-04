@@ -635,7 +635,7 @@ class TestDeriveStepsToUse:
     """Tests for _derive_steps_to_use (step subsampling for report)."""
 
     def test_trajectory_sample_interval_set_uses_all_s_steps(self):
-        """When trajectory_sample_interval=8, use all S steps; metadata = [8, 16, ..., 8*S]."""
+        """When trajectory_sample_interval=8, use all S steps; metadata = [0, 8, ..., min(8*(S-1), cap)]."""
         S = 25
         trajectory_config = {
             "sampler_kwargs": {
@@ -647,8 +647,8 @@ class TestDeriveStepsToUse:
         assert len(steps_to_use) == S
         assert steps_to_use == list(range(S))
         assert len(step_values_metadata) == S
-        assert step_values_metadata[0] == 8
-        assert step_values_metadata[-1] == min(8 * S, 200)
+        assert step_values_metadata[0] == 0
+        assert step_values_metadata[-1] == min(8 * (S - 1), 200)
 
     def test_trajectory_sample_interval_unset_subsamples_to_report_steps(self):
         """When trajectory_sample_interval unset, max_new_tokens=200, steps=50: subsample to 0,8,16,..."""

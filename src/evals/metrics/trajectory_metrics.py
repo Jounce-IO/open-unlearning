@@ -55,6 +55,7 @@ from evals.metrics.trajectory_utils import (
     compute_fixation_start_from_history,
     compute_fixation_end_from_history,
     compute_fixation_ratio_from_history,
+    diffusion_source_steps_for_trajectory,
 )
 from evals.metrics.trajectory_adapters import (
     LogitModelWrapper,
@@ -1017,6 +1018,41 @@ def _trajectory_decode_gen_span_canvas_merge(
     )
 
 
+def _trajectory_merge_snapshot_row_with_diffusion_reindex(
+    snapshots: List[torch.Tensor],
+    b: int,
+    base_step: int,
+    pl: int,
+    L: int,
+    n_decode: int,
+    source_steps_L: torch.Tensor,
+) -> torch.Tensor:
+    """Full-sequence row like ``snapshots[base_step][b]``, gen span re-gathered per ``source_steps_L[j]``.
+
+    Prompt and tail outside ``[pl, pl + n_decode)`` stay from ``snapshots[base_step]``; each
+    generation position ``pl + j`` takes ``snapshots[src][b, pos]`` with
+    ``src = int(source_steps_L[j])``, matching logits trajectory re-indexing.
+    """
+    if not snapshots:
+        raise ValueError("snapshots cannot be empty")
+    bs = int(base_step)
+    if bs < 0 or bs >= len(snapshots):
+        raise ValueError(f"base_step {base_step} out of range for len(snapshots)={len(snapshots)}")
+    out = snapshots[bs][b].detach().clone()
+    T_full = int(out.shape[0])
+    n = int(n_decode)
+    for j in range(n):
+        if j >= int(L) or j >= int(source_steps_L.shape[0]):
+            break
+        pos = pl + j
+        if pos < 0 or pos >= T_full:
+            break
+        src = int(source_steps_L[j].item())
+        src = max(0, min(src, len(snapshots) - 1))
+        out[pos] = snapshots[src][b, pos]
+    return out
+
+
 def _trajectory_assert_snapshots_align_logits_history(
     *,
     sequence_snapshots: Optional[List[torch.Tensor]],
@@ -1221,20 +1257,46 @@ def _trajectory_append_post_loop_rouge(
                             f"trajectory ROUGE step {step} out of range for "
                             f"sequence_snapshots (len={len(sequence_snapshots)})"
                         )
-                    canvas_b = sequence_snapshots[step]
-                    prop_b = (
-                        proposal_snapshots[step]
-                        if rouge_prediction_source == "canvas_plus_step_x0"
-                        else None
-                    )
                     gen_texts = []
                     for b in range(B):
                         pl_raw = prompt_lens[b]
                         pl_i = int(pl_raw.item()) if torch.is_tensor(pl_raw) else int(pl_raw)
+                        F_b = F[b]
+                        src_steps = diffusion_source_steps_for_trajectory(
+                            traj_name, int(step), F_b, S
+                        )
+                        n_dec = (
+                            min(int(effective_lengths[b]), int(L))
+                            if view == "eos"
+                            else int(L)
+                        )
+                        merged_canvas = _trajectory_merge_snapshot_row_with_diffusion_reindex(
+                            sequence_snapshots,
+                            b,
+                            int(step),
+                            pl_i,
+                            L,
+                            n_dec,
+                            src_steps,
+                        )
+                        merged_prop = None
+                        if (
+                            rouge_prediction_source == "canvas_plus_step_x0"
+                            and proposal_snapshots is not None
+                        ):
+                            merged_prop = _trajectory_merge_snapshot_row_with_diffusion_reindex(
+                                proposal_snapshots,
+                                b,
+                                int(step),
+                                pl_i,
+                                L,
+                                n_dec,
+                                src_steps,
+                            )
                         gen_texts.append(
                             _trajectory_decode_gen_span_canvas_merge(
-                                canvas_row=canvas_b[b],
-                                proposal_row=None if prop_b is None else prop_b[b],
+                                canvas_row=merged_canvas,
+                                proposal_row=merged_prop,
                                 pl=pl_i,
                                 L=L,
                                 mask_id=int(mask_token_id),
@@ -1568,7 +1630,7 @@ def _derive_steps_to_use(
 
     Report interval is fixed at 8 tokens. When trajectory_sample_interval is set, the
     sampler already returns subsampled steps (every 8 tokens); use all S steps and
-    build metadata as token positions [interval*1, interval*2, ..., min(max_new_tokens, interval*S)].
+    build metadata as token positions [0, interval, 2*interval, ..., min(max_new_tokens, interval*(S-1))].
     When trajectory_sample_interval is not set, the sampler returned every diffusion step;
     subsample to steps where token position is 0, 8, 16, ... and return those step indices
     and corresponding token positions.
@@ -1589,10 +1651,10 @@ def _derive_steps_to_use(
         interval = int(trajectory_sample_interval)
         if max_new_tokens is not None:
             step_values_metadata = [
-                min(interval * (k + 1), int(max_new_tokens)) for k in range(S)
+                min(interval * k, int(max_new_tokens)) for k in range(S)
             ]
         else:
-            step_values_metadata = [interval * (k + 1) for k in range(S)]
+            step_values_metadata = [interval * k for k in range(S)]
         return (steps_to_use, step_values_metadata)
 
     if max_new_tokens is None or steps is None or steps <= 0:
