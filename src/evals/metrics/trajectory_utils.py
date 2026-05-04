@@ -429,6 +429,46 @@ def diffusion_source_steps_for_trajectory(
     raise ValueError(f"Unknown traj_name: {traj_name!r}")
 
 
+def diffusion_source_steps_batch(
+    traj_name: str,
+    step_index: int,
+    F: torch.Tensor,
+    S: int,
+) -> torch.Tensor:
+    """Batched counterpart of :func:`diffusion_source_steps_for_trajectory`.
+
+    Args:
+        traj_name: ``steps``, ``fixation_start``, ``fixation_end``, or ``fixation_ratio``.
+        step_index: Trajectory reporting step ``s`` in ``0 .. S-1``.
+        F: ``[B, L]`` fixation indices per batch row and generated position.
+        S: Number of diffusion steps.
+
+    Returns:
+        ``[B, L]`` int64 tensor of source diffusion indices.
+    """
+    if F.dim() != 2:
+        raise ValueError(f"F must be [B, L], got shape {tuple(F.shape)}")
+    device = F.device
+    s_int = int(step_index)
+    if not (0 <= s_int < S):
+        raise ValueError(f"step_index {step_index} out of range [0, {S - 1}]")
+    if traj_name == "steps":
+        return torch.full(F.shape, s_int, dtype=torch.long, device=device)
+    s_t = torch.tensor(s_int, device=device, dtype=torch.long)
+    if traj_name == "fixation_start":
+        out = torch.minimum(s_t, F)
+        return torch.clamp(out, 0, S - 1)
+    if traj_name == "fixation_end":
+        out = F - (S - 1) + s_t
+        return torch.clamp(out, 0, S - 1)
+    if traj_name == "fixation_ratio":
+        if S <= 1:
+            return torch.zeros(F.shape, dtype=torch.long, device=device)
+        out = (F * s_t) // (S - 1)
+        return torch.clamp(out, 0, S - 1)
+    raise ValueError(f"Unknown traj_name: {traj_name!r}")
+
+
 def trajectories_from_logits(
     logits_history: List[torch.Tensor],
     fixation_steps: torch.Tensor,

@@ -305,7 +305,9 @@ class TestTrajectoryMetricsWithTwoMetrics:
         
         tokenizer = Mock()
         tokenizer.decode = Mock(return_value="decoded text")
-        tokenizer.batch_decode = Mock(return_value=["decoded text"] * S)
+        tokenizer.batch_decode = Mock(
+            side_effect=lambda rows, **kwargs: ["decoded text"] * len(rows)
+        )
         tokenizer.encode = Mock(return_value=torch.tensor([[1, 2, 3]]))
         tokenizer.eos_token_id = 2
 
@@ -620,6 +622,107 @@ class TestBatchAcrossSteps:
                 token_lists = call[0][0]
                 assert len(token_lists) == 1
             assert tokenizer.decode.call_count >= 1
+
+    def test_post_loop_rouge_ground_truth_template_hoisted(self):
+        """Post-loop ROUGE builds GT templates B times per batch (hoisted), not per (traj, step, view).
+
+        Total ``_trajectory_build_sample_batch_template`` calls per batch also includes B uses in the
+        main per-sample loop (unchanged).
+        """
+        import importlib
+
+        from evals.metrics.trajectory_metrics import trajectory_metrics
+
+        trajectory_metrics_mod = importlib.import_module("evals.metrics.trajectory_metrics")
+
+        S = 4
+        L_gen = 10
+        V = 100
+        full_len = 5 + L_gen
+        logits_history = [torch.randn(1, full_len, V) for _ in range(S)]
+        fixation_steps = torch.randint(0, S, (1, full_len))
+
+        class MockSamplerOutput:
+            def __init__(self, sequences, logits_history, fixation_steps):
+                self.sequences = sequences
+                self.histories = None
+                self.logits_history = logits_history
+                self.fixation_steps = fixation_steps
+
+        sampler = Mock()
+        sampler.sample = Mock(
+            return_value=MockSamplerOutput(
+                torch.randint(0, V, (1, full_len)),
+                logits_history,
+                fixation_steps,
+            )
+        )
+        model = Mock()
+        model.sampler = sampler
+        tokenizer = Mock()
+        tokenizer.decode = Mock(return_value="x")
+        tokenizer.batch_decode = Mock(side_effect=lambda rows, **kwargs: ["d"] * len(rows))
+        tokenizer.eos_token_id = 2
+
+        class MockDataset:
+            def __init__(self):
+                self.data = [
+                    {
+                        "input_ids": torch.randint(0, V, (full_len,)),
+                        "labels": torch.randint(0, V, (full_len,)),
+                    }
+                ]
+
+            def __len__(self):
+                return len(self.data)
+
+            def __getitem__(self, idx):
+                return self.data[idx]
+
+        def mock_collator(batch):
+            return {
+                "input_ids": torch.stack([b["input_ids"] for b in batch]),
+                "labels": torch.stack([b["labels"] for b in batch]),
+                "indices": torch.tensor([0]),
+            }
+
+        raw_fn = (
+            trajectory_metrics._metric_fn
+            if hasattr(trajectory_metrics, "_metric_fn")
+            else trajectory_metrics
+        )
+        real_tpl = trajectory_metrics_mod._trajectory_build_sample_batch_template
+        with patch.object(
+            trajectory_metrics_mod,
+            "_trajectory_build_sample_batch_template",
+            wraps=real_tpl,
+        ) as mock_tpl:
+            with patch("evals.metrics.trajectory_metrics.eval_rouge_recall_batch") as mock_rouge:
+                mock_rouge.return_value = [
+                    {"rouge1_recall": 0.5, "rougeL_f1": 0.6, "rougeL_recall": 0.7}
+                ]
+                raw_fn(
+                    model,
+                    metric_name="trajectory_metrics",
+                    cache={},
+                    metrics=["rouge"],
+                    data=MockDataset(),
+                    collators=mock_collator,
+                    tokenizer=tokenizer,
+                    batch_size=1,
+                    trajectory_config={
+                        "return_logits": True,
+                        "return_fixation_steps": True,
+                        "metric_worker_pool_size": 0,
+                        "sampler_kwargs": {
+                            "steps": S,
+                            "max_new_tokens": L_gen,
+                            "trajectory_sample_interval": 8,
+                        },
+                    },
+                )
+            # B in main loop + B hoisted for post-loop ROUGE (not × traj × steps × views).
+            assert mock_tpl.call_count == 2
 
 
 class TestRougeVerification:

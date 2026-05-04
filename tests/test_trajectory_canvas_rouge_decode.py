@@ -2,17 +2,27 @@
 
 from __future__ import annotations
 
+import sys
+from pathlib import Path
 from unittest.mock import MagicMock
 
 import pytest
 import torch
 
+repo_root = Path(__file__).parent.parent
+sys.path.insert(0, str(repo_root / "src"))
+
 from evals.metrics.trajectory_metrics import (
     _trajectory_assert_snapshots_align_logits_history,
     _trajectory_decode_gen_span_canvas_merge,
     _trajectory_merge_snapshot_row_with_diffusion_reindex,
+    _trajectory_merge_snapshots_reindex_batched,
+    _stack_sequence_snapshots,
 )
-from evals.metrics.trajectory_utils import diffusion_source_steps_for_trajectory
+from evals.metrics.trajectory_utils import (
+    diffusion_source_steps_batch,
+    diffusion_source_steps_for_trajectory,
+)
 
 
 def test_decode_canvas_plus_step_x0_fills_masks() -> None:
@@ -123,3 +133,28 @@ def test_canvas_reindex_merge_differs_steps_vs_fixation_start() -> None:
         mode="committed_only",
     )
     assert text_fs == "5,8"
+
+
+def test_batched_snapshot_reindex_matches_rowwise() -> None:
+    S = 2
+    snap = [
+        torch.tensor([[5, 6], [50, 60]], dtype=torch.long),
+        torch.tensor([[7, 8], [70, 80]], dtype=torch.long),
+    ]
+    stack = _stack_sequence_snapshots(snap)
+    B, L = 2, 2
+    F = torch.tensor([[0, 1], [1, 0]], dtype=torch.long)
+    step = 1
+    pl_list = [0, 0]
+    n_dec_list = [2, 2]
+    for traj in ("steps", "fixation_start"):
+        src_b = diffusion_source_steps_batch(traj, step, F, S)
+        bat = _trajectory_merge_snapshots_reindex_batched(
+            stack, step, pl_list, L, n_dec_list, src_b
+        )
+        for b in range(B):
+            src_1d = diffusion_source_steps_for_trajectory(traj, step, F[b], S)
+            row = _trajectory_merge_snapshot_row_with_diffusion_reindex(
+                snap, b, step, pl_list[b], L, n_dec_list[b], src_1d
+            )
+            assert torch.equal(bat[b], row), traj

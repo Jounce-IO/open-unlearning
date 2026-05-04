@@ -22,6 +22,7 @@ from evals.metrics.utils import (
     _batch_to_device,
     _tensor_to_list_of_floats,
     eval_rouge_recall_batch,
+    eval_rouge_recall_batch_worker_multi_steps,
     eval_text_similarity,
 )
 from evals.metrics.step_wise_score import compute_prob_packed_shifted_segments
@@ -330,6 +331,24 @@ class TestEvalRougeRecallBatch:
         assert out_with[0]["rouge1_recall"] == out_without[0]["rouge1_recall"]
         assert out_with[0]["rougeL_f1"] == out_without[0]["rougeL_f1"]
         assert out_with[0]["rougeL_recall"] == out_without[0]["rougeL_recall"]
+
+    def test_worker_multi_steps_matches_per_step_batches(self):
+        gen_per_step = [
+            ["the cat sat", "hello world"],
+            ["partial cat sat", "hello there"],
+        ]
+        gt_list = ["the cat sat on mat", "hello world today"]
+        combined = eval_rouge_recall_batch_worker_multi_steps(
+            gen_per_step, gt_list, use_stemmer=True
+        )
+        assert len(combined) == len(gen_per_step)
+        for k, gens in enumerate(gen_per_step):
+            ref = eval_rouge_recall_batch(gens, gt_list, use_stemmer=True)
+            assert len(combined[k]) == len(ref)
+            for row_a, row_b in zip(combined[k], ref, strict=True):
+                assert row_a.keys() == row_b.keys()
+                for key in row_a:
+                    assert row_a[key] == row_b[key]
 
 
 class TestEvalTextSimilarityBatchDecode:

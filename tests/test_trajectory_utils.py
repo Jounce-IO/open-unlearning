@@ -27,6 +27,7 @@ from evals.metrics.trajectory_utils import (
     compute_fixation_end_trajectory,
     compute_fixation_ratio_trajectory,
     diffusion_source_steps_for_trajectory,
+    diffusion_source_steps_batch,
     trajectories_from_logits,
     effective_lengths_from_eos,
     extract_logits_at_step,
@@ -1904,6 +1905,21 @@ class TestDecodeLogitsToText:
         
         assert len(texts) == 1
         assert isinstance(texts[0], str)
+
+
+class TestDiffusionSourceStepsBatch:
+    """``diffusion_source_steps_batch`` matches row-wise ``diffusion_source_steps_for_trajectory``."""
+
+    def test_batch_matches_per_row_fixation_start(self):
+        S, L = 6, 5
+        B = 3
+        F = torch.randint(0, S, (B, L), dtype=torch.long)
+        step = 4
+        bat = diffusion_source_steps_batch("fixation_start", step, F, S)
+        assert bat.shape == (B, L)
+        for b in range(B):
+            row = diffusion_source_steps_for_trajectory("fixation_start", step, F[b], S)
+            assert torch.equal(bat[b], row)
 
 
 class TestDiffusionSourceStepsForTrajectory:

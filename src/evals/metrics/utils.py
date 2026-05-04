@@ -1,10 +1,11 @@
+import concurrent.futures
 import gc
 import logging
 import os
 import sys
 import warnings
 from collections import defaultdict
-from typing import Dict, List, Optional
+from typing import Dict, List, Optional, Tuple
 
 import numpy as np
 import torch
@@ -553,6 +554,23 @@ def stop_sequences_criteria(
     )
 
 
+def _eval_rouge_recall_chunk(args: Tuple[List[str], List[str], bool]) -> List[Dict[str, float]]:
+    """Score one chunk of (gen, gt) pairs (thread-pool worker; owns its own RougeScorer)."""
+    gen_slice, gt_slice, use_stemmer = args
+    sc = rouge_scorer.RougeScorer(["rouge1", "rougeL"], use_stemmer=use_stemmer)
+    evals: List[Dict[str, float]] = []
+    for gen, gt in zip(gen_slice, gt_slice):
+        rouge_scores = sc.score(gt, gen)
+        evals.append(
+            {
+                "rouge1_recall": rouge_scores["rouge1"].recall,
+                "rougeL_f1": rouge_scores["rougeL"].fmeasure,
+                "rougeL_recall": rouge_scores["rougeL"].recall,
+            }
+        )
+    return evals
+
+
 def eval_rouge_recall_batch(
     gen_outputs: List[str],
     ground_truths: List[str],
@@ -564,20 +582,47 @@ def eval_rouge_recall_batch(
     If scorer is None, creates one RougeScorer with use_stemmer. Pass scorer from caller
     to reuse one scorer per eval_text_similarity call (avoids creating scorer per call).
     No GPU: all data is text; cache only on CPU or disk if needed.
+
+    When ``scorer`` is None and ``DLLM_ROUGE_THREADS`` > 1 (default 4), splits the batch into
+    chunks scored in parallel threads (each chunk uses its own RougeScorer).
     """
-    if scorer is None:
-        scorer = rouge_scorer.RougeScorer(["rouge1", "rougeL"], use_stemmer=use_stemmer)
-    evals = []
-    for gen, gt in zip(gen_outputs, ground_truths):
-        rouge_scores = scorer.score(gt, gen)
-        evals.append(
-            {
-                "rouge1_recall": rouge_scores["rouge1"].recall,
-                "rougeL_f1": rouge_scores["rougeL"].fmeasure,
-                "rougeL_recall": rouge_scores["rougeL"].recall,
-            }
+    n = len(gen_outputs)
+    if n != len(ground_truths):
+        raise ValueError(
+            f"gen_outputs and ground_truths length mismatch: {n} vs {len(ground_truths)}"
         )
-    return evals
+    workers = max(1, int(os.environ.get("DLLM_ROUGE_THREADS", "4")))
+    if scorer is not None or workers <= 1 or n < 8:
+        if scorer is None:
+            scorer = rouge_scorer.RougeScorer(["rouge1", "rougeL"], use_stemmer=use_stemmer)
+        evals: List[Dict[str, float]] = []
+        for gen, gt in zip(gen_outputs, ground_truths):
+            rouge_scores = scorer.score(gt, gen)
+            evals.append(
+                {
+                    "rouge1_recall": rouge_scores["rouge1"].recall,
+                    "rougeL_f1": rouge_scores["rougeL"].fmeasure,
+                    "rougeL_recall": rouge_scores["rougeL"].recall,
+                }
+            )
+        return evals
+
+    chunk_size = max(1, (n + workers - 1) // workers)
+    chunks: List[Tuple[List[str], List[str], bool]] = []
+    for i in range(0, n, chunk_size):
+        chunks.append(
+            (
+                gen_outputs[i : i + chunk_size],
+                ground_truths[i : i + chunk_size],
+                use_stemmer,
+            )
+        )
+    with concurrent.futures.ThreadPoolExecutor(max_workers=workers) as pool:
+        parts = list(pool.map(_eval_rouge_recall_chunk, chunks))
+    out: List[Dict[str, float]] = []
+    for p in parts:
+        out.extend(p)
+    return out
 
 
 def eval_rouge_recall_batch_worker(
@@ -593,6 +638,23 @@ def eval_rouge_recall_batch_worker(
     return eval_rouge_recall_batch(
         gen_outputs, ground_truths, use_stemmer=use_stemmer, scorer=None
     )
+
+
+def eval_rouge_recall_batch_worker_multi_steps(
+    gen_per_step: List[List[str]],
+    ground_truths: List[str],
+    use_stemmer: bool = True,
+) -> List[List[Dict[str, float]]]:
+    """Process-pool worker: ROUGE for many trajectory steps sharing one RougeScorer.
+
+    ``gen_per_step[k]`` is length-B hypothesis strings for ``steps_to_use[k]``.
+    Returns one ``eval_rouge_recall_batch`` result list per step.
+    """
+    scorer = rouge_scorer.RougeScorer(["rouge1", "rougeL"], use_stemmer=use_stemmer)
+    return [
+        eval_rouge_recall_batch(g, ground_truths, use_stemmer=use_stemmer, scorer=scorer)
+        for g in gen_per_step
+    ]
 
 
 def eval_text_similarity(model, tokenizer, batch, generation_args):
