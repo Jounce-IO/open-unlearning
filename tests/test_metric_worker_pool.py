@@ -41,7 +41,10 @@ def _trajectory_metrics_rouge_mock_setup(S=4, L_gen=10, V=100):
     model.sampler = sampler
     tokenizer = Mock()
     tokenizer.decode = Mock(return_value="decoded")
-    tokenizer.batch_decode = Mock(return_value=["decoded"] * S)
+    # batch_decode must return one string per row in ``token_rows`` (batch size B), not S steps.
+    tokenizer.batch_decode = Mock(
+        side_effect=lambda token_rows, **kwargs: ["decoded"] * len(token_rows)
+    )
     tokenizer.eos_token_id = 2
 
     class MockDataset:
