@@ -1,6 +1,9 @@
 # @package eval.tofu_trajectory.metrics.trajectory_pass_retain_unguided
 # Single inference pass: retain split, guidance-free (ROUGE leg).
+# Also runs truth_ratio + privleak so retain_reference_mode can emit mia_min_k /
+# forget_truth_ratio (and by-step) for bundle consumers (trajectory_all reference_logs).
 defaults:
+  - .@pre_compute.mia_min_k: mia_min_k
   - ../../collator@collators: DataCollatorForSupervisedDatasetwithIndex
 
 handler: trajectory_metrics
@@ -10,6 +13,23 @@ trajectory_pass_id: retain__unguided
 metrics:
   rouge:
     rouge_type: rougeL_recall
+  truth_ratio:
+    aggregator: closer_to_1_better
+    pre_compute:
+      correct:
+        handler: probability
+        access_key: correct
+        labels_field: labels_correct
+      wrong:
+        handler: probability
+        access_key: wrong
+        labels_field: labels_wrong
+  privleak:
+    ref_value: 0.5
+    pre_compute:
+      mia_min_k:
+        access_key: forget
+        k: 0.4
 trajectory_config:
   evaluation_mode: unguided
   logits_source: sampler
@@ -26,6 +46,8 @@ trajectory_config:
     trajectory_sample_interval: 8
 metric_display_names:
   - trajectory_retain_Q_A_ROUGE
+  - trajectory_retain_Truth_Ratio
+  - trajectory_retain_privleak
 datasets:
   TOFU_QA_retain_eval:
     access_key: retain

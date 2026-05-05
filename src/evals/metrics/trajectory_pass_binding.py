@@ -109,19 +109,24 @@ _PASS_SPECS: dict[str, PassSpec] = {
     "retain__unguided": _spec(
         "retain__unguided",
         ("retain",),
-        ("rouge",),
+        ("rouge", "truth_ratio", "privleak"),
         "unguided",
-        ("trajectory_retain_Q_A_ROUGE",),
+        (
+            "trajectory_retain_Q_A_ROUGE",
+            "trajectory_retain_Truth_Ratio",
+            "trajectory_retain_privleak",
+        ),
     ),
     "retain__guided_native": _spec(
         "retain__guided_native",
         ("retain",),
-        ("probability", "extraction_strength", "truth_ratio"),
+        ("probability", "extraction_strength", "truth_ratio", "privleak"),
         "guided_native",
         (
             "trajectory_retain_Q_A_Prob",
             "trajectory_retain_extraction_strength",
             "trajectory_retain_Truth_Ratio",
+            "trajectory_retain_privleak",
         ),
     ),
     "ra__unguided": _spec(

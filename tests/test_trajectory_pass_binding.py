@@ -48,13 +48,29 @@ def test_filter_forget_unguided():
 
 
 def test_filter_retain_unguided():
-    m = {"rouge": {}, "probability": {}}
+    m = {"rouge": {}, "truth_ratio": {}, "privleak": {}, "probability": {}}
     data = {"retain": object(), "forget": object()}
     tc = {"evaluation_mode": "guided_native"}
     fm, fd, ftc = filter_metrics_and_data_for_pass("retain__unguided", m, data, tc)
-    assert set(fm.keys()) == {"rouge"}
+    assert set(fm.keys()) == {"rouge", "truth_ratio", "privleak"}
     assert set(fd.keys()) == {"retain"}
     assert ftc["evaluation_mode"] == "unguided"
+
+
+def test_filter_retain_guided_native_includes_privleak():
+    m = {
+        "probability": {},
+        "extraction_strength": {},
+        "truth_ratio": {},
+        "privleak": {},
+        "rouge": {},
+    }
+    data = {"retain": object()}
+    tc = {"evaluation_mode": "unguided"}
+    fm, fd, ftc = filter_metrics_and_data_for_pass("retain__guided_native", m, data, tc)
+    assert set(fm.keys()) == {"probability", "extraction_strength", "truth_ratio", "privleak"}
+    assert "privleak" in get_pass_spec("retain__guided_native").internal_metric_keys
+    assert ftc["evaluation_mode"] == "guided_native"
 
 
 def test_all_canonical_eight_pass_specs_exist():
