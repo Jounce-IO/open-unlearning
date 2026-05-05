@@ -26,6 +26,8 @@ from evals.metrics.trajectory_utils import (
     compute_fixation_start_trajectory,
     compute_fixation_end_trajectory,
     compute_fixation_ratio_trajectory,
+    diffusion_source_steps_for_trajectory,
+    diffusion_source_steps_batch,
     trajectories_from_logits,
     effective_lengths_from_eos,
     extract_logits_at_step,
@@ -1903,6 +1905,42 @@ class TestDecodeLogitsToText:
         
         assert len(texts) == 1
         assert isinstance(texts[0], str)
+
+
+class TestDiffusionSourceStepsBatch:
+    """``diffusion_source_steps_batch`` matches row-wise ``diffusion_source_steps_for_trajectory``."""
+
+    def test_batch_matches_per_row_fixation_start(self):
+        S, L = 6, 5
+        B = 3
+        F = torch.randint(0, S, (B, L), dtype=torch.long)
+        step = 4
+        bat = diffusion_source_steps_batch("fixation_start", step, F, S)
+        assert bat.shape == (B, L)
+        for b in range(B):
+            row = diffusion_source_steps_for_trajectory("fixation_start", step, F[b], S)
+            assert torch.equal(bat[b], row)
+
+
+class TestDiffusionSourceStepsForTrajectory:
+    """``diffusion_source_steps_for_trajectory`` matches fixation gather time indices."""
+
+    def test_steps_all_equal_reporting_index(self):
+        S, L = 5, 6
+        F = torch.tensor([0, 1, 2, 3, 4, 3], dtype=torch.long)
+        out = diffusion_source_steps_for_trajectory("steps", 3, F, S)
+        assert out.tolist() == [3] * L
+
+    def test_fixation_start_matches_per_position_minimum(self):
+        V, L, S = 4, 5, 6
+        R = torch.randn(V, L, S)
+        F = torch.randint(0, S, (L,), dtype=torch.long)
+        step = 4
+        got_logits = compute_fixation_start_trajectory(R, step, F)
+        src = diffusion_source_steps_for_trajectory("fixation_start", step, F, S)
+        for l in range(L):
+            t = int(src[l].item())
+            assert torch.allclose(got_logits[:, l], R[:, l, t])
 
 
 if __name__ == "__main__":
