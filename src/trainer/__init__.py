@@ -1,4 +1,5 @@
 import torch
+from dataclasses import replace
 from typing import Dict, Any
 from omegaconf import DictConfig, OmegaConf
 from transformers import Trainer, TrainingArguments
@@ -72,6 +73,7 @@ def load_trainer(
         method_args = dict(_raw_ma)
     # TOFU multi-eval / legacy four-way ROUGE keys are dllm-only; HF Trainer rejects unknown kwargs.
     tofu_multi_eval_cfg: dict = {}
+    _explicit_tofu_multi_eval_ce_keys: set[str] = set()
     tofu_multi_eval_runtime = None
     try:
         from dllm.core.trainers.tofu_multi_eval_phase2 import (
@@ -85,6 +87,12 @@ def load_trainer(
         for _k in list(method_args.keys()):
             if _k in FINETUNE_TOFU_MULTI_EVAL_METHOD_ARG_KEYS:
                 tofu_multi_eval_cfg[_k] = method_args[_k]
+                if _k in {
+                    "tofu_multi_eval_ce_loss_weight_type",
+                    "tofu_multi_eval_ce_loss_normalization_type",
+                    "tofu_multi_eval_ce_time_epsilon",
+                }:
+                    _explicit_tofu_multi_eval_ce_keys.add(_k)
         if tofu_multi_eval_cfg:
             normalize_tofu_multi_eval_flat_dict(tofu_multi_eval_cfg, warn_on_conflict=False)
         for _k in list(method_args.keys()):
@@ -148,6 +156,31 @@ def load_trainer(
             tofu_multi_eval_runtime = runtime_with_adapter_eval_scheduler(
                 tofu_multi_eval_runtime, model
             )
+            # Keep unlearn CE defaults aligned with adapter config unless explicitly overridden.
+            adapter_cfg = getattr(model, "adapter_config", None)
+            if adapter_cfg is not None:
+                runtime_updates = {}
+                if "tofu_multi_eval_ce_loss_weight_type" not in _explicit_tofu_multi_eval_ce_keys:
+                    runtime_updates["ce_loss_weight_type"] = str(
+                        getattr(adapter_cfg, "loss_weight_type", tofu_multi_eval_runtime.ce_loss_weight_type)
+                    )
+                if (
+                    "tofu_multi_eval_ce_loss_normalization_type"
+                    not in _explicit_tofu_multi_eval_ce_keys
+                ):
+                    runtime_updates["ce_loss_normalization_type"] = str(
+                        getattr(
+                            adapter_cfg,
+                            "loss_normalization_type",
+                            tofu_multi_eval_runtime.ce_loss_normalization_type,
+                        )
+                    )
+                if "tofu_multi_eval_ce_time_epsilon" not in _explicit_tofu_multi_eval_ce_keys:
+                    runtime_updates["ce_time_epsilon"] = float(
+                        getattr(adapter_cfg, "time_epsilon", tofu_multi_eval_runtime.ce_time_epsilon)
+                    )
+                if runtime_updates:
+                    tofu_multi_eval_runtime = replace(tofu_multi_eval_runtime, **runtime_updates)
         except ImportError:
             pass
         trainer.attach_tofu_multi_eval_phase2_runtime(tofu_multi_eval_runtime)

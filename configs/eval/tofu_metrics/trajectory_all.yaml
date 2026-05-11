@@ -1,5 +1,8 @@
 # @package eval.tofu_trajectory.metrics.trajectory_all
-# Single-pass: one trajectory_metrics run with all 7 sub-metrics (same R, one sampler pass).
+# Single-pass: one trajectory_metrics run with up to 7 sub-metrics (same R, one sampler pass).
+# Hydra default include_metrics=null means all keys under metrics: below (including hm_aggregate).
+# Note: dllm eval injects a six-metric include_metrics by default and omits hm_aggregate (trajectory
+# Model Utility crashes at runtime); see dllm docs/evaluation-notes.md — TOFU trajectory_model_utility.
 # metric_display_names maps each sub-metric to the log/summary key (trajectory_*).
 #
 # Token budget SSoT: locuslab/open-unlearning `configs/generation/default.yaml` (max_new_tokens: 200)
@@ -99,6 +102,8 @@ trajectory_config:
   logits_source: sampler
   return_logits: true
   return_fixation_steps: true
+  # Align trajectory ROUGE text extraction with committed canvas (+ same-step x0 on masks).
+  rouge_prediction_source: canvas_plus_step_x0
   # full = all positions 0..L (leakage); eos = positions 0..L_eff-1 only (real response). Default both.
   include_views: [full, eos]
   # Generalized metrics (dLLM-compatible): step-wise scores at fixation; matches invariants. causal = Dream/AR.

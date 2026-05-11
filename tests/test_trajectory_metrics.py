@@ -12,6 +12,7 @@ Tests cover:
 import pytest
 import torch
 from unittest.mock import Mock, patch
+import importlib
 
 import sys
 from pathlib import Path
@@ -23,6 +24,7 @@ sys.path.insert(0, str(repo_root / "src"))
 from evals.metrics.trajectory_metrics import (
     _build_prompts_for_sampler,
     _build_target_sequences_for_sampler,
+    _compute_mu_for_dataset,
     _get_sampler_from_model,
     _get_metric_from_registry,
     _call_metric_at_step,
@@ -53,6 +55,120 @@ def _trajectory_result_effective(result):
         if isinstance(first, dict) and "agg_value" in first:
             return first
     return result
+
+
+def test_compute_mu_rouge_uses_canvas_source_without_rouge_metric_call(monkeypatch):
+    class _OneSampleDataset:
+        predict_with_generate = False
+
+        def __len__(self):
+            return 1
+
+        def __getitem__(self, idx):
+            _ = idx
+            return {
+                "input_ids": torch.tensor([11, 12, 55, 56], dtype=torch.long),
+                "labels": torch.tensor([IGNORE_INDEX, IGNORE_INDEX, 55, 56], dtype=torch.long),
+                "labels_correct": torch.tensor([IGNORE_INDEX, IGNORE_INDEX, 55, 56], dtype=torch.long),
+                "labels_wrong": torch.tensor([[IGNORE_INDEX, IGNORE_INDEX, 99, 98]], dtype=torch.long),
+            }
+
+    def _collate(rows):
+        row = rows[0]
+        return {
+            "input_ids": row["input_ids"].unsqueeze(0),
+            "labels": row["labels"].unsqueeze(0),
+            "labels_correct": row["labels_correct"].unsqueeze(0),
+            "labels_wrong": row["labels_wrong"].unsqueeze(0),
+        }
+
+    class _Tok:
+        eos_token_id = 0
+        mask_token_id = 999
+
+        def decode(self, ids, **kwargs):
+            _ = kwargs
+            return " ".join(str(int(x)) for x in ids if int(x) not in (0, IGNORE_INDEX))
+
+        def batch_decode(self, rows, **kwargs):
+            return [self.decode(r, **kwargs) for r in rows]
+
+    class _SamplerOutput:
+        pass
+
+    class _Sampler:
+        def sample(self, **kwargs):
+            _ = kwargs
+            out = _SamplerOutput()
+            out.logits_history = [torch.zeros(1, 2, 8), torch.zeros(1, 2, 8)]
+            out.fixation_steps = torch.zeros(1, 2, dtype=torch.long)
+            out.sequences = torch.tensor([[11, 12, 55, 56]], dtype=torch.long)
+            out.sequence_snapshots = [
+                torch.tensor([[11, 12, 55, 56]], dtype=torch.long),
+                torch.tensor([[11, 12, 55, 56]], dtype=torch.long),
+            ]
+            out.proposal_snapshots = [
+                torch.tensor([[11, 12, 55, 56]], dtype=torch.long),
+                torch.tensor([[11, 12, 55, 56]], dtype=torch.long),
+            ]
+            return out
+
+    class _Model:
+        def __init__(self):
+            self.sampler = _Sampler()
+
+    tm = importlib.import_module("evals.metrics.trajectory_metrics")
+    monkeypatch.setattr(
+        tm,
+        "trajectories_from_logits",
+        lambda *args, **kwargs: {
+            "R": torch.zeros(1, 8, 2, 2),
+            "F": torch.zeros(1, 2, dtype=torch.long),
+            "S": 2,
+            "L": 2,
+        },
+    )
+
+    def _fake_call_metric_at_step(metric, **kwargs):
+        if getattr(metric, "name", "") == "rouge":
+            raise AssertionError("rouge metric path should be bypassed for canvas source")
+        _ = kwargs
+        return [{"prob": 0.5}]
+
+    monkeypatch.setattr(
+        tm,
+        "_call_metric_at_step",
+        _fake_call_metric_at_step,
+    )
+
+    traj_cfg = {
+        "trajectory_names": ["steps"],
+        "include_views": ["full", "eos"],
+        "rouge_prediction_source": "canvas_plus_step_x0",
+        "sampler_kwargs": {"steps": 2, "max_new_tokens": 2},
+    }
+    loaded = {
+        "probability": {"metric": METRICS_REGISTRY["probability"], "config": {}},
+        "rouge": {"metric": METRICS_REGISTRY["rouge"], "config": {"rouge_type": "rougeL_recall"}},
+        "truth_ratio": {"metric": METRICS_REGISTRY["truth_ratio"], "config": {}},
+    }
+    out = _compute_mu_for_dataset(
+        model=_Model(),
+        data_dataset=_OneSampleDataset(),
+        dataset_key="retain",
+        collator=_collate,
+        batch_size=1,
+        trajectory_config=traj_cfg,
+        tokenizer=_Tok(),
+        loaded_metrics=loaded,
+        sort_by_length=False,
+        use_distributed_sampler=False,
+        world_size=1,
+        rank=0,
+    )
+    assert "steps" in out
+    step_zero = out["steps"]["0"]["full"]
+    assert step_zero["retain_Q_A_ROUGE"]["agg_value"] is not None
 
 
 class TestShouldRunGc:

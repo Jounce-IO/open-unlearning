@@ -2587,6 +2587,42 @@ def _compute_mu_for_dataset(
         return result_by_step
 
     _sampler_kw = _trajectory_sampler_kwargs(trajectory_config)
+    _tc_plain_mu: Dict[str, Any] = {}
+    if trajectory_config is not None:
+        if OmegaConf.is_config(trajectory_config):
+            _tc_plain_mu = OmegaConf.to_container(trajectory_config, resolve=True) or {}
+        elif isinstance(trajectory_config, dict):
+            _tc_plain_mu = trajectory_config
+    rouge_prediction_source_mu = str(
+        _tc_plain_mu.get("rouge_prediction_source") or "logits_argmax"
+    ).lower()
+    if rouge_prediction_source_mu not in (
+        "logits_argmax",
+        "canvas_plus_step_x0",
+        "committed_only",
+    ):
+        raise ValueError(
+            "trajectory_config.rouge_prediction_source must be one of "
+            "logits_argmax, canvas_plus_step_x0, committed_only; got "
+            f"{rouge_prediction_source_mu!r}"
+        )
+    _mu_merge_mode = (
+        "committed_only"
+        if rouge_prediction_source_mu == "committed_only"
+        else "canvas_plus_step_x0"
+    )
+    _mask_token_id_mu = getattr(tokenizer, "mask_token_id", None)
+    if (
+        rouge_prediction_source_mu != "logits_argmax"
+        and _mask_token_id_mu is None
+    ):
+        logger.warning(
+            "Trajectory MU rouge_prediction_source=%s requires tokenizer.mask_token_id; "
+            "falling back to logits_argmax for dataset_key=%s.",
+            rouge_prediction_source_mu,
+            dataset_key,
+        )
+        rouge_prediction_source_mu = "logits_argmax"
     rouge_scorer_instance = rouge_scorer.RougeScorer(["rouge1", "rougeL"], use_stemmer=True)
     # Use same default as main trajectory loop (["full", "eos"]) so MU pre-compute always produces
     # both views when the main loop will ask for both; default ["full"] alone caused full-view
@@ -2675,6 +2711,8 @@ def _compute_mu_for_dataset(
             run_steps_to_use, _ = _derive_steps_to_use(S, trajectory_config)
         steps_to_use = [s for s in run_steps_to_use if s < S]
         sequences = getattr(sampler_output, "sequences", None)
+        seq_snapshots_batch = getattr(sampler_output, "sequence_snapshots", None)
+        prop_snapshots_batch = getattr(sampler_output, "proposal_snapshots", None)
         eos_token_id = (
             getattr(tokenizer, "eos_token_id", None)
             or (trajectory_config.get("eos_token_id") if trajectory_config else None)
@@ -2745,6 +2783,29 @@ def _compute_mu_for_dataset(
                 "rouge_debug_prompt_text": _rouge_prompt_dbg_mu,
                 **{k: v for k, v in kwargs.items() if k not in ("tokenizer", "model", "data")},
             }
+            use_canvas_rouge_mu = (
+                rouge_prediction_source_mu != "logits_argmax"
+                and seq_snapshots_batch is not None
+                and len(seq_snapshots_batch) == int(S)
+            )
+            if use_canvas_rouge_mu and rouge_prediction_source_mu == "canvas_plus_step_x0":
+                use_canvas_rouge_mu = (
+                    prop_snapshots_batch is not None and len(prop_snapshots_batch) == int(S)
+                )
+            sample_snap_stack = None
+            sample_prop_stack = None
+            sample_F = F[sample_idx : sample_idx + 1]
+            if use_canvas_rouge_mu:
+                sample_seq_snapshots = [
+                    step_tensor[sample_idx : sample_idx + 1] for step_tensor in seq_snapshots_batch
+                ]
+                sample_snap_stack = _stack_sequence_snapshots(sample_seq_snapshots)
+                if rouge_prediction_source_mu == "canvas_plus_step_x0":
+                    sample_prop_snapshots = [
+                        step_tensor[sample_idx : sample_idx + 1]
+                        for step_tensor in prop_snapshots_batch
+                    ]
+                    sample_prop_stack = _stack_sequence_snapshots(sample_prop_snapshots)
 
             for step_idx, step in enumerate(steps_to_use):
                 prob_obj = metric_objs.get("probability")
@@ -2772,6 +2833,59 @@ def _compute_mu_for_dataset(
                     return _extract_metric_scalar(res)
 
                 def _run_rouge(bt, log, vname):
+                    if use_canvas_rouge_mu and sample_snap_stack is not None:
+                        src_batch = diffusion_source_steps_batch(
+                            traj_name, int(step), sample_F, int(S)
+                        )
+                        n_dec = min(int(L_eff_b), int(L)) if vname == "eos" else int(L)
+                        merged_canvas = _trajectory_merge_snapshots_reindex_batched(
+                            sample_snap_stack,
+                            int(step),
+                            [int(sample_prompt_start)],
+                            int(L),
+                            [int(n_dec)],
+                            src_batch,
+                        )
+                        merged_prop_t = None
+                        if rouge_prediction_source_mu == "canvas_plus_step_x0":
+                            if sample_prop_stack is None:
+                                return None
+                            merged_prop_t = _trajectory_merge_snapshots_reindex_batched(
+                                sample_prop_stack,
+                                int(step),
+                                [int(sample_prompt_start)],
+                                int(L),
+                                [int(n_dec)],
+                                src_batch,
+                            )
+                        gen_text = _trajectory_canvas_gen_texts_batched(
+                            merged_canvas,
+                            merged_prop_t,
+                            [int(sample_prompt_start)],
+                            int(L),
+                            [int(n_dec)],
+                            int(_mask_token_id_mu),
+                            str(vname),
+                            [int(L_eff_b)],
+                            tokenizer,
+                            _mu_merge_mode,
+                        )[0]
+                        rouge_scores = eval_rouge_recall_batch(
+                            [gen_text],
+                            [ground_truth_str],
+                            use_stemmer=True,
+                            scorer=rouge_scorer_instance,
+                        )
+                        rouge_type = cfg_rouge.get("rouge_type") or kwargs_mu.get(
+                            "rouge_type", "rougeL_f1"
+                        )
+                        if (
+                            rouge_scores
+                            and isinstance(rouge_scores[0], dict)
+                            and rouge_type in rouge_scores[0]
+                        ):
+                            return float(rouge_scores[0][rouge_type])
+                        return None
                     res = _call_metric_at_step(
                         metric=rouge_obj,
                         logits=log,

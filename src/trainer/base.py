@@ -187,16 +187,15 @@ class FinetuneTrainer(Trainer):
                 if hasattr(self, "state") and self.state is not None
                 else "?",
             )
-            if self.accelerator.is_local_main_process:
-                eval_metrics = {}
-                if self.accelerator.num_processes == 1:
+            eval_metrics: dict[str, float] = {}
+            if self.accelerator.num_processes == 1:
+                if self.accelerator.is_local_main_process:
                     run_dir = self._get_output_dir(trial=trial)
                     checkpoint_folder = (
                         f"{PREFIX_CHECKPOINT_DIR}-{self.state.global_step}"
                     )
                     output_dir = os.path.join(run_dir, checkpoint_folder, "evals")
                     os.makedirs(output_dir, exist_ok=True)
-                    eval_metrics = {}
                     for _, evaluator in self.evaluators.items():
                         eval_args = {
                             "output_dir": output_dir,
@@ -205,49 +204,50 @@ class FinetuneTrainer(Trainer):
                             "tokenizer": self.tokenizer,
                         }
                         eval_metrics.update(evaluator.evaluate(**eval_args))
-                    ed = getattr(self, "eval_dataset", None)
-                    rt = getattr(self, "_dllm_tofu_multi_phase2_runtime", None)
-                    if (
-                        isinstance(ed, dict)
-                        and rt is not None
-                        and getattr(rt, "tofu_multi_eval", True)
-                    ):
-                        try:
-                            from dllm.core.trainers.tofu_multi_eval_phase2 import (
-                                run_tofu_multi_eval_phase2,
-                                tofu_multi_eval_step_schedule,
-                            )
-
-                            run_general, include_rouge = tofu_multi_eval_step_schedule(
-                                int(getattr(self.state, "global_step", 0) or 0),
-                                rt.tofu_multi_eval_steps,
-                                rt.tofu_multi_eval_rouge_steps,
-                                tofu_multi_eval_rouge_enabled=rt.tofu_multi_eval_rouge,
-                            )
-                            if run_general:
-                                p2 = run_tofu_multi_eval_phase2(
-                                    self,
-                                    ed,
-                                    runtime=rt,
-                                    ignore_keys=None,
-                                    metric_key_prefix=metric_key_prefix,
-                                    include_rouge=include_rouge,
-                                    log_metrics=False,
-                                )
-                                for k, v in (p2.metrics or {}).items():
-                                    if isinstance(v, (int, float)):
-                                        eval_metrics[k] = float(v)
-                        except Exception as exc:
-                            logger.warning(
-                                "TOFU multi-eval Phase 2 merge alongside evaluators failed: %s",
-                                exc,
-                                exc_info=True,
-                            )
-                self.log(_scalar_metrics_for_wandb(eval_metrics))
             else:
                 logger.warning(
-                    "Custom evaluator can be run with this Trainer only when a single accelerator process is running."
+                    "Custom evaluators are skipped when running with multiple accelerator processes."
                 )
+            ed = getattr(self, "eval_dataset", None)
+            rt = getattr(self, "_dllm_tofu_multi_phase2_runtime", None)
+            if (
+                isinstance(ed, dict)
+                and rt is not None
+                and getattr(rt, "tofu_multi_eval", True)
+            ):
+                try:
+                    from dllm.core.trainers.tofu_multi_eval_phase2 import (
+                        run_tofu_multi_eval_phase2,
+                        tofu_multi_eval_step_schedule,
+                    )
+
+                    run_general, include_rouge = tofu_multi_eval_step_schedule(
+                        int(getattr(self.state, "global_step", 0) or 0),
+                        rt.tofu_multi_eval_steps,
+                        rt.tofu_multi_eval_rouge_steps,
+                        tofu_multi_eval_rouge_enabled=rt.tofu_multi_eval_rouge,
+                    )
+                    if run_general:
+                        p2 = run_tofu_multi_eval_phase2(
+                            self,
+                            ed,
+                            runtime=rt,
+                            ignore_keys=None,
+                            metric_key_prefix=metric_key_prefix,
+                            include_rouge=include_rouge,
+                            log_metrics=False,
+                        )
+                        for k, v in (p2.metrics or {}).items():
+                            if isinstance(v, (int, float)):
+                                eval_metrics[k] = float(v)
+                except Exception as exc:
+                    logger.warning(
+                        "TOFU multi-eval Phase 2 merge alongside evaluators failed: %s",
+                        exc,
+                        exc_info=True,
+                    )
+            if self.accelerator.is_local_main_process:
+                self.log(_scalar_metrics_for_wandb(eval_metrics))
             return eval_metrics
 
         # When the training loop calls evaluate() it does not pass eval_dataset; use the one from __init__.
