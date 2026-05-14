@@ -8,11 +8,12 @@ from evals.metrics.trajectory_pass_binding import (
     filter_metrics_and_data_for_pass,
     get_pass_spec,
     list_all_pass_specs,
+    trajectory_pass_ids_extended,
 )
 
 
 def test_display_metric_binding_count():
-    assert len(DISPLAY_METRIC_BINDING) == 8
+    assert len(DISPLAY_METRIC_BINDING) == 9
 
 
 def test_hm_aggregate_submetric_binding_count():
@@ -57,6 +58,16 @@ def test_filter_retain_unguided():
     assert ftc["evaluation_mode"] == "unguided"
 
 
+def test_filter_retain_sft_unguided():
+    m = {"rouge": {}, "probability": {}}
+    data = {"retain": object(), "forget": object()}
+    tc = {"evaluation_mode": "guided_native"}
+    fm, fd, ftc = filter_metrics_and_data_for_pass("retain_sft__unguided", m, data, tc)
+    assert set(fm.keys()) == {"rouge"}
+    assert set(fd.keys()) == {"retain"}
+    assert ftc["evaluation_mode"] == "unguided"
+
+
 def test_all_canonical_eight_pass_specs_exist():
     for pid in canonical_pass_ids_eight():
         get_pass_spec(pid)
@@ -75,6 +86,6 @@ def test_forget_guided_native_includes_golden_token_heatmap():
 
 def test_implemented_pass_specs_are_subset_of_canonical_twelve():
     """Skew variants extend the eight canonical legs; every spec must be discoverable."""
-    twelve = set(canonical_pass_ids_twelve())
+    allowed = set(canonical_pass_ids_twelve()) | set(trajectory_pass_ids_extended())
     for pid in list_all_pass_specs():
-        assert pid in twelve
+        assert pid in allowed

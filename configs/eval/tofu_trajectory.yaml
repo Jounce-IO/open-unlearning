@@ -14,6 +14,9 @@ samples: null  # Limit dataset size; set via CLI (eval.tofu_trajectory.samples=N
 overwrite: false
 forget_split: forget10
 holdout_split: holdout10
+# HF subset for SFT-parity retain trajectory (``retain_sft__unguided`` only): retain90 | retain95 | retain99.
+# Matches locuslab/TOFU config names used by dllm SFT six-split retain ROUGE. Override via Hydra or dllm CLI.
+retain_sft_split: retain90
 retain_logs_path: null
 # When true, save value_by_index in logs for use as retain reference (FQ/ks_test, privleak). Override: eval.tofu_trajectory.retain_reference_mode=true
 retain_reference_mode: false

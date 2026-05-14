@@ -15,6 +15,7 @@ __all__ = [
     "PassSpec",
     "canonical_pass_ids_eight",
     "canonical_pass_ids_twelve",
+    "trajectory_pass_ids_extended",
     "get_pass_spec",
     "list_all_pass_specs",
     "DISPLAY_METRIC_BINDING",
@@ -62,6 +63,11 @@ def canonical_pass_ids_twelve() -> tuple[str, ...]:
             )
         )
     return tuple(out)
+
+
+def trajectory_pass_ids_extended() -> tuple[str, ...]:
+    """Trajectory pass IDs implemented outside the 4×3 skew grid (e.g. SFT-parity retain)."""
+    return ("retain_sft__unguided",)
 
 
 def _spec(
@@ -112,6 +118,13 @@ _PASS_SPECS: dict[str, PassSpec] = {
         ("rouge",),
         "unguided",
         ("trajectory_retain_Q_A_ROUGE",),
+    ),
+    "retain_sft__unguided": _spec(
+        "retain_sft__unguided",
+        ("retain",),
+        ("rouge",),
+        "unguided",
+        ("trajectory_retain_sft_Q_A_ROUGE",),
     ),
     "retain__guided_native": _spec(
         "retain__guided_native",
@@ -215,6 +228,7 @@ DISPLAY_METRIC_BINDING: dict[str, tuple[str, str]] = {
     "trajectory_forget_quality": ("guided", "forget"),
     "trajectory_model_utility": ("mixed", "retain_ra_wf"),
     "trajectory_privleak": ("guided", "forget"),
+    "trajectory_retain_sft_Q_A_ROUGE": ("guidance_free", "retain"),
 }
 
 HM_AGGREGATE_SUBMETRIC_BINDING: dict[str, tuple[str, str]] = {
