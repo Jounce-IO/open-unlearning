@@ -2124,6 +2124,104 @@ def _extract_metric_scalar(result: Any) -> Optional[float]:
     return None
 
 
+def _dual_label_prob_scalar(
+    pc: Optional[float],
+    pw_list: Sequence[float],
+    *,
+    normalised: bool,
+) -> Optional[float]:
+    """Combine correct prob ``pc`` with wrong-option probs (TOFU ra/wf semantics).
+
+    When ``normalised`` is True, returns ``pc / (pc + mean(pw) + 1e-10)`` (OU trajectory MU).
+    Otherwise returns ``pc`` when present.
+    """
+    if pc is None:
+        return None
+    pc_f = float(pc)
+    if not normalised:
+        return pc_f
+    if not pw_list:
+        return pc_f
+    mean_pw = float(np.mean(np.asarray(pw_list, dtype=np.float64)))
+    return pc_f / (pc_f + mean_pw + 1e-10)
+
+
+def _pass_emits_normalised_prob(kwargs: Dict[str, Any]) -> bool:
+    """True when this pass should emit ``*_Q_A_Prob_normalised`` (ra/wf guided_prob)."""
+    for dn in kwargs.get("metric_display_names") or ():
+        if "Prob_normalised" in str(dn):
+            return True
+    tpid = kwargs.get("trajectory_pass_id")
+    return tpid in ("ra__guided_prob", "wf__guided_prob")
+
+
+def _trajectory_dual_label_probability_scalar(
+    prob_metric: Any,
+    logits: torch.Tensor,
+    batch_template: Dict[str, Any],
+    *,
+    normalised: bool,
+    tokenizer: Any,
+    sample_labels: Any,
+    sample_input_ids: Any,
+    sample_prompt_len: int,
+    metric_config: Any,
+    sample_idx: str,
+    step: int,
+    step_index: Optional[int],
+    kwargs_metric: Dict[str, Any],
+) -> Optional[float]:
+    """Probability on dual-label batch; optional ra/wf normalisation."""
+    labels_correct = batch_template.get("labels_correct")
+    labels_wrong_raw = batch_template.get("labels_wrong")
+    if labels_correct is None or labels_wrong_raw is None:
+        return None
+    bt_correct = dict(batch_template)
+    bt_correct["labels"] = (
+        labels_correct if not isinstance(labels_correct, list) else labels_correct[0]
+    )
+    res_c = _call_metric_at_step(
+        metric=prob_metric,
+        logits=logits,
+        batch_template=bt_correct,
+        tokenizer=tokenizer,
+        sample_labels=sample_labels,
+        sample_input_ids=sample_input_ids,
+        sample_prompt_len=sample_prompt_len,
+        metric_config=metric_config,
+        sample_idx=sample_idx,
+        step=step,
+        step_index=step_index,
+        **kwargs_metric,
+    )
+    pc = _extract_metric_scalar(res_c)
+    wrong_tensors = (
+        labels_wrong_raw if isinstance(labels_wrong_raw, list) else [labels_wrong_raw]
+    )
+    pw_list: list[float] = []
+    for lw in wrong_tensors:
+        bt_wrong = dict(batch_template)
+        bt_wrong["labels"] = lw
+        res_w = _call_metric_at_step(
+            metric=prob_metric,
+            logits=logits,
+            batch_template=bt_wrong,
+            tokenizer=tokenizer,
+            sample_labels=sample_labels,
+            sample_input_ids=sample_input_ids,
+            sample_prompt_len=sample_prompt_len,
+            metric_config=metric_config,
+            sample_idx=sample_idx,
+            step=step,
+            step_index=step_index,
+            **kwargs_metric,
+        )
+        pw_k = _extract_metric_scalar(res_w)
+        if pw_k is not None:
+            pw_list.append(float(pw_k))
+    return _dual_label_prob_scalar(pc, pw_list, normalised=normalised)
+
+
 def _compute_retain_mu_by_step(
     model: Any,
     data_retain: Any,
@@ -3001,13 +3099,16 @@ def _compute_mu_for_dataset(
                                                 pc,
                                                 use_normalised_prob,
                                             )
-                                        norm = pc / (pc + mean_pw + 1e-10)
+                                        norm = _dual_label_prob_scalar(
+                                            pc, pw_list, normalised=True
+                                        )
                                         # TR: TOFU wrong/correct with wrong = mean_k P(wrong_k) (same contract as truth_ratio multi-wrong).
                                         tr_ratio = mean_pw / (pc + 1e-10)
                                         pl["tr"].append(tr_ratio)
                                         if use_normalised_prob:
-                                            pl["prob"].append(norm)
-                                        else:
+                                            if norm is not None:
+                                                pl["prob"].append(norm)
+                                        elif pc is not None:
                                             pl["prob"].append(pc)
                                     elif pc is not None and not use_normalised_prob:
                                         pl["prob"].append(pc)
@@ -5952,6 +6053,39 @@ def trajectory_metrics(model, **kwargs):
                                                     idx_str,
                                                     metric_value,
                                                 )
+                                            if (
+                                                metric_name == "probability"
+                                                and _pass_emits_normalised_prob(kwargs)
+                                                and "labels_correct" in bt
+                                                and "labels_wrong" in bt
+                                            ):
+                                                try:
+                                                    si = kwargs_clean.get("step_index")
+                                                    norm_val = _trajectory_dual_label_probability_scalar(
+                                                        metric,
+                                                        logits_view,
+                                                        bt,
+                                                        normalised=True,
+                                                        tokenizer=tokenizer,
+                                                        sample_labels=sample_labels,
+                                                        sample_input_ids=sample_input_ids,
+                                                        sample_prompt_len=sample_prompt_len,
+                                                        metric_config=metric_cfg,
+                                                        sample_idx=idx_str,
+                                                        step=step,
+                                                        step_index=si,
+                                                        kwargs_metric=kwargs_metric,
+                                                    )
+                                                    if norm_val is not None:
+                                                        metric_value = norm_val
+                                                except Exception as norm_e:
+                                                    logger.warning(
+                                                        "trajectory dual-label normalised prob failed "
+                                                        "(pass=%s step=%s): %s",
+                                                        kwargs.get("trajectory_pass_id"),
+                                                        step,
+                                                        norm_e,
+                                                    )
                                             if metric_value is not None:
                                                 step_values_by_view[view][traj_name][step][
                                                     metric_name
