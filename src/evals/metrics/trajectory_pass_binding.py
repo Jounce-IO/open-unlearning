@@ -15,7 +15,9 @@ __all__ = [
     "PassSpec",
     "canonical_pass_ids_eight",
     "canonical_pass_ids_twelve",
+    "canonical_pass_ids_fourteen_mu",
     "canonical_pass_ids_sixteen_mu",
+    "canonical_pass_ids_legacy_mu_norm",
     "trajectory_pass_ids_extended",
     "get_pass_spec",
     "list_all_pass_specs",
@@ -41,28 +43,38 @@ class PassSpec:
     display_names_emitted: tuple[str, ...]
 
 
-def canonical_pass_ids_sixteen_mu() -> tuple[str, ...]:
-    """Four splits × (unguided + guided_prob + two TR guidance legs). OU MU bundle."""
+def canonical_pass_ids_fourteen_mu() -> tuple[str, ...]:
+    """Four splits × (unguided + prob or two TR legs). RA/WF norm is merge-synthesized."""
     bases = ("forget", "retain", "ra", "wf")
     out: list[str] = []
     for b in bases:
         out.append(f"{b}__unguided")
-        out.append(f"{b}__guided_prob")
         if b in ("forget", "retain"):
+            out.append(f"{b}__guided_prob")
             out.extend((f"{b}__guided_tr_para", f"{b}__guided_tr_pert"))
         else:
             out.extend((f"{b}__guided_tr_correct", f"{b}__guided_tr_pert"))
     return tuple(out)
 
 
+def canonical_pass_ids_legacy_mu_norm() -> tuple[str, ...]:
+    """Optional GPU passes superseded by merge-time ``probability_w_options`` synthesis."""
+    return ("ra__guided_prob", "wf__guided_prob")
+
+
+def canonical_pass_ids_sixteen_mu() -> tuple[str, ...]:
+    """Deprecated name: returns :func:`canonical_pass_ids_fourteen_mu` (was 16 passes)."""
+    return canonical_pass_ids_fourteen_mu()
+
+
 def canonical_pass_ids_eight() -> tuple[str, ...]:
-    """Deprecated alias: use :func:`canonical_pass_ids_sixteen_mu`."""
-    return canonical_pass_ids_sixteen_mu()
+    """Deprecated alias: use :func:`canonical_pass_ids_fourteen_mu`."""
+    return canonical_pass_ids_fourteen_mu()
 
 
 def canonical_pass_ids_twelve() -> tuple[str, ...]:
-    """Deprecated alias: use :func:`canonical_pass_ids_sixteen_mu`."""
-    return canonical_pass_ids_sixteen_mu()
+    """Deprecated alias: use :func:`canonical_pass_ids_fourteen_mu`."""
+    return canonical_pass_ids_fourteen_mu()
 
 
 def trajectory_pass_ids_extended() -> tuple[str, ...]:
@@ -86,7 +98,7 @@ def _spec(
     )
 
 
-# OU-aligned sixteen-pass MU bundle (+ optional parity / legacy ids).
+# OU-aligned fourteen-pass MU compute bundle (+ optional legacy / parity ids).
 _PASS_SPECS: dict[str, PassSpec] = {
     "forget__unguided": _spec(
         "forget__unguided",

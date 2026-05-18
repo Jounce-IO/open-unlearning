@@ -1,4 +1,6 @@
 # @package eval.tofu_trajectory.metrics.trajectory_pass_ra_guided_prob
+# DEPRECATED: optional legacy pass. MU norm uses merge synthesis from
+# ra__guided_tr_correct + ra__guided_tr_pert (OU probability_w_options).
 defaults:
   - ../../collator@collators: DataCollatorForSupervisedDatasetwithIndex
 

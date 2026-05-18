@@ -4,6 +4,8 @@ from evals.metrics.trajectory_pass_binding import (
     DISPLAY_METRIC_BINDING,
     HM_AGGREGATE_SUBMETRIC_BINDING,
     canonical_pass_ids_eight,
+    canonical_pass_ids_fourteen_mu,
+    canonical_pass_ids_legacy_mu_norm,
     canonical_pass_ids_sixteen_mu,
     canonical_pass_ids_twelve,
     filter_metrics_and_data_for_pass,
@@ -34,23 +36,32 @@ def test_hm_aggregate_submetric_binding_count():
     assert len(HM_AGGREGATE_SUBMETRIC_BINDING) == 9
 
 
-def test_canonical_pass_ids_sixteen_mu():
-    ids = canonical_pass_ids_sixteen_mu()
-    assert len(ids) == 16
+def test_canonical_pass_ids_fourteen_mu():
+    ids = canonical_pass_ids_fourteen_mu()
+    assert len(ids) == 14
+    assert ids == canonical_pass_ids_sixteen_mu()
     assert ids == canonical_pass_ids_eight() == canonical_pass_ids_twelve()
     assert "forget__unguided" in ids
     assert "retain__guided_tr_para" in ids
     assert "ra__guided_tr_correct" in ids
-    assert "wf__guided_prob" in ids
+    assert "ra__guided_prob" not in ids
+    assert "wf__guided_prob" not in ids
     assert "forget__guided_native" not in ids
 
 
-def test_canonical_pass_ids_eight_is_sixteen_mu_alias():
-    assert len(canonical_pass_ids_eight()) == 16
+def test_canonical_pass_ids_legacy_mu_norm():
+    legacy = canonical_pass_ids_legacy_mu_norm()
+    assert legacy == ("ra__guided_prob", "wf__guided_prob")
+    for pid in legacy:
+        get_pass_spec(pid)
 
 
-def test_canonical_pass_ids_twelve_is_sixteen_mu_alias():
-    assert len(canonical_pass_ids_twelve()) == 16
+def test_canonical_pass_ids_eight_is_fourteen_mu_alias():
+    assert len(canonical_pass_ids_eight()) == 14
+
+
+def test_canonical_pass_ids_twelve_is_fourteen_mu_alias():
+    assert len(canonical_pass_ids_twelve()) == 14
 
 
 def test_get_pass_spec_forget_unguided():
@@ -102,8 +113,8 @@ def test_filter_retain_sft_unguided():
     assert ftc["evaluation_mode"] == "unguided"
 
 
-def test_all_canonical_sixteen_pass_specs_exist():
-    for pid in canonical_pass_ids_sixteen_mu():
+def test_all_canonical_fourteen_pass_specs_exist():
+    for pid in canonical_pass_ids_fourteen_mu():
         get_pass_spec(pid)
 
 
@@ -120,7 +131,8 @@ def test_forget_guided_native_includes_golden_token_heatmap():
 
 def test_implemented_pass_specs_are_discoverable():
     allowed = (
-        set(canonical_pass_ids_sixteen_mu())
+        set(canonical_pass_ids_fourteen_mu())
+        | set(canonical_pass_ids_legacy_mu_norm())
         | set(trajectory_pass_ids_extended())
         | _LEGACY_PASS_IDS
     )

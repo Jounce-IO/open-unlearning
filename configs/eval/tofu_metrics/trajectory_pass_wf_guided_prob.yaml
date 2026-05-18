@@ -1,4 +1,6 @@
 # @package eval.tofu_trajectory.metrics.trajectory_pass_wf_guided_prob
+# DEPRECATED: optional legacy pass. MU norm uses merge synthesis from
+# wf__guided_tr_correct + wf__guided_tr_pert (OU probability_w_options).
 defaults:
   - ../../collator@collators: DataCollatorForSupervisedDatasetwithIndex
 

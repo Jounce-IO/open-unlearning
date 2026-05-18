@@ -1,5 +1,7 @@
 # @package eval.tofu_trajectory.metrics.trajectory_pass_retain_guided_tr_para
+# OU: retain_Q_A_PARA_Prob → TOFU_QA_retain_para.
 defaults:
+  - ../../data/datasets@datasets: TOFU_QA_retain_para
   - ../../collator@collators: DataCollatorForSupervisedDatasetwithIndex
 
 handler: trajectory_metrics
@@ -28,17 +30,10 @@ trajectory_config:
 metric_display_names:
   - trajectory_retain_Q_A_PARA_Prob
 datasets:
-  TOFU_QA_retain_tr_para:
+  TOFU_QA_retain_para:
     access_key: retain
-    handler: QADataset
     args:
-      hf_args:
-        name: retain_perturbed
-        split: train
-        path: locuslab/TOFU
       question_key: ${eval.tofu_trajectory.question_key}
-      answer_key: paraphrased_answer
-      max_length: 512
       predict_with_generate: true
 collators:
   DataCollatorForSupervisedDataset:
