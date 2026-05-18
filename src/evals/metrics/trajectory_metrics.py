@@ -7226,36 +7226,36 @@ def trajectory_metrics(model, **kwargs):
                             "ci_low": np.array([]),
                             "ci_high": np.array([]),
                         }
-                if _trajectory_pass_is_pert(kwargs.get("trajectory_pass_id")):
-                    for traj_name in trajectory_names:
-                        step_metric_values_ws: dict = {}
-                        if traj_name in step_values:
-                            for step, metrics_dict in step_values[traj_name].items():
-                                ws = metrics_dict.get("probability_wrong_sum")
-                                if ws is not None and len(ws) > 0:
-                                    step_metric_values_ws[step] = ws
-                        if not step_metric_values_ws:
-                            continue
-                        ordered_steps = (
-                            run_steps_to_use
-                            if run_steps_to_use is not None
-                            else sorted(step_metric_values_ws.keys())
-                        )
-                        aggregated_ws = []
-                        for step in ordered_steps:
-                            if step in step_metric_values_ws:
-                                vals = step_metric_values_ws[step]
-                                vals_clean = [
-                                    float(v) if v is not None else np.nan for v in vals
-                                ]
-                                aggregated_ws.append(
-                                    np.nanmean(vals_clean) if vals_clean else np.nan
-                                )
-                            else:
-                                aggregated_ws.append(np.nan)
-                        agg_value[traj_name]["probability_wrong_sum"] = np.array(
-                            aggregated_ws
-                        )
+            if _trajectory_pass_is_pert(kwargs.get("trajectory_pass_id")):
+                for traj_name in trajectory_names:
+                    step_metric_values_ws: dict = {}
+                    if traj_name in step_values:
+                        for step, metrics_dict in step_values[traj_name].items():
+                            ws = metrics_dict.get("probability_wrong_sum")
+                            if ws is not None and len(ws) > 0:
+                                step_metric_values_ws[step] = ws
+                    if not step_metric_values_ws:
+                        continue
+                    ordered_steps = (
+                        run_steps_to_use
+                        if run_steps_to_use is not None
+                        else sorted(step_metric_values_ws.keys())
+                    )
+                    aggregated_ws = []
+                    for step in ordered_steps:
+                        if step in step_metric_values_ws:
+                            vals = step_metric_values_ws[step]
+                            vals_clean = [
+                                float(v) if v is not None else np.nan for v in vals
+                            ]
+                            aggregated_ws.append(
+                                np.nanmean(vals_clean) if vals_clean else np.nan
+                            )
+                        else:
+                            aggregated_ws.append(np.nan)
+                    agg_value[traj_name]["probability_wrong_sum"] = np.array(
+                        aggregated_ws
+                    )
             agg_value_by_view[view] = agg_value
             step_distribution_by_view[view] = step_distribution
 
