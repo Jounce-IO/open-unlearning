@@ -1,5 +1,5 @@
 # @package eval.tofu_trajectory.metrics.trajectory_pass_ra_guided_native
-# Single inference pass: real_authors split, guided_native.
+# DEPRECATED: use ra__guided_tr_correct|pert (+ merge TR/norm).
 defaults:
   - ../../collator@collators: DataCollatorForSupervisedDatasetwithIndex
 

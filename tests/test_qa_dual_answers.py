@@ -24,6 +24,12 @@ from data.qa import _ensure_single_answer, QAwithDualAnswersDataset
 class TestEnsureSingleAnswer:
     """Unit tests for _ensure_single_answer (list -> first element, string -> passthrough)."""
 
+    def test_dual_answers_dataset_emits_deprecation_warning(self):
+        with patch.object(QAwithDualAnswersDataset, "__getitem__", return_value={}):
+            with patch("data.qa.QADataset.__init__", return_value=None):
+                with pytest.warns(DeprecationWarning, match="QAwithDualAnswersDataset"):
+                    QAwithDualAnswersDataset("paraphrased_answer", "perturbed_answer")
+
     def test_returns_first_element_when_list(self):
         out = _ensure_single_answer(["a", "b", "c"], "wrong_key", 0, 0)
         assert out == "a"

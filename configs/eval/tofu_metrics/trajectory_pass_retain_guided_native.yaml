@@ -1,5 +1,5 @@
 # @package eval.tofu_trajectory.metrics.trajectory_pass_retain_guided_native
-# Single inference pass: retain split, guided_native (Prob / extraction / Truth Ratio).
+# DEPRECATED: use retain__guided_prob + retain__guided_tr_para|pert (+ merge TR).
 defaults:
   - ../../collator@collators: DataCollatorForSupervisedDatasetwithIndex
 

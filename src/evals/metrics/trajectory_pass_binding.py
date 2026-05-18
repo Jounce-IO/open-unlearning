@@ -6,11 +6,25 @@ Each pass is one inference run: one dataset access key × sampling regime × opt
 
 from __future__ import annotations
 
+import logging
+import warnings
 from dataclasses import dataclass
 from enum import Enum
 from typing import Any, FrozenSet, Mapping, Sequence
 
+logger = logging.getLogger(__name__)
+
+DEPRECATED_PASS_IDS: frozenset[str] = frozenset(
+    {
+        "forget__guided_native",
+        "retain__guided_native",
+        "ra__guided_native",
+        "wf__guided_native",
+    }
+)
+
 __all__ = [
+    "DEPRECATED_PASS_IDS",
     "SamplingRegime",
     "PassSpec",
     "canonical_pass_ids_eight",
@@ -310,6 +324,13 @@ def get_pass_spec(pass_id: str) -> PassSpec:
             f"Unknown trajectory_pass_id={pass_id!r}. "
             f"Known: {sorted(_PASS_SPECS.keys())}"
         )
+    if pass_id in DEPRECATED_PASS_IDS:
+        msg = (
+            f"trajectory_pass_id={pass_id!r} is deprecated (dual-label / QAwithDualAnswers). "
+            "Use OU-aligned split passes: *_guided_tr_para|pert or *_guided_tr_correct|pert."
+        )
+        warnings.warn(msg, DeprecationWarning, stacklevel=2)
+        logger.warning(msg)
     return _PASS_SPECS[pass_id]
 
 

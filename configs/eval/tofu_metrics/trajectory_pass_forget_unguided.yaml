@@ -1,8 +1,7 @@
 # @package eval.tofu_trajectory.metrics.trajectory_pass_forget_unguided
-# Single inference pass: forget split, guidance-free.
-# Forget loader: QADataset + non-perturbed ``${eval.tofu_trajectory.forget_split}`` + ``answer_key=answer``
-# (same HF subset / GT semantics as dllm ``--tofu-sft-parity`` forget_Q_A_ROUGE). Dual-answer / ``*_perturbed``
-# is intentionally not the default here so trajectory terminal ROUGE matches SFT-parity scalars.
+# Single inference pass: forget split, guidance-free (OU forget ROUGE).
+# QADataset on ``${forget_split}_perturbed`` + ``answer_key=answer`` (matches scalar ``forget_Q_A_ROUGE``).
+# For SFT-parity forget ROUGE (non-perturbed split), use a dedicated parity config — not this default pass.
 defaults:
   - ../../data/datasets@datasets: TOFU_QA_forget
   - ../../collator@collators: DataCollatorForSupervisedDatasetwithIndex
@@ -39,7 +38,7 @@ datasets:
     handler: QADataset
     args:
       hf_args:
-        name: ${eval.tofu_trajectory.forget_split}
+        name: ${eval.tofu_trajectory.forget_split}_perturbed
         split: train
         path: locuslab/TOFU
       question_key: ${eval.tofu_trajectory.question_key}

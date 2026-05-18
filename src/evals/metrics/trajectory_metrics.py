@@ -11,6 +11,7 @@ Every-step mode (no interval) is not used.
 import copy
 import gc
 import logging
+import math
 import os
 import time
 from collections import defaultdict
@@ -4539,6 +4540,194 @@ def _trajectory_pass_is_pert(trajectory_pass_id: Optional[str]) -> bool:
     return bool(trajectory_pass_id) and str(trajectory_pass_id).endswith("__guided_tr_pert")
 
 
+def _should_persist_value_by_index(
+    trajectory_config: Optional[Any],
+    trajectory_pass_id: Optional[str],
+) -> bool:
+    """Whether to serialize per-sample per-step series for merge-time TR/norm synthesis."""
+    if trajectory_config is not None:
+        if OmegaConf.is_config(trajectory_config):
+            tc = OmegaConf.to_container(trajectory_config, resolve=True) or {}
+        elif isinstance(trajectory_config, dict):
+            tc = trajectory_config
+        else:
+            tc = {}
+        explicit = tc.get("persist_value_by_index")
+        if explicit is False:
+            return False
+        if explicit is True:
+            return True
+    pid = str(trajectory_pass_id or "")
+    if pid.endswith("__guided_tr_para") or pid.endswith("__guided_tr_pert"):
+        return True
+    if pid.endswith("__guided_tr_correct"):
+        return True
+    if pid.endswith("__guided_prob"):
+        return True
+    return False
+
+
+def _init_step_index_keys_by_view(
+    include_views: Sequence[str],
+    trajectory_names: Sequence[str],
+) -> Dict[str, Dict[str, Dict[Any, Dict[str, List[str]]]]]:
+    return {
+        str(v): {str(traj): {} for traj in trajectory_names} for v in include_views
+    }
+
+
+def _record_step_index_key(
+    step_index_keys_by_view: Dict[str, Any],
+    view: str,
+    traj_name: str,
+    step: Any,
+    metric_name: str,
+    index_str: str,
+) -> None:
+    by_step = step_index_keys_by_view[str(view)][str(traj_name)]
+    if step not in by_step:
+        by_step[step] = {}
+    by_step[step].setdefault(metric_name, []).append(str(index_str))
+
+
+def _sync_pert_wrong_sum_index_keys(
+    step_index_keys_by_view: Dict[str, Any],
+    step_values_by_view: Dict[str, Any],
+    include_views: Sequence[str],
+    trajectory_names: Sequence[str],
+) -> None:
+    """PERT ``probability_wrong_sum`` shares sample order with ``probability``."""
+    for view in include_views:
+        for traj_name in trajectory_names:
+            steps_dict = step_values_by_view.get(str(view), {}).get(str(traj_name), {})
+            keys_dict = step_index_keys_by_view.get(str(view), {}).get(str(traj_name), {})
+            for step, metrics_dict in steps_dict.items():
+                if "probability_wrong_sum" not in metrics_dict:
+                    continue
+                prob_keys = (keys_dict.get(step) or {}).get("probability")
+                if prob_keys is not None:
+                    keys_dict.setdefault(step, {})["probability_wrong_sum"] = list(prob_keys)
+
+
+def _prob_entry_from_scalar(
+    prob: Any, avg_loss: Any = None
+) -> Dict[str, Any]:
+    out: Dict[str, Any] = {}
+    if prob is not None:
+        try:
+            fp = float(prob)
+            if not np.isnan(fp):
+                out["probability"] = fp
+                if avg_loss is not None:
+                    try:
+                        al = float(avg_loss)
+                        if not np.isnan(al):
+                            out["avg_loss"] = al
+                    except (TypeError, ValueError):
+                        pass
+                if "avg_loss" not in out:
+                    out["avg_loss"] = float(-np.log(fp + 1e-12))
+        except (TypeError, ValueError):
+            pass
+    return out
+
+
+def _build_trajectory_value_by_index(
+    step_values_by_view: Dict[str, Any],
+    step_index_keys_by_view: Dict[str, Any],
+    include_views: Sequence[str],
+    trajectory_names: Sequence[str],
+    run_steps_to_use: Optional[Sequence[Any]],
+    metrics: Sequence[str] = ("probability", "probability_wrong_sum"),
+) -> Dict[str, Any]:
+    """Build ``value_by_index`` keyed by dataset index with per-view/traj step series."""
+    out: Dict[str, Dict[str, Dict[str, Dict[str, List[Any]]]]] = {}
+    for view in include_views:
+        for traj_name in trajectory_names:
+            steps_dict = step_values_by_view.get(str(view), {}).get(str(traj_name), {})
+            keys_dict = step_index_keys_by_view.get(str(view), {}).get(str(traj_name), {})
+            if not steps_dict:
+                continue
+            ordered_steps = (
+                list(run_steps_to_use)
+                if run_steps_to_use is not None
+                else sorted(steps_dict.keys(), key=lambda x: (x if isinstance(x, (int, float)) else 0))
+            )
+            for step_pos, step in enumerate(ordered_steps):
+                if step not in steps_dict:
+                    continue
+                metrics_dict = steps_dict[step]
+                step_keys = keys_dict.get(step, {})
+                for metric_name in metrics:
+                    if metric_name not in metrics_dict:
+                        continue
+                    values = metrics_dict[metric_name]
+                    keys = step_keys.get(metric_name, [])
+                    if not keys or len(keys) != len(values):
+                        continue
+                    for idx_str, raw_val in zip(keys, values):
+                        if raw_val is None:
+                            continue
+                        try:
+                            fv = float(raw_val)
+                        except (TypeError, ValueError):
+                            continue
+                        if math.isnan(fv):
+                            continue
+                        idx_ent = out.setdefault(str(idx_str), {})
+                        view_ent = idx_ent.setdefault(str(view), {})
+                        traj_ent = view_ent.setdefault(str(traj_name), {})
+                        series = traj_ent.setdefault(metric_name, [])
+                        while len(series) <= step_pos:
+                            series.append(None)
+                        series[step_pos] = fv
+    # ``index -> view -> steps -> {probability: [T], ...}`` for merge scripts.
+    nested: Dict[str, Any] = {}
+    for idx_str, by_view in out.items():
+        nested[idx_str] = {}
+        for view, by_traj in by_view.items():
+            steps_payload: Dict[str, Dict[str, List[Any]]] = {}
+            for traj_name, metric_series in by_traj.items():
+                if str(traj_name) != "steps":
+                    continue
+                for metric_name, series in metric_series.items():
+                    steps_payload.setdefault(metric_name, list(series))
+            if steps_payload:
+                nested[idx_str][str(view)] = {"steps": steps_payload}
+    return nested
+
+
+def _subset_value_by_index_for_metrics(
+    value_by_index: Dict[str, Any],
+    metric_names: Sequence[str],
+) -> Dict[str, Any]:
+    """Keep only selected metric series inside each index/view/steps block."""
+    if not value_by_index:
+        return {}
+    want = frozenset(metric_names)
+    out: Dict[str, Any] = {}
+    for idx_str, by_view in value_by_index.items():
+        if not isinstance(by_view, dict):
+            continue
+        idx_out: Dict[str, Any] = {}
+        for view, view_block in by_view.items():
+            if not isinstance(view_block, dict):
+                continue
+            steps_block = view_block.get("steps")
+            if not isinstance(steps_block, dict):
+                continue
+            filtered = {
+                k: list(v)
+                for k, v in steps_block.items()
+                if k in want and isinstance(v, list)
+            }
+            if filtered:
+                idx_out[str(view)] = {"steps": filtered}
+        if idx_out:
+            out[str(idx_str)] = idx_out
+    return out
+
+
 def _clone_step_values_prob_layers(
     layer: Dict[str, Any],
 ) -> Dict[str, Dict[str, Dict[Any, Dict[str, List[float]]]]]:
@@ -5096,6 +5285,14 @@ def trajectory_metrics(model, **kwargs):
             v: {traj_name: {} for traj_name in trajectory_names}
             for v in include_views
         }
+        persist_value_by_index = _should_persist_value_by_index(
+            trajectory_config, kwargs.get("trajectory_pass_id")
+        )
+        step_index_keys_by_view = (
+            _init_step_index_keys_by_view(include_views, trajectory_names)
+            if persist_value_by_index
+            else None
+        )
 
         # Get sampler from model
         sampler = _get_sampler_from_model(model)
@@ -6452,6 +6649,28 @@ def trajectory_metrics(model, **kwargs):
                                             step_values_by_view[view][traj_name][step][
                                                 "probability"
                                             ].append(pr["prob"])
+                                            if (
+                                                persist_value_by_index
+                                                and step_index_keys_by_view is not None
+                                                and (
+                                                    len(_mini_batches) == 1
+                                                    or _opt_i == 0
+                                                )
+                                            ):
+                                                idx_raw = indices[b]
+                                                idx_str = (
+                                                    str(idx_raw.item())
+                                                    if torch.is_tensor(idx_raw)
+                                                    else str(idx_raw)
+                                                )
+                                                _record_step_index_key(
+                                                    step_index_keys_by_view,
+                                                    view,
+                                                    traj_name,
+                                                    step,
+                                                    "probability",
+                                                    idx_str,
+                                                )
 
                     gpu_set_phase("trajectory_batch_end", batch_idx=batch_idx)
                     _batch_duration = time.perf_counter() - _batch_t0
@@ -6494,6 +6713,13 @@ def trajectory_metrics(model, **kwargs):
                         _sv_root, _pert_option_layers, emit_wrong_sum=True
                     )
                 step_values_by_view = _sv_root
+                if persist_value_by_index and step_index_keys_by_view is not None and _pass_pert:
+                    _sync_pert_wrong_sum_index_keys(
+                        step_index_keys_by_view,
+                        step_values_by_view,
+                        include_views,
+                        trajectory_names,
+                    )
             logger.info(
                 "[trajectory_batch_phase] complete: expected_batches=%s dataset_key=%s",
                 expected_batches, _key,
@@ -7345,6 +7571,16 @@ def trajectory_metrics(model, **kwargs):
             else kwargs.get("metric_name", "trajectory_all")
         )
 
+        built_value_by_index: Dict[str, Any] = {}
+        if persist_value_by_index and step_index_keys_by_view is not None:
+            built_value_by_index = _build_trajectory_value_by_index(
+                step_values_by_view,
+                step_index_keys_by_view,
+                include_views,
+                trajectory_names,
+                run_steps_to_use,
+            )
+
         result = {}
         if len(display_names) == len(internal_names) and len(internal_names) > 0:
             for display_name, internal_name in zip(display_names, internal_names):
@@ -7353,6 +7589,11 @@ def trajectory_metrics(model, **kwargs):
                 _is_pert_prob = (
                     internal_name == "probability"
                     and _trajectory_pass_is_pert(kwargs.get("trajectory_pass_id"))
+                )
+                _vbi_metrics = (
+                    ("probability", "probability_wrong_sum")
+                    if _is_pert_prob
+                    else (internal_name,)
                 )
                 result[display_name] = {
                     "agg_value": {
@@ -7379,7 +7620,9 @@ def trajectory_metrics(model, **kwargs):
                         }
                         for view in include_views
                     },
-                    "value_by_index": {},
+                    "value_by_index": _subset_value_by_index_for_metrics(
+                        built_value_by_index, _vbi_metrics
+                    ),
                     "step_distribution": {
                         view: {
                             traj: {internal_name: step_distribution_by_view[view][traj][internal_name]}
@@ -7408,9 +7651,17 @@ def trajectory_metrics(model, **kwargs):
                 "trajectory_step_metadata": trajectory_step_metadata,
             }
         else:
+            _is_pert_prob_single = _trajectory_pass_is_pert(kwargs.get("trajectory_pass_id"))
+            _vbi_m = (
+                ("probability", "probability_wrong_sum")
+                if _is_pert_prob_single and "probability" in internal_names
+                else tuple(internal_names)
+            )
             result[display_key] = {
                 "agg_value": agg_value_by_view,
-                "value_by_index": {},
+                "value_by_index": _subset_value_by_index_for_metrics(
+                    built_value_by_index, _vbi_m
+                ),
                 "step_distribution": step_distribution_by_view,
             }
             result["trajectory_step_metadata"] = {
