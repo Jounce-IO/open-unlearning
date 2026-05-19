@@ -4755,7 +4755,13 @@ def _merge_pert_option_probability_layers(
     *,
     emit_wrong_sum: bool,
 ) -> None:
-    """Merge per-option probability appends: mean → ``probability``, sum → ``probability_wrong_sum``."""
+    """Merge per-option probability for one dataloader batch.
+
+    Within the batch: mean across perturbed options → ``probability``,
+    sum → ``probability_wrong_sum``. Appends those rows to the cumulative
+    per-step lists in ``main_sv`` (same semantics as non-PERT ``.append``)
+    so ``_build_trajectory_value_by_index`` stays aligned with index keys.
+    """
     if not option_layers:
         return
     for view in option_layers[0].keys():
@@ -4792,9 +4798,10 @@ def _merge_pert_option_probability_layers(
                     main_sv[view][traj] = {}
                 if step not in main_sv[view][traj]:
                     main_sv[view][traj][step] = {}
-                main_sv[view][traj][step]["probability"] = mean_row
+                step_metrics = main_sv[view][traj][step]
+                step_metrics.setdefault("probability", []).extend(mean_row)
                 if emit_wrong_sum:
-                    main_sv[view][traj][step]["probability_wrong_sum"] = sum_row
+                    step_metrics.setdefault("probability_wrong_sum", []).extend(sum_row)
 
 
 @unlearning_metric(name="trajectory_metrics")

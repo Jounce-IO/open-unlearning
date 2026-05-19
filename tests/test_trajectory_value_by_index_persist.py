@@ -15,6 +15,7 @@ from evals.metrics.trajectory_metrics import (
 
 def test_should_persist_for_guided_tr_pass() -> None:
     assert _should_persist_value_by_index(None, "retain__guided_tr_para")
+    assert _should_persist_value_by_index(None, "retain__guided_tr_pert")
     assert _should_persist_value_by_index(None, "ra__guided_tr_correct")
     assert _should_persist_value_by_index(None, "forget__guided_prob")
     assert not _should_persist_value_by_index(None, "forget__unguided")
