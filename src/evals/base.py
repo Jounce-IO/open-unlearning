@@ -193,9 +193,10 @@ class Evaluator:
         if "forget_truth_ratio" not in logs and "forget_Truth_Ratio" in logs:
             logs["forget_truth_ratio"] = logs["forget_Truth_Ratio"]
 
-    def save_logs(self, logs, file, keep_value_by_index=False):
+    def save_logs(self, logs, file, keep_value_by_index=True):
         """Save the logs in a json file.
-        When keep_value_by_index is True (e.g. per-rank files for later merge), value_by_index is kept."""
+        Per-sample ``value_by_index`` is kept by default (merge-time TR/norm synthesis).
+        Pass ``keep_value_by_index=False`` only when a compact artifact is required."""
         logs = dict(sorted(logs.items()))
         # Ensure run_info is present so report PRs can show data-parallel info (eval.py sets it for distributed).
         if "run_info" not in logs:
@@ -277,11 +278,7 @@ class Evaluator:
             logs["config"] = config_dict
             if not is_distributed:
                 self._ensure_retain_reference_keys(logs)
-                self.save_logs(
-                    logs,
-                    logs_file_path,
-                    keep_value_by_index=self.eval_cfg.get("retain_reference_mode", False),
-                )
+                self.save_logs(logs, logs_file_path)
 
         logger.info(f"***** Running {self.name} evaluation suite *****")
         log_retain_logs_path_none_if_needed(
@@ -538,11 +535,7 @@ class Evaluator:
                     logger.info(f"Result for metric {metric_name}:\t{logs[metric_name]['agg_value']}")
             if not is_distributed:
                 self._ensure_retain_reference_keys(logs)
-                self.save_logs(
-                    logs,
-                    logs_file_path,
-                    keep_value_by_index=self.eval_cfg.get("retain_reference_mode", False),
-                )
+                self.save_logs(logs, logs_file_path)
             return logs
 
         for metric_name, metric_fn in self.metrics.items():
@@ -620,11 +613,7 @@ class Evaluator:
                 logger.info(f"Result for metric {metric_name}:\t{result['agg_value']}")
             if not is_distributed:
                 self._ensure_retain_reference_keys(logs)
-                self.save_logs(
-                    logs,
-                    logs_file_path,
-                    keep_value_by_index=self.eval_cfg.get("retain_reference_mode", False),
-                )
+                self.save_logs(logs, logs_file_path)
             # Free GPU memory between metrics to avoid OOM with large models
             if torch.cuda.is_available():
                 torch.cuda.empty_cache()
