@@ -297,7 +297,10 @@ class TrajectoryProbabilityHypothesisLogger:
                             gl=gl,
                             snap_stack=snap_stack,
                             prop_stack=prop_stack,
-                            pl=pl,
+                            pl_list=pl_list,
+                            F=F,
+                            effective_lengths_list=list(effective_lengths),
+                            B=B,
                             model=model,
                             tokenizer=tokenizer,
                             device=device,
@@ -330,7 +333,8 @@ class TrajectoryProbabilityHypothesisLogger:
         F_b = kw["F_b"]
         gl = kw["gl"]
         device = kw["device"]
-        pl = kw["pl"]
+        pl_list = list(kw["pl_list"])
+        pl = pl_list[b]
         n_gen = kw["n_gen"]
         L = kw["L"]
         L_eff = kw["L_eff"]
@@ -375,7 +379,7 @@ class TrajectoryProbabilityHypothesisLogger:
                 lh_batch, F_b.unsqueeze(0), int(step_i)
             )
         eff_prob = compute_prob_from_fixation_logits(
-            eff_logits[b : b + 1],
+            eff_logits,
             lab_view,
             device,
             IGNORE_INDEX,
@@ -386,7 +390,7 @@ class TrajectoryProbabilityHypothesisLogger:
 
             provider = FixationStepWiseScoreProvider(logit_alignment=kw["logit_alignment"])
             scores, _ = provider.get_per_position_scores(
-                {"fixation_logits": eff_logits[b : b + 1]},
+                {"fixation_logits": eff_logits},
                 {"labels": lab_view},
                 ignore_index=IGNORE_INDEX,
             )
@@ -395,12 +399,16 @@ class TrajectoryProbabilityHypothesisLogger:
             eff_geom = None
             eff_scores_provider = f"error:{exc}"
 
+        F_full: torch.Tensor = kw["F"]
+        eff_list: List[int] = list(kw["effective_lengths_list"])
+        batch_b = int(kw["B"])
         src_batch = diffusion_source_steps_batch(
-            traj_name, int(step_i), F_b.unsqueeze(0), kw["S"]
+            traj_name, int(step_i), F_full, kw["S"]
         )
-        n_dec = min(L_eff, L) if view == "eos" else L
-        n_dec_list = [n_dec]
-        pl_list = [pl]
+        n_dec_list = [
+            min(int(eff_list[bb]), L) if view == "eos" else L for bb in range(batch_b)
+        ]
+        n_dec = n_dec_list[b]
         merged_canvas = _trajectory_merge_snapshots_reindex_batched(
             kw["snap_stack"],
             int(step_i),
@@ -430,7 +438,7 @@ class TrajectoryProbabilityHypothesisLogger:
             "canvas_plus_step_x0",
         )
         rouge_scores = eval_rouge_recall_batch(
-            gen_texts,
+            [gen_texts[b]],
             [kw["ground_truth"]],
             use_stemmer=True,
             scorer=kw["rouge_sc"],
