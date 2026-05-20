@@ -29,6 +29,9 @@ trajectory_config:
     trajectory_sample_interval: 8
   golden_token_heatmap_verbose_log: false
   golden_token_heatmap_verbose_max_samples: 2
+  probability_hypothesis_investigation: false
+  probability_hypothesis_investigation_trajs: [steps, fixation_start]
+  probability_hypothesis_investigation_views: [full, eos]
 metric_display_names:
   - trajectory_forget_Q_A_Prob
   - trajectory_extraction_strength

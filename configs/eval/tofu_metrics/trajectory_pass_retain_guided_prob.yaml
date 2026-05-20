@@ -25,6 +25,10 @@ trajectory_config:
     temperature: 0.0
     max_new_tokens: 200
     trajectory_sample_interval: 8
+  # Phase C: full JSONL for pre-commit vs ROUGE canvas hypothesis (see docs/trajectory-probability-investigation.md)
+  probability_hypothesis_investigation: false
+  probability_hypothesis_investigation_trajs: [steps, fixation_start]
+  probability_hypothesis_investigation_views: [full, eos]
 metric_display_names:
   - trajectory_retain_Q_A_Prob
 datasets:

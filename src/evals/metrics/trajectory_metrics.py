@@ -70,6 +70,11 @@ from evals.metrics.golden_token_prob_heatmap import (
     log_golden_token_heatmap_sample_diagnostics,
 )
 from evals.gpu_phase_logger import set_phase as gpu_set_phase
+from evals.metrics.trajectory_probability_hypothesis import (
+    finalize_trajectory_probability_hypothesis_investigation,
+    run_trajectory_probability_hypothesis_investigation,
+    trajectory_prob_hypothesis_investigation_enabled,
+)
 from evals.guardrails import (
     load_icul_pools,
     transform_output_text,
@@ -5309,6 +5314,38 @@ def trajectory_metrics(model, **kwargs):
                 "Ensure model is wrapped with DiffusionModelAdapter or has accessible sampler."
             )
 
+        _prob_hypothesis_enabled = trajectory_prob_hypothesis_investigation_enabled(
+            trajectory_config
+        )
+        _prob_hypothesis_output_dir: Optional[str] = None
+        if _prob_hypothesis_enabled:
+            _ev = kwargs.get("eval_cfg")
+            if _ev is not None and callable(getattr(_ev, "get", None)):
+                _prob_hypothesis_output_dir = _ev.get("output_dir")
+            if _prob_hypothesis_enabled and rank == 0:
+                from evals.metrics.trajectory_probability_hypothesis import (
+                    TrajectoryProbabilityHypothesisLogger,
+                )
+
+                _tc_manifest = (
+                    OmegaConf.to_container(trajectory_config, resolve=True)
+                    if OmegaConf.is_config(trajectory_config)
+                    else dict(trajectory_config or {})
+                )
+                TrajectoryProbabilityHypothesisLogger.get(
+                    str(_prob_hypothesis_output_dir or "."),
+                    rank=rank,
+                ).write_manifest(
+                    {
+                        "trajectory_pass_id": kwargs.get("trajectory_pass_id"),
+                        "trajectory_config": _tc_manifest,
+                        "trajectory_names": trajectory_names,
+                        "include_views": include_views,
+                        "batch_size": batch_size,
+                        "n_samples": kwargs.get("samples"),
+                    }
+                )
+
         # When privleak + dual dataset: use streaming MIA (batch-by-batch, only scores stored; no N trajectories in memory)
         trajectories_by_key = None
         use_streaming_privleak = False
@@ -6679,6 +6716,43 @@ def trajectory_metrics(model, **kwargs):
                                                     idx_str,
                                                 )
 
+                    if (
+                        _prob_hypothesis_enabled
+                        and "probability" in metrics_to_run
+                        and labels is not None
+                    ):
+                        run_trajectory_probability_hypothesis_investigation(
+                            enabled=True,
+                            output_dir=_prob_hypothesis_output_dir,
+                            rank=rank,
+                            batch_idx=batch_idx,
+                            model=model,
+                            tokenizer=tokenizer,
+                            trajectory_config=trajectory_config,
+                            kwargs=kwargs,
+                            steps_to_use=steps_to_use,
+                            trajectory_names=trajectory_names,
+                            include_views=include_views,
+                            lh_batch=lh_batch,
+                            F=F,
+                            S=S,
+                            L=L,
+                            B=B,
+                            seq_snapshots_batch=seq_snapshots_batch,
+                            prop_snapshots_batch=prop_snapshots_batch,
+                            labels=labels,
+                            input_ids=input_ids,
+                            batch=batch,
+                            indices=indices,
+                            prompt_starts=prompt_starts,
+                            prompt_lens=prompt_lens,
+                            effective_lengths=[
+                                int(effective_lengths[b]) for b in range(B)
+                            ],
+                            prompt_only_input_ids=_prompt_only_input_ids,
+                            evaluation_mode=evaluation_mode,
+                        )
+
                     gpu_set_phase("trajectory_batch_end", batch_idx=batch_idx)
                     _batch_duration = time.perf_counter() - _batch_t0
                     _post_sampler_sec = _batch_duration - _sampler_sec
@@ -7785,6 +7859,10 @@ def trajectory_metrics(model, **kwargs):
 
         if executor is not None:
             executor.shutdown(wait=True)
+        if _prob_hypothesis_enabled:
+            finalize_trajectory_probability_hypothesis_investigation(
+                _prob_hypothesis_output_dir, rank=rank
+            )
         _eval_cfg = kwargs.get("eval_cfg")
         if _eval_cfg is not None and callable(getattr(_eval_cfg, "get", None)):
             _dec = _eval_cfg.get("decoupling")
