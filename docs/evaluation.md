@@ -38,6 +38,8 @@ python src/eval.py --config-name=eval.yaml \
 
 ## Metrics
 
+**TOFU independent trajectory passes (fork):** One inference pass per `trajectory_pass_id` (14-pass MU bundle + optional `retain_sft__unguided`). Pass configs live under `configs/eval/tofu_metrics/trajectory_pass_*.yaml`. See [tofu_independent_trajectory_passes.md](tofu_independent_trajectory_passes.md) and the main-repo merge guide (dllm `docs/tofu-trajectory-multi-pass-merge.md`).
+
 A metric takes a model and a dataset and computes statistics of the model over the datapoints (or) takes other metrics and computes an aggregated score over the dataset.
 
 ### Forget probability (formal definition)

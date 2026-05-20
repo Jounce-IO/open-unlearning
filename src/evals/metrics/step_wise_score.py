@@ -531,6 +531,83 @@ def compute_prob_packed_shifted_segments(
         return out
 
 
+def compute_prob_packed_shifted_segment_details(
+    fixation_logits: torch.Tensor,
+    labels: torch.Tensor,
+    device: torch.device,
+    ignore_index: int = IGNORE_INDEX,
+) -> Dict[str, Any]:
+    """Per-segment packed shifted CE with per-token losses (investigation / Phase C).
+
+    ``fixation_logits``: ``[1, T, V]``; ``labels``: ``[1, T]``. Returns aggregate
+    ``prob`` / ``avg_loss`` plus one entry per shifted (position, gold) pair.
+    """
+    segs = compute_prob_packed_shifted_segments(
+        [fixation_logits],
+        [labels],
+        device,
+        ignore_index,
+    )
+    agg = segs[0] if segs else {"prob": None, "avg_loss": None}
+    if fixation_logits.dim() != 3 or labels.dim() != 2:
+        raise ValueError("expected fixation_logits [1,T,V] and labels [1,T]")
+    log = fixation_logits.to(device)
+    lab = labels.to(device)
+    t = min(log.shape[1], lab.shape[1])
+    log = log[:, :t, :].contiguous()
+    lab = lab[:, :t].contiguous()
+    shifted_logits = log[:, :-1, :].contiguous()
+    shifted_labels = lab[:, 1:].contiguous()
+    n_shift = shifted_logits.shape[1]
+    per_token: list[dict[str, Any]] = []
+    if n_shift > 0:
+        if shifted_logits.dtype in (torch.bfloat16, torch.float16):
+            shifted_logits_f = shifted_logits.float()
+        else:
+            shifted_logits_f = shifted_logits
+        flat_logits = shifted_logits_f.reshape(n_shift, shifted_logits_f.shape[-1])
+        flat_labels = shifted_labels.reshape(n_shift)
+        losses = torch.nn.functional.cross_entropy(
+            flat_logits,
+            flat_labels,
+            ignore_index=ignore_index,
+            reduction="none",
+        )
+        argmax_ids = flat_logits.argmax(dim=-1)
+        for i in range(n_shift):
+            y = int(flat_labels[i].item())
+            if y == ignore_index:
+                continue
+            ce = float(losses[i].item())
+            per_token.append(
+                {
+                    "shift_index": i,
+                    "label_index": i + 1,
+                    "gold_id": y,
+                    "argmax_id": int(argmax_ids[i].item()),
+                    "argmax_matches_gold": bool(int(argmax_ids[i].item()) == y),
+                    "ce_loss": ce,
+                    "prob": float(np.exp(-ce)),
+                }
+            )
+    valid = [p for p in per_token]
+    n_valid = len(valid)
+    argmax_match_frac = (
+        float(sum(1 for p in valid if p["argmax_matches_gold"]) / n_valid)
+        if n_valid
+        else None
+    )
+    mean_ce = float(np.mean([p["ce_loss"] for p in valid])) if valid else None
+    return {
+        "prob": agg.get("prob"),
+        "avg_loss": agg.get("avg_loss"),
+        "n_valid_tokens": n_valid,
+        "argmax_match_frac": argmax_match_frac,
+        "mean_ce_valid": mean_ce,
+        "per_token": per_token,
+    }
+
+
 def compute_prob_from_fixation_logits(
     fixation_logits: torch.Tensor,
     labels: torch.Tensor,

@@ -286,15 +286,11 @@ def _wrong_labels_for_sample(question, wrong_answer, process_sample_fn, index):
 
 
 class QAwithDualAnswersDataset(QADataset):
-    """Dataset yielding both labels_correct and labels_wrong for truth_ratio metrics.
+    """Deprecated: fork-only dual-label loader (not OU scalar TOFU).
 
-    Uses two answer keys from the same HF split (e.g., paraphrased_answer and
-    perturbed_answer in forget10_perturbed). When wrong_answer_key returns a list
-    of N options (e.g. TOFU perturbed_answer), yields N wrong label tensors per
-    sample so truth_ratio can average over all. When it returns a string, yields
-    a single labels_wrong per sample. See evaluation-notes.md "Dual-answer
-    datasets and list answers".
-    """
+    OU uses separate ``QADataset`` metric configs per leg plus ``truth_ratio`` merge.
+    Prefer split trajectory passes (``*_guided_tr_para|pert``) and merge-time synthesis.
+  """
 
     def __init__(
         self,
@@ -303,6 +299,14 @@ class QAwithDualAnswersDataset(QADataset):
         *args,
         **kwargs,
     ):
+        import warnings
+
+        warnings.warn(
+            "QAwithDualAnswersDataset is deprecated; use split QADataset legs and "
+            "merge-time truth_ratio / probability_w_options (OU scalar parity).",
+            DeprecationWarning,
+            stacklevel=2,
+        )
         self.correct_answer_key = correct_answer_key
         self.wrong_answer_key = wrong_answer_key
         # Parent uses answer_key for __len__ and data loading; use correct as default

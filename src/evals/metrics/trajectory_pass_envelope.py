@@ -13,6 +13,18 @@ def _dataset_from_pass_id(pass_id: str) -> str:
     return pass_id.split("__", 1)[0]
 
 
+def _envelope_dataset_access_key(pass_id: str, spec: PassSpec) -> str:
+    """Artifact ``dataset_access_key`` must match TOFU data buckets (forget/retain/ra/wf).
+
+    Pass ids like ``retain_sft__unguided`` would mis-parse as ``retain_sft`` from the id
+    alone; single-dataset passes use ``PassSpec.dataset_access_keys`` instead.
+    """
+    keys = spec.dataset_access_keys
+    if len(keys) == 1:
+        return next(iter(sorted(keys)))
+    return _dataset_from_pass_id(pass_id)
+
+
 def build_pass_envelope(
     pass_id: str,
     *,
@@ -31,7 +43,7 @@ def build_pass_envelope(
         "pass_id": pass_id,
         "sampling_regime": regime,
         "guided_variant": guided_variant,
-        "dataset_access_key": _dataset_from_pass_id(pass_id),
+        "dataset_access_key": _envelope_dataset_access_key(pass_id, spec),
         "version_tag": dict(version_tag or {}),
         "metric_keys_in_pass": list(spec.display_names_emitted),
     }

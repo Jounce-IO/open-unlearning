@@ -39,6 +39,18 @@ CANONICAL_FTR_BY_STEP = {
 class TestWriterSaveLogsCanonicalShape:
     """M1, M2: save_logs writes exact canonical shape; keep_value_by_index controls value_by_index."""
 
+    def test_save_logs_default_keeps_value_by_index(self, tmp_path):
+        """Default save_logs keeps value_by_index (trajectory merge / retain reference)."""
+        ev = _make_evaluator(retain_reference_mode=False)
+        logs = {
+            "forget_truth_ratio": {"value_by_index": {"0": {"score": 0.8}}, "agg_value": 0.8},
+        }
+        path = tmp_path / "default.json"
+        ev.save_logs(logs, str(path))
+        with open(path) as f:
+            loaded = json.load(f)
+        assert loaded["forget_truth_ratio"]["value_by_index"]["0"]["score"] == 0.8
+
     def test_M1_save_logs_keep_value_by_index_preserves_canonical_shape(self, tmp_path):
         """M1: save_logs(keep_value_by_index=True) preserves mia_min_k, forget_truth_ratio, by_step canonical shape."""
         ev = _make_evaluator(retain_reference_mode=True)

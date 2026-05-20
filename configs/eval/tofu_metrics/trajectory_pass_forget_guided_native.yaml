@@ -1,5 +1,6 @@
 # @package eval.tofu_trajectory.metrics.trajectory_pass_forget_guided_native
-# Single inference pass: forget split, guided_native (OU-aligned gold-scored legs, no ROUGE).
+# DEPRECATED: use forget__guided_tr_para + forget__guided_tr_pert (+ merge TR). Dual-label / QAwithDualAnswers.
+# Single inference pass: forget split, guided_native (legacy eight-pass shortcut).
 defaults:
   - ../../data/datasets@datasets: TOFU_QA_forget
   - ../../collator@collators: DataCollatorForSupervisedDatasetwithIndex
