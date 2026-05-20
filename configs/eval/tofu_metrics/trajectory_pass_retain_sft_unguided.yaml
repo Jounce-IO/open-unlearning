@@ -2,7 +2,7 @@
 # Single inference pass: SFT-parity retain ROUGE (unguided).
 #
 # Unlike ``trajectory_pass_retain_unguided`` (pass_id ``retain__unguided``), which uses
-# ``retain_perturbed`` + dual answers + ``paraphrased_answer`` for canvas trajectory ROUGE,
+# ``QADataset`` on ``retain_perturbed`` (same ``answer`` gold, different rows / MU contract),
 # this pass uses ``QADataset`` on ``locuslab/TOFU`` subset ``${eval.tofu_trajectory.retain_sft_split}``
 # (``retain90`` / ``retain95`` / ``retain99``) with ``answer`` as gold — aligned with dllm SFT
 # six-split retain validation. Result key: ``trajectory_retain_sft_Q_A_ROUGE``.
