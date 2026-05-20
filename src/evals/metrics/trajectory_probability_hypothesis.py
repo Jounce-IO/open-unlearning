@@ -59,6 +59,34 @@ def trajectory_prob_hypothesis_investigation_enabled(
     return False
 
 
+def _sample_traj_state(
+    *,
+    lh_batch: Optional[List[torch.Tensor]],
+    R_batch: Optional[torch.Tensor],
+    b: int,
+    F_b: torch.Tensor,
+    S: int,
+    L: int,
+) -> Dict[str, Any]:
+    """Per-sample trajectory logits state for :func:`_get_logits_at_step` (dense ``R`` or list ``lh``)."""
+    if lh_batch is not None:
+        return {"lh": lh_batch, "b": b, "F": F_b, "S": S, "L": L}
+    if R_batch is not None:
+        return {"R": R_batch[b], "F": F_b, "S": S, "L": L}
+    raise ValueError("probability_hypothesis_investigation: need lh_batch or R_batch")
+
+
+def _logits_device(
+    lh_batch: Optional[List[torch.Tensor]],
+    R_batch: Optional[torch.Tensor],
+) -> torch.device:
+    if lh_batch is not None and len(lh_batch) > 0:
+        return lh_batch[0].device
+    if R_batch is not None:
+        return R_batch.device
+    return torch.device("cpu")
+
+
 def _plain_tc(trajectory_config: Optional[Any]) -> Dict[str, Any]:
     from omegaconf import OmegaConf
 
@@ -118,6 +146,7 @@ class TrajectoryProbabilityHypothesisLogger:
         trajectory_names: Sequence[str],
         include_views: Sequence[str],
         lh_batch: Optional[List[torch.Tensor]],
+        R_batch: Optional[torch.Tensor],
         F: torch.Tensor,
         S: int,
         L: int,
@@ -137,13 +166,18 @@ class TrajectoryProbabilityHypothesisLogger:
     ) -> None:
         if self.rank != 0:
             return
-        if lh_batch is None or seq_snapshots_batch is None or prop_snapshots_batch is None:
+        if (
+            (lh_batch is None and R_batch is None)
+            or seq_snapshots_batch is None
+            or prop_snapshots_batch is None
+        ):
             self._append(
                 {
                     "record_type": "batch_skip",
                     "batch_idx": batch_idx,
-                    "reason": "missing_lh_or_snapshots",
+                    "reason": "missing_logits_or_snapshots",
                     "has_lh": lh_batch is not None,
+                    "has_R": R_batch is not None,
                     "has_seq_snap": seq_snapshots_batch is not None,
                     "has_prop_snap": prop_snapshots_batch is not None,
                 }
@@ -174,8 +208,11 @@ class TrajectoryProbabilityHypothesisLogger:
         ]
         logit_alignment = str(tc.get("logit_alignment", "causal"))
         rouge_sc = rouge_scorer.RougeScorer(["rouge1", "rougeL"], use_stemmer=True)
-        device = lh_batch[0].device
+        device = _logits_device(lh_batch, R_batch)
         traj_pass_id = kwargs.get("trajectory_pass_id") or tc.get("trajectory_pass_id")
+        logits_storage = (
+            "list_history" if lh_batch is not None else "dense_r" if R_batch is not None else None
+        )
 
         inv_trajs = tc.get("probability_hypothesis_investigation_trajs")
         if inv_trajs is None:
@@ -255,6 +292,7 @@ class TrajectoryProbabilityHypothesisLogger:
                             post_commit_gen_ids=post_gen,
                             fixation_steps_gen=fixation_gen,
                             lh_batch=lh_batch,
+                            R_batch=R_batch,
                             F_b=F_b,
                             gl=gl,
                             snap_stack=snap_stack,
@@ -274,6 +312,7 @@ class TrajectoryProbabilityHypothesisLogger:
                 "B": B,
                 "steps_logged": list(steps_to_use),
                 "samples_logged": B,
+                "logits_storage": logits_storage,
             }
         )
 
@@ -287,6 +326,7 @@ class TrajectoryProbabilityHypothesisLogger:
         traj_name = kw["traj_name"]
         view = kw["view"]
         lh_batch = kw["lh_batch"]
+        R_batch = kw.get("R_batch")
         F_b = kw["F_b"]
         gl = kw["gl"]
         device = kw["device"]
@@ -296,21 +336,23 @@ class TrajectoryProbabilityHypothesisLogger:
         L_eff = kw["L_eff"]
         mask_id = kw["mask_id"]
 
+        from evals.metrics.step_wise_score import build_effective_step_fixation_logits
         from evals.metrics.trajectory_metrics import (
             _get_logits_at_step,
             _trajectory_canvas_gen_texts_batched,
             _trajectory_merge_snapshots_reindex_batched,
         )
 
-        st_b = {"lh": lh_batch, "b": b, "F": F_b, "S": kw["S"], "L": L}
-        if traj_name == "steps":
-            logits_step = trajectory_step_logits_to_prob_batch(
-                lh_batch[int(step_i)][b].transpose(0, 1).contiguous()
-            )
-        else:
-            logits_step = trajectory_step_logits_to_prob_batch(
-                _get_logits_at_step(st_b, traj_name, step_i)
-            )
+        st_b = _sample_traj_state(
+            lh_batch=lh_batch,
+            R_batch=R_batch,
+            b=b,
+            F_b=F_b,
+            S=kw["S"],
+            L=L,
+        )
+        logits_vl = _get_logits_at_step(st_b, traj_name, step_i)
+        logits_step = trajectory_step_logits_to_prob_batch(logits_vl)
 
         if view == "full":
             logits_view = logits_step
@@ -324,9 +366,14 @@ class TrajectoryProbabilityHypothesisLogger:
             logits_view, lab_view, device, IGNORE_INDEX
         )
 
-        eff_logits = build_effective_step_fixation_logits_from_history(
-            lh_batch, F_b.unsqueeze(0), int(step_i)
-        )
+        if R_batch is not None:
+            eff_logits = build_effective_step_fixation_logits(
+                R_batch[b : b + 1], F_b.unsqueeze(0), int(step_i)
+            )
+        else:
+            eff_logits = build_effective_step_fixation_logits_from_history(
+                lh_batch, F_b.unsqueeze(0), int(step_i)
+            )
         eff_prob = compute_prob_from_fixation_logits(
             eff_logits[b : b + 1],
             lab_view,
@@ -594,6 +641,7 @@ def run_trajectory_probability_hypothesis_investigation(
     trajectory_names: Sequence[str],
     include_views: Sequence[str],
     lh_batch: Optional[List[torch.Tensor]],
+    R_batch: Optional[torch.Tensor],
     F: torch.Tensor,
     S: int,
     L: int,
@@ -632,6 +680,7 @@ def run_trajectory_probability_hypothesis_investigation(
         trajectory_names=trajectory_names,
         include_views=include_views,
         lh_batch=lh_batch,
+        R_batch=R_batch,
         F=F,
         S=S,
         L=L,

@@ -6734,6 +6734,7 @@ def trajectory_metrics(model, **kwargs):
                             trajectory_names=trajectory_names,
                             include_views=include_views,
                             lh_batch=lh_batch,
+                            R_batch=R,
                             F=F,
                             S=S,
                             L=L,
