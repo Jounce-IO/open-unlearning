@@ -43,6 +43,7 @@ from evals.metrics.step_wise_score import (
     build_fixation_logits_from_history,
     build_fixation_logits_from_R_F,
     compute_prob_from_fixation_logits as _compute_prob_from_fixation_logits,
+    compute_prob_packed_shifted_segment_details as _compute_prob_packed_shifted_segment_details,
     compute_prob_packed_shifted_segments as _compute_prob_packed_shifted_segments,
     sequence_probability_from_scores,
     extraction_strength_from_fixation,
@@ -299,6 +300,7 @@ def _trajectory_sampler_kwargs(trajectory_config: Union[Dict, DictConfig]) -> di
         mode = "unguided"
     kwargs["evaluation_mode"] = mode
     kwargs["right_shift_logits"] = False
+    kwargs.setdefault("sampler_log_context", "trajectory_main")
     return kwargs
 
 
@@ -2015,6 +2017,53 @@ def _get_logits_at_step(traj: Dict[str, Any], traj_name: str, step: int) -> torc
     if traj_name == "fixation_ratio":
         return compute_fixation_ratio_trajectory(R_sample, step, F_sample)
     raise ValueError(f"Unknown traj_name: {traj_name}")
+
+
+def _build_effective_step_fixation_logits_for_traj(
+    traj_state: Dict[str, Any],
+    traj_name: str,
+    report_step: int,
+) -> torch.Tensor:
+    """Fixation logits ``[1, L, V]`` for invariant :math:`P_s` (effective-step convention).
+
+    For ``traj_name == "steps"`` uses ``lh`` / dense ``R`` directly. Other trajectory types
+    stack per-report-step ``[V, L]`` slices then apply :func:`build_effective_step_fixation_logits`.
+    """
+    F_raw = traj_state["F"]
+    F_1 = F_raw.unsqueeze(0) if F_raw.dim() == 1 else F_raw
+    step_i = int(report_step)
+    if traj_name == "steps":
+        if traj_state.get("lh") is not None:
+            lh: List[torch.Tensor] = traj_state["lh"]
+            return build_effective_step_fixation_logits_from_history(lh, F_1, step_i)
+        R_sample = traj_state["R"]
+        R_1 = R_sample.unsqueeze(0) if R_sample.dim() == 2 else R_sample
+        return build_effective_step_fixation_logits(R_1, F_1, step_i)
+    S = int(traj_state["S"])
+    slices = [_get_logits_at_step(traj_state, traj_name, s) for s in range(S)]
+    R_stack = torch.stack(slices, dim=2)
+    return build_effective_step_fixation_logits(R_stack.unsqueeze(0), F_1, step_i)
+
+
+def _trajectory_report_step_Ps_prob_details(
+    fixation_logits: torch.Tensor,
+    labels_1d: torch.Tensor,
+    *,
+    view: str,
+    L_eff: int,
+    device: torch.device,
+    ignore_index: int = IGNORE_INDEX,
+) -> Dict[str, Any]:
+    """Packed-shifted CE details on effective-step fixation logits (one sample)."""
+    fl = fixation_logits
+    lab = labels_1d.to(device=device, dtype=torch.long)
+    if view == "eos":
+        Ls = min(int(L_eff), int(fl.shape[1]))
+        fl = fl[:, :Ls, :].contiguous()
+        lab = lab[:Ls]
+    return _compute_prob_packed_shifted_segment_details(
+        fl, lab.unsqueeze(0), device, ignore_index
+    )
 
 
 def _prefetch_logits_by_step(
@@ -6625,74 +6674,75 @@ def trajectory_metrics(model, **kwargs):
                         step_prefetch_max_steps=_step_prefetch_max,
                     )
 
-                    # Packed generalized sequence probability: one packed shifted CE per traj_name over
-                    # ``B * len(steps_to_use) * len(include_views)`` segments (lexicographic step, view, batch).
+                    # Invariant P_s at each report step: effective-step fixation logits (Phase D).
                     if "probability" in metrics_to_run and labels is not None and _gen_labels_for_packed_prob:
                         device_prob = (
                             lh_batch[0].device
                             if lh_batch is not None
                             else (R.device if R is not None else F.device)
                         )
+                        _logits_storage = (
+                            str(trajectory_config.get("trajectory_logits_storage") or "dense_r")
+                            if trajectory_config is not None
+                            else "dense_r"
+                        )
+                        logger.info(
+                            "[trajectory_prob_Ps] batch_start batch_idx=%s B=%s S=%s "
+                            "steps_to_use=%s (n=%s) trajs=%s L=%s logits_storage=%s lh=%s",
+                            batch_idx,
+                            B,
+                            S,
+                            steps_to_use,
+                            len(steps_to_use),
+                            trajectory_names,
+                            L,
+                            _logits_storage,
+                            lh_batch is not None,
+                        )
                         for traj_name in trajectory_names:
-                            seg_logits: list[torch.Tensor] = []
-                            seg_labels: list[torch.Tensor] = []
                             for step in steps_to_use:
                                 for view in include_views:
+                                    step_probs: list[float] = []
+                                    n_valid_tokens: list[int] = []
                                     for b in range(B):
                                         gl = _gen_labels_for_packed_prob[b]
                                         L_eff_bp = int(effective_lengths[b])
-                                        if traj_name == "steps":
-                                            if lh_batch is not None:
-                                                # lh_batch[s][b] is [L,V]; dense R[b,:,:,s] is [V,L]. Match _get_logits_at_step.
-                                                logits_step = trajectory_step_logits_to_prob_batch(
-                                                    lh_batch[int(step)][b].transpose(0, 1).contiguous()
-                                                )
-                                            else:
-                                                assert R is not None
-                                                logits_step = trajectory_step_logits_to_prob_batch(
-                                                    R[b, :, :, step]
-                                                )
+                                        if lh_batch is not None:
+                                            st_b: Dict[str, Any] = {
+                                                "lh": lh_batch,
+                                                "b": b,
+                                                "F": F[b],
+                                                "S": S,
+                                                "L": L,
+                                            }
                                         else:
-                                            if lh_batch is not None:
-                                                st_b = {"lh": lh_batch, "b": b, "F": F[b], "S": S, "L": L}
-                                            else:
-                                                assert R is not None
-                                                st_b = {"R": R[b], "F": F[b], "S": S, "L": L}
-                                            logits_step = trajectory_step_logits_to_prob_batch(
-                                                _get_logits_at_step(st_b, traj_name, step)
-                                            )
-                                        gl_dev = gl.to(device=device_prob, dtype=torch.long)
-                                        if view == "full":
-                                            seg_logits.append(logits_step)
-                                            seg_labels.append(gl_dev.unsqueeze(0))
-                                        else:
-                                            Ls = min(L_eff_bp, logits_step.shape[1])
-                                            seg_logits.append(
-                                                logits_step[:, :Ls, :].contiguous()
-                                            )
-                                            seg_labels.append(gl_dev[:Ls].unsqueeze(0))
-                            probs_out = _packed_shifted_probs_chunked(
-                                seg_logits, seg_labels, device_prob, IGNORE_INDEX, _tv_chunk_max
-                            )
-                            k = 0
-                            for step in steps_to_use:
-                                for view in include_views:
-                                    for b in range(B):
-                                        if k >= len(probs_out):
-                                            raise RuntimeError(
-                                                "post-loop packed probability: segment index out of range "
-                                                f"(traj={traj_name!r})"
-                                            )
-                                        pr = probs_out[k]
-                                        k += 1
+                                            assert R is not None
+                                            st_b = {"R": R[b], "F": F[b], "S": S, "L": L}
+                                        fl = _build_effective_step_fixation_logits_for_traj(
+                                            st_b, traj_name, int(step)
+                                        )
+                                        det = _trajectory_report_step_Ps_prob_details(
+                                            fl,
+                                            gl,
+                                            view=view,
+                                            L_eff=L_eff_bp,
+                                            device=device_prob,
+                                            ignore_index=IGNORE_INDEX,
+                                        )
+                                        pr_prob = det.get("prob")
+                                        n_valid = det.get("n_valid_tokens")
+                                        if pr_prob is not None:
+                                            step_probs.append(float(pr_prob))
+                                        if n_valid is not None:
+                                            n_valid_tokens.append(int(n_valid))
                                         if step not in step_values_by_view[view][traj_name]:
                                             step_values_by_view[view][traj_name][step] = {
                                                 m: [] for m in loaded_metrics.keys()
                                             }
-                                        if pr and "prob" in pr:
+                                        if pr_prob is not None:
                                             step_values_by_view[view][traj_name][step][
                                                 "probability"
-                                            ].append(pr["prob"])
+                                            ].append(float(pr_prob))
                                             if (
                                                 persist_value_by_index
                                                 and step_index_keys_by_view is not None
@@ -6715,6 +6765,50 @@ def trajectory_metrics(model, **kwargs):
                                                     "probability",
                                                     idx_str,
                                                 )
+                                        if logger.isEnabledFor(logging.INFO):
+                                            idx_raw = indices[b]
+                                            idx_str = (
+                                                str(idx_raw.item())
+                                                if torch.is_tensor(idx_raw)
+                                                else str(idx_raw)
+                                            )
+                                            logger.info(
+                                                "[trajectory_prob_Ps] sample batch_idx=%s index=%s "
+                                                "traj=%s report_step=%s view=%s prob=%s "
+                                                "n_valid_tokens=%s argmax_match_frac=%s",
+                                                batch_idx,
+                                                idx_str,
+                                                traj_name,
+                                                step,
+                                                view,
+                                                pr_prob,
+                                                n_valid,
+                                                det.get("argmax_match_frac"),
+                                            )
+                                    if step_probs and logger.isEnabledFor(logging.INFO):
+                                        logger.info(
+                                            "[trajectory_prob_Ps] step_agg batch_idx=%s traj=%s "
+                                            "report_step=%s view=%s B=%s mean_prob=%.6g "
+                                            "min_prob=%.6g max_prob=%.6g n_valid_tokens "
+                                            "min=%s max=%s mean=%.2f",
+                                            batch_idx,
+                                            traj_name,
+                                            step,
+                                            view,
+                                            len(step_probs),
+                                            float(np.mean(step_probs)),
+                                            float(min(step_probs)),
+                                            float(max(step_probs)),
+                                            min(n_valid_tokens) if n_valid_tokens else None,
+                                            max(n_valid_tokens) if n_valid_tokens else None,
+                                            float(np.mean(n_valid_tokens))
+                                            if n_valid_tokens
+                                            else None,
+                                        )
+                        logger.info(
+                            "[trajectory_prob_Ps] batch_done batch_idx=%s",
+                            batch_idx,
+                        )
 
                     if (
                         _prob_hypothesis_enabled
