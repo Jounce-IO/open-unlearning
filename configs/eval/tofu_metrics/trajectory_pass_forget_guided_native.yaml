@@ -36,6 +36,10 @@ trajectory_config:
   # Declared so Hydra accepts overrides (dllm smoke --config-file); read in trajectory_metrics.py.
   golden_token_heatmap_verbose_log: false
   golden_token_heatmap_verbose_max_samples: 2
+  # Declared so Hydra accepts overrides (dllm prob investigation --config-file).
+  prob_trajectory_dump:
+    enabled: false
+    max_samples: 5
   include_views: [full, eos]
   use_generalized_sequence_probability: true
   logit_alignment: causal
