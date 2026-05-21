@@ -40,6 +40,10 @@ trajectory_config:
   prob_trajectory_dump:
     enabled: false
     max_samples: 5
+  # When true, packed CE / probability metrics ignore chat suffix labels from the first
+  # <|eot_id|>, redacted header, or <|endoftext|> token in the generation region.
+  target_sequence:
+    exclude_suffix_template_tokens: false
   include_views: [full, eos]
   use_generalized_sequence_probability: true
   logit_alignment: causal

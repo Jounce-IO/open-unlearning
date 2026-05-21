@@ -73,6 +73,10 @@ from evals.metrics.prob_trajectory_dump import (
     ProbTrajectoryDumpCollector,
     parse_prob_trajectory_dump_config,
 )
+from evals.metrics.target_sequence import (
+    maybe_mask_suffix_template_labels,
+    parse_exclude_suffix_template_tokens,
+)
 from evals.gpu_phase_logger import set_phase as gpu_set_phase
 from evals.guardrails import (
     load_icul_pools,
@@ -784,6 +788,7 @@ def _trajectory_build_sample_batch_template(
     prompt_only_input_ids: bool,
     tokenizer: Any,
     ignore_index: int = IGNORE_INDEX,
+    exclude_suffix_template_tokens: bool = False,
 ) -> tuple[Dict[str, Any], str, str]:
     """One-sample batch_template for trajectory logit metrics; ground_truth_str for ROUGE; idx_str."""
     idx_raw = indices[sample_idx]
@@ -808,6 +813,12 @@ def _trajectory_build_sample_batch_template(
         assert generated_labels.shape[0] == L, (
             "batch_template invariant: generated_labels length must equal L; "
             "got %s, L=%s" % (generated_labels.shape[0], L)
+        )
+        generated_labels = maybe_mask_suffix_template_labels(
+            generated_labels,
+            tokenizer,
+            exclude_suffix_template_tokens=exclude_suffix_template_tokens,
+            ignore_index=ignore_index,
         )
     generated_input_ids = sample_input_ids[_gs : _gs + L]
     if generated_input_ids.shape[0] < L:
@@ -4779,6 +4790,13 @@ def trajectory_metrics(model, **kwargs):
         if not include_views:
             include_views = ["full", "eos"]
 
+        _exclude_suffix_template = parse_exclude_suffix_template_tokens(trajectory_config)
+        if _exclude_suffix_template:
+            logger.info(
+                "target_sequence.exclude_suffix_template_tokens=true: "
+                "probability labels mask chat suffix from first <|eot_id|> / header / EOS token"
+            )
+
         _prob_dump_enabled, _prob_dump_max = parse_prob_trajectory_dump_config(trajectory_config)
         _prob_dump_collector: Optional[ProbTrajectoryDumpCollector] = None
         if _prob_dump_enabled and rank == 0:
@@ -5237,6 +5255,12 @@ def trajectory_metrics(model, **kwargs):
                             "packed probability invariant: generated label length must equal L; "
                             "got %s, L=%s" % (gl.shape[0], L)
                         )
+                        gl = maybe_mask_suffix_template_labels(
+                            gl,
+                            tokenizer,
+                            exclude_suffix_template_tokens=_exclude_suffix_template,
+                            ignore_index=IGNORE_INDEX,
+                        )
                         _gen_labels_for_packed_prob.append(gl)
 
                 exact_mem_post_loop_metrics = _trajectory_exact_mem_post_loop_metric_names(
@@ -5306,6 +5330,7 @@ def trajectory_metrics(model, **kwargs):
                         L,
                         _prompt_only_input_ids,
                         tokenizer,
+                        exclude_suffix_template_tokens=_exclude_suffix_template,
                     )
                     cpu_metric_futures_this_sample: list[Any] = []
 
