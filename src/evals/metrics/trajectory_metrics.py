@@ -13,6 +13,7 @@ import gc
 import logging
 import os
 import time
+from pathlib import Path
 from collections import defaultdict
 from concurrent.futures import ProcessPoolExecutor
 
@@ -67,6 +68,10 @@ from evals.metrics.mia.utils import get_attacker, MIAStreamingAccumulator
 from evals.metrics.golden_token_prob_heatmap import (
     GoldenTokenHeatmapAccumulator,
     log_golden_token_heatmap_sample_diagnostics,
+)
+from evals.metrics.prob_trajectory_dump import (
+    ProbTrajectoryDumpCollector,
+    parse_prob_trajectory_dump_config,
 )
 from evals.gpu_phase_logger import set_phase as gpu_set_phase
 from evals.guardrails import (
@@ -4888,6 +4893,21 @@ def trajectory_metrics(model, **kwargs):
         if not include_views:
             include_views = ["full", "eos"]
 
+        _prob_dump_enabled, _prob_dump_max = parse_prob_trajectory_dump_config(trajectory_config)
+        _prob_dump_collector: Optional[ProbTrajectoryDumpCollector] = None
+        if _prob_dump_enabled and rank == 0:
+            _prob_dump_collector = ProbTrajectoryDumpCollector(
+                max_samples=_prob_dump_max,
+                trajectory_names=trajectory_names,
+                include_views=include_views,
+                logit_alignment=str(trajectory_config.get("logit_alignment", "causal")),
+            )
+            logger.info(
+                "prob_trajectory_dump enabled: max_samples=%s views=%s",
+                _prob_dump_max,
+                include_views,
+            )
+
         # Storage for aggregation: per view, then traj_name -> step -> metric_name -> list of values
         step_values_by_view = {
             v: {traj_name: {} for traj_name in trajectory_names}
@@ -6200,6 +6220,85 @@ def trajectory_metrics(model, **kwargs):
                                             "probability"
                                         ].append(pr["prob"])
 
+                if (
+                    _prob_dump_collector is not None
+                    and _gen_labels_for_packed_prob
+                    and len(_prob_dump_collector) < _prob_dump_max
+                ):
+                    for _pd_b in range(B):
+                        if len(_prob_dump_collector) >= _prob_dump_max:
+                            break
+                        if lh_batch is not None:
+                            _pd_traj = {
+                                "lh": lh_batch,
+                                "b": _pd_b,
+                                "F": F[_pd_b],
+                                "S": S,
+                                "L": L,
+                            }
+                        else:
+                            assert R is not None
+                            _pd_traj = {"R": R[_pd_b], "F": F[_pd_b], "S": S, "L": L}
+                        _pd_idx_raw = indices[_pd_b]
+                        _pd_idx_str = str(
+                            _pd_idx_raw.item()
+                            if torch.is_tensor(_pd_idx_raw)
+                            else _pd_idx_raw
+                        )
+                        _pd_pl = prompt_lens[_pd_b]
+                        _pd_pl_i = (
+                            int(_pd_pl.item())
+                            if torch.is_tensor(_pd_pl)
+                            else int(_pd_pl)
+                        )
+                        _pd_prompt_text = ""
+                        _pd_answer_text = ""
+                        if tokenizer is not None:
+                            _pd_prompt_text = tokenizer.decode(
+                                input_ids[_pd_b, :_pd_pl_i].tolist(),
+                                skip_special_tokens=True,
+                            )
+                        _, _pd_gt, _ = _trajectory_build_sample_batch_template(
+                            _pd_b,
+                            batch,
+                            labels,
+                            input_ids,
+                            indices,
+                            prompt_starts,
+                            prompt_lens,
+                            L,
+                            _prompt_only_input_ids,
+                            tokenizer,
+                        )
+                        _pd_answer_text = _pd_gt
+                        _pd_F = F[_pd_b].reshape(-1)[:L].contiguous()
+                        _pd_committed: Optional[torch.Tensor] = None
+                        if sequences is not None and sequences.dim() >= 2:
+                            _pd_seq = sequences[_pd_b]
+                            _pd_cg = _pd_seq[_pd_pl_i : _pd_pl_i + L].detach().long()
+                            if _pd_cg.numel() >= L:
+                                _pd_committed = _pd_cg[:L].contiguous()
+
+                        def _pd_get_logits_vl(
+                            traj_name: str, step: int, *, _b: int = _pd_b, _traj: Dict[str, Any] = _pd_traj
+                        ) -> torch.Tensor:
+                            return _get_logits_at_step(_traj, traj_name, step)
+
+                        _prob_dump_collector.add_from_batch(
+                            batch_pos=_pd_b,
+                            idx_str=_pd_idx_str,
+                            sample_traj=_pd_traj,
+                            gen_labels=_gen_labels_for_packed_prob[_pd_b],
+                            steps_to_use=steps_to_use,
+                            effective_length=int(effective_lengths[_pd_b]),
+                            fixation_F=_pd_F,
+                            committed_ids=_pd_committed,
+                            step_values_by_view=step_values_by_view,
+                            prompt_text=_pd_prompt_text,
+                            answer_text=_pd_answer_text,
+                            get_logits_vl_for_step=_pd_get_logits_vl,
+                        )
+
                 gpu_set_phase("trajectory_batch_end", batch_idx=batch_idx)
                 _batch_duration = time.perf_counter() - _batch_t0
                 _post_sampler_sec = _batch_duration - _sampler_sec
@@ -7234,6 +7333,30 @@ def trajectory_metrics(model, **kwargs):
                         feature_applicability[str(k)] = {"applicability_status": str(v)}
                     if feature_applicability:
                         result["feature_applicability"] = feature_applicability
+        if _prob_dump_collector is not None and len(_prob_dump_collector) > 0:
+            _eval_cfg_dump = kwargs.get("eval_cfg")
+            _dump_out_dir: Optional[str] = None
+            if _eval_cfg_dump is not None:
+                if callable(getattr(_eval_cfg_dump, "get", None)):
+                    _dump_out_dir = _eval_cfg_dump.get("output_dir")
+                else:
+                    _dump_out_dir = getattr(_eval_cfg_dump, "output_dir", None)
+            if _dump_out_dir:
+                _manifest_extra: Dict[str, Any] = {
+                    "trajectory_step_metadata": trajectory_step_metadata,
+                }
+                if hasattr(model, "config") and hasattr(model.config, "_name_or_path"):
+                    _manifest_extra["model_name"] = model.config._name_or_path
+                _prob_dump_collector.write(
+                    Path(str(_dump_out_dir)),
+                    manifest_extra=_manifest_extra,
+                )
+            else:
+                logger.warning(
+                    "prob_trajectory_dump: eval_cfg.output_dir missing; skip writing %s samples",
+                    len(_prob_dump_collector),
+                )
+
         _tp_done = kwargs.get("trajectory_pass_id")
         if _tp_done:
             from evals.metrics.trajectory_pass_envelope import build_pass_envelope

@@ -1,6 +1,8 @@
 # @package eval.tofu_trajectory.metrics.trajectory_pass_retain_guided_native
 # Single inference pass: retain split, guided_native (Prob / extraction / Truth Ratio).
+# privleak (+ mia_min_k pre_compute) so retain_reference_mode publishes reference keys for bundles.
 defaults:
+  - .@pre_compute.mia_min_k: mia_min_k
   - ../../collator@collators: DataCollatorForSupervisedDatasetwithIndex
 
 handler: trajectory_metrics
@@ -21,6 +23,12 @@ metrics:
         handler: probability
         access_key: wrong
         labels_field: labels_wrong
+  privleak:
+    ref_value: 0.5
+    pre_compute:
+      mia_min_k:
+        access_key: forget
+        k: 0.4
 trajectory_config:
   evaluation_mode: guided_native
   logits_source: sampler
@@ -42,6 +50,7 @@ metric_display_names:
   - trajectory_retain_Q_A_Prob
   - trajectory_retain_extraction_strength
   - trajectory_retain_Truth_Ratio
+  - trajectory_retain_privleak
 datasets:
   TOFU_QA_retain_eval:
     access_key: retain
