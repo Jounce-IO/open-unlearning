@@ -56,10 +56,10 @@ def derive_position_arrays(
     *,
     logit_alignment: str,
     ignore_index: int = IGNORE_INDEX,
-) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
-    """Golden prob, argmax id, and gold id per generation position (length L).
+) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
+    """Golden prob, argmax prob, argmax id, and gold id per generation position (length L).
 
-    Invalid positions use ``nan`` for golden_probs and ``-1`` for ids.
+    Invalid positions use ``nan`` for probs and ``-1`` for ids.
     """
     if logits_vl.dim() != 2:
         raise ValueError(f"logits_vl must be [V, L], got {tuple(logits_vl.shape)}")
@@ -76,20 +76,23 @@ def derive_position_arrays(
     slf = logits_vl.detach().float()
     V = int(slf.shape[0])
     golden = np.full((L,), np.nan, dtype=np.float64)
+    argmax_probs = np.full((L,), np.nan, dtype=np.float64)
     argmax = np.full((L,), -1, dtype=np.int64)
     gold_ids = np.full((L,), -1, dtype=np.int64)
     for ell in range(L):
-        y = int(lab[ell].item())
-        if y == ignore_index or y < 0 or y >= V:
-            continue
         li = _logit_column_for_alignment(ell, logit_alignment=logit_alignment)
         if li >= L:
             continue
         dist = torch.softmax(slf[:, li], dim=0)
+        ai = int(torch.argmax(dist).item())
+        argmax[ell] = ai
+        argmax_probs[ell] = float(dist[ai].item())
+        y = int(lab[ell].item())
+        if y == ignore_index or y < 0 or y >= V:
+            continue
         golden[ell] = float(dist[y].item())
-        argmax[ell] = int(torch.argmax(dist).item())
         gold_ids[ell] = y
-    return golden, argmax, gold_ids
+    return golden, argmax_probs, argmax, gold_ids
 
 
 def geom_mean_from_golden_probs(golden_probs: np.ndarray) -> float:
@@ -233,7 +236,7 @@ class ProbTrajectoryDumpCollector:
                         Ls = min(int(effective_length), L)
                         gl = gl[:Ls]
                         lv = lv[:, :Ls]
-                    golden, argmax, gold_ids = derive_position_arrays(
+                    golden, argmax_probs, argmax, gold_ids = derive_position_arrays(
                         lv,
                         gl,
                         logit_alignment=self.logit_alignment,
@@ -262,6 +265,7 @@ class ProbTrajectoryDumpCollector:
                         {
                             "step": int(step),
                             "golden_probs": golden,
+                            "argmax_probs": argmax_probs,
                             "argmax_ids": argmax,
                             "gold_ids": gold_ids,
                             "prob_packed_shifted": prob_packed,
@@ -332,9 +336,13 @@ class ProbTrajectoryDumpCollector:
                         golden_stack = np.stack(
                             [s["golden_probs"] for s in steps_list], axis=0
                         )
+                        argmax_prob_stack = np.stack(
+                            [s["argmax_probs"] for s in steps_list], axis=0
+                        )
                         argmax_stack = np.stack([s["argmax_ids"] for s in steps_list], axis=0)
                         gold_stack = np.stack([s["gold_ids"] for s in steps_list], axis=0)
                         flat[f"{prefix}__golden_probs"] = golden_stack
+                        flat[f"{prefix}__argmax_probs"] = argmax_prob_stack
                         flat[f"{prefix}__argmax_ids"] = argmax_stack
                         flat[f"{prefix}__gold_ids"] = gold_stack
                         flat[f"{prefix}__prob_packed_shifted"] = np.array(

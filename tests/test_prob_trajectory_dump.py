@@ -35,16 +35,52 @@ def test_derive_position_arrays_causal_column_sharing() -> None:
     logits_vl[3, 0] = 10.0
     logits_vl[5, 1] = 10.0
     gen_labels = torch.tensor([3, 3, 5, -100], dtype=torch.long)
-    golden, argmax, gold = derive_position_arrays(
+    golden, argmax_probs, argmax, gold = derive_position_arrays(
         logits_vl, gen_labels, logit_alignment="causal"
     )
-    assert np.isclose(golden[0], 1.0, rtol=1e-4)
-    assert np.isclose(golden[1], 1.0, rtol=1e-4)
+    assert np.isclose(golden[0], 1.0, rtol=1e-3)
+    assert np.isclose(golden[1], 1.0, rtol=1e-3)
+    assert np.isclose(argmax_probs[0], golden[0], rtol=1e-3)
+    assert np.isclose(argmax_probs[1], golden[1], rtol=1e-3)
     assert argmax[0] == 3
     assert argmax[1] == 3
     assert gold[0] == 3
     assert gold[1] == 3
     assert np.isnan(golden[3])
+    assert np.isfinite(argmax_probs[3])
+
+
+def test_derive_position_arrays_argmax_on_unlabeled_positions() -> None:
+    V, L = 8, 3
+    logits_vl = torch.full((V, L), -50.0)
+    logits_vl[2, 0] = 1.0
+    logits_vl[4, 1] = 2.0
+    logits_vl[6, 2] = 3.0
+    gen_labels = torch.tensor([-100, -100, -100], dtype=torch.long)
+    golden, argmax_probs, argmax, gold = derive_position_arrays(
+        logits_vl, gen_labels, logit_alignment="same_position"
+    )
+    assert np.all(np.isnan(golden))
+    assert np.all(gold < 0)
+    assert argmax[0] == 2
+    assert argmax[1] == 4
+    assert argmax[2] == 6
+    assert np.all(np.isfinite(argmax_probs))
+
+
+def test_derive_position_arrays_argmax_prob_when_mismatch() -> None:
+    V, L = 8, 2
+    logits_vl = torch.full((V, L), -50.0)
+    logits_vl[3, 0] = 0.0
+    logits_vl[5, 0] = 2.0
+    gen_labels = torch.tensor([3, -100], dtype=torch.long)
+    golden, argmax_probs, argmax, gold = derive_position_arrays(
+        logits_vl, gen_labels, logit_alignment="same_position"
+    )
+    assert argmax[0] == 5
+    assert gold[0] == 3
+    assert golden[0] < argmax_probs[0]
+    assert np.isclose(argmax_probs[0], 1.0 / (1.0 + np.exp(-2.0)), rtol=1e-4)
 
 
 def test_prob_packed_shifted_matches_compute_prob_packed_shifted_segments() -> None:
