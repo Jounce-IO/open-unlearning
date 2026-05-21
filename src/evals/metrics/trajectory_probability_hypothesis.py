@@ -76,6 +76,32 @@ def _sample_traj_state(
     raise ValueError("probability_hypothesis_investigation: need lh_batch or R_batch")
 
 
+def _coerce_batch_int_list(values: Any, batch_size: int, *, name: str) -> List[int]:
+    """Normalize per-sample int metadata to length ``batch_size``."""
+    if values is None:
+        raise ValueError(f"{name} is required for probability_hypothesis_investigation")
+    if isinstance(values, torch.Tensor):
+        flat = values.detach().cpu().flatten().tolist()
+    elif isinstance(values, (list, tuple)):
+        flat = list(values)
+    else:
+        flat = [values]
+    out: List[int] = []
+    for x in flat:
+        if torch.is_tensor(x):
+            out.append(int(x.item()))
+        else:
+            out.append(int(x))
+    if len(out) == 1 and batch_size > 1:
+        out = out * batch_size
+    if len(out) != batch_size:
+        raise ValueError(
+            f"{name} length {len(out)} != batch size {batch_size} "
+            f"(got {out!r})"
+        )
+    return out
+
+
 def _logits_device(
     lh_batch: Optional[List[torch.Tensor]],
     R_batch: Optional[torch.Tensor],
@@ -202,10 +228,9 @@ class TrajectoryProbabilityHypothesisLogger:
 
         snap_stack = _stack_sequence_snapshots(seq_snapshots_batch)
         prop_stack = _stack_sequence_snapshots(prop_snapshots_batch)
-        pl_list = [
-            int(prompt_lens[b].item()) if torch.is_tensor(prompt_lens[b]) else int(prompt_lens[b])
-            for b in range(B)
-        ]
+        pl_list = _coerce_batch_int_list(prompt_lens, B, name="prompt_lens")
+        ps_list = _coerce_batch_int_list(prompt_starts, B, name="prompt_starts")
+        eff_list = _coerce_batch_int_list(effective_lengths, B, name="effective_lengths")
         logit_alignment = str(tc.get("logit_alignment", "causal"))
         rouge_sc = rouge_scorer.RougeScorer(["rouge1", "rougeL"], use_stemmer=True)
         device = _logits_device(lh_batch, R_batch)
@@ -239,29 +264,41 @@ class TrajectoryProbabilityHypothesisLogger:
                 tokenizer,
             )
             gl = gen_labels_per_sample[b]
-            L_eff = int(effective_lengths[b])
+            L_eff = eff_list[b]
             pl = pl_list[b]
-            n_gen = min(L_eff, int(L) - pl) if pl < L else 0
+            ps = ps_list[b]
+            n_gen = min(L_eff, int(L))
 
-            initial_row = input_ids[b, :L].detach().long().cpu().tolist()
-            initial_gen = initial_row[pl : pl + n_gen] if n_gen > 0 else []
+            row_end = min(int(input_ids.shape[1]), ps + L)
+            initial_row = input_ids[b, ps:row_end].detach().long().cpu().tolist()
+            if len(initial_row) < L:
+                initial_row = initial_row + [0] * (L - len(initial_row))
+            initial_row = initial_row[:L]
+            initial_gen = initial_row[:n_gen] if n_gen > 0 else []
 
             for step in steps_to_use:
                 step_i = int(step)
                 pre_snap_idx = step_i - 1
                 post_snap_idx = min(step_i, snap_stack.shape[0] - 1)
+                snap_end = min(int(snap_stack.shape[2]), ps + L)
                 pre_row = (
-                    snap_stack[pre_snap_idx, b, :L].detach().long().cpu().tolist()
+                    snap_stack[pre_snap_idx, b, ps:snap_end].detach().long().cpu().tolist()
                     if pre_snap_idx >= 0
                     else initial_row
                 )
-                post_row = snap_stack[post_snap_idx, b, :L].detach().long().cpu().tolist()
-                pre_gen = pre_row[pl : pl + n_gen] if n_gen > 0 else []
-                post_gen = post_row[pl : pl + n_gen] if n_gen > 0 else []
-                gold_gen = gl[pl : pl + n_gen].detach().long().cpu().tolist()
+                if len(pre_row) < L:
+                    pre_row = pre_row + [0] * (L - len(pre_row))
+                pre_row = pre_row[:L]
+                post_row = snap_stack[post_snap_idx, b, ps:snap_end].detach().long().cpu().tolist()
+                if len(post_row) < L:
+                    post_row = post_row + [0] * (L - len(post_row))
+                post_row = post_row[:L]
+                pre_gen = pre_row[:n_gen] if n_gen > 0 else []
+                post_gen = post_row[:n_gen] if n_gen > 0 else []
+                gold_gen = gl[ps : ps + n_gen].detach().long().cpu().tolist()
 
                 F_b = F[b]
-                fixation_gen = F_b[pl : pl + n_gen].detach().long().cpu().tolist()
+                fixation_gen = F_b[:n_gen].detach().long().cpu().tolist()
 
                 for traj_name in trajectory_names:
                     if traj_name not in inv_trajs:
@@ -299,7 +336,7 @@ class TrajectoryProbabilityHypothesisLogger:
                             prop_stack=prop_stack,
                             pl_list=pl_list,
                             F=F,
-                            effective_lengths_list=list(effective_lengths),
+                            effective_lengths_list=eff_list,
                             B=B,
                             model=model,
                             tokenizer=tokenizer,
@@ -433,7 +470,7 @@ class TrajectoryProbabilityHypothesisLogger:
             n_dec_list,
             mask_id,
             view,
-            [L_eff],
+            eff_list,
             kw["tokenizer"],
             "canvas_plus_step_x0",
         )

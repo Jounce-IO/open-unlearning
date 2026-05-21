@@ -6,8 +6,6 @@ import json
 import sys
 from pathlib import Path
 from types import SimpleNamespace
-from unittest.mock import MagicMock
-
 import torch
 
 OU_ROOT = Path(__file__).resolve().parents[1]
@@ -36,6 +34,60 @@ def test_dense_r_and_list_history_logits_agree_at_steps() -> None:
                 a = _get_logits_at_step(st_lh, traj, step)
                 r = _get_logits_at_step(st_r, traj, step)
                 assert torch.allclose(a, r, atol=1e-5, rtol=1e-4)
+
+
+def test_log_batch_dense_r_prompt_lens_tensor(tmp_path: Path) -> None:
+    """prompt_lens as [B] tensor (collator path) must not IndexError."""
+    B, V, L, S = 2, 16, 4, 3
+    pl = 1
+    T = pl + L + 2
+    R = torch.randn(B, V, L, S)
+    F = torch.zeros(B, L, dtype=torch.long)
+    snaps = [torch.randint(1, 10, (B, T), dtype=torch.long) for _ in range(S)]
+    props = [torch.randint(1, 10, (B, T), dtype=torch.long) for _ in range(S)]
+    labels = torch.full((B, T), -100, dtype=torch.long)
+    labels[:, pl : pl + L] = torch.tensor([5, 6, 7, 8])
+    input_ids = labels.clone()
+    input_ids[input_ids == -100] = 0
+    from types import SimpleNamespace
+
+    tok = SimpleNamespace(mask_token_id=0, eos_token_id=1)
+    tok.decode = lambda ids, **_: "x"
+    logger = TrajectoryProbabilityHypothesisLogger(str(tmp_path), rank=0)
+    logger.log_batch(
+        batch_idx=0,
+        model=None,
+        tokenizer=tok,
+        trajectory_config={
+            "probability_hypothesis_investigation_trajs": ["steps"],
+            "probability_hypothesis_investigation_views": ["full"],
+        },
+        kwargs={},
+        steps_to_use=[0],
+        trajectory_names=["steps"],
+        include_views=["full"],
+        lh_batch=None,
+        R_batch=R,
+        F=F,
+        S=S,
+        L=L,
+        B=B,
+        seq_snapshots_batch=snaps,
+        prop_snapshots_batch=props,
+        labels=labels,
+        input_ids=input_ids,
+        batch={},
+        indices=torch.tensor([10, 11]),
+        prompt_starts=torch.tensor([pl, pl]),
+        prompt_lens=torch.tensor([pl, pl]),
+        effective_lengths=torch.tensor([L, L]),
+        prompt_only_input_ids=True,
+        gen_labels_per_sample=[labels[0], labels[1]],
+        evaluation_mode="guided_native",
+    )
+    text = logger.path.read_text()
+    assert "batch_skip" not in text
+    assert text.count('"record_type": "step_sample"') == 2
 
 
 def test_log_batch_dense_r_batch_size_two(tmp_path: Path) -> None:
